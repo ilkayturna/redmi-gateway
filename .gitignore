@@ -1,0 +1,16 @@
+﻿*.zip
+*.tgz
+*.tar
+*.log
+*.png
+*.tmp
+*.msi
+clean_usb_driver/
+clockworkmod/
+miflash_unlock/
+usb_driver/
+research_firehose/
+.gradle/
+build/
+.cxx/
+*.apk
