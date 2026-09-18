@@ -150,6 +150,32 @@ struct ContentView: View {
                     .background(Color(UIColor.secondarySystemBackground))
                     .cornerRadius(12)
                     
+                    // Cellular SMS Navigation Card
+                    NavigationLink(destination: MessagesView()) {
+                        HStack {
+                            Image(systemName: "message.fill")
+                                .foregroundColor(.white)
+                            Text("Cellular SMS Messages")
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundColor(.white)
+                            Spacer()
+                            if !connection.smsMessages.isEmpty {
+                                Text("\(connection.smsMessages.count)")
+                                    .font(.system(size: 12, weight: .bold))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 2)
+                                    .background(Color.white.opacity(0.3))
+                                    .cornerRadius(10)
+                                    .foregroundColor(.white)
+                            }
+                            Image(systemName: "chevron.right")
+                                .foregroundColor(.white.opacity(0.7))
+                        }
+                        .padding()
+                        .background(Color.blue)
+                        .cornerRadius(12)
+                    }
+                    
                     // Event Logs Card
                     VStack(alignment: .leading, spacing: 8) {
                         Text("EVENT LOG")

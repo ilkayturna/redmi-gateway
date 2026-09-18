@@ -10,12 +10,21 @@ public enum ConnectionState: String {
     case failed = "FAILED"
 }
 
+public struct SmsMessageItem: Identifiable, Equatable {
+    public let id = UUID()
+    public let senderOrRecipient: String
+    public let body: String
+    public let isIncoming: Bool
+    public let timestamp: Date
+}
+
 @MainActor
 public class GatewayConnection: ObservableObject {
     public static let shared = GatewayConnection()
     
     @Published public var state: ConnectionState = .disconnected
     @Published public var currentCall: GSMCall? = nil
+    @Published public var smsMessages: [SmsMessageItem] = []
     @Published public var logs: [String] = []
     
     // Persistence keys
@@ -240,6 +249,23 @@ public class GatewayConnection: ObservableObject {
                 self.log("Gateway Error: \(err.message)")
             }
             
+        case "sms_received":
+            if let sms = try? JSONDecoder().decode(SmsReceivedMessage.self, from: data) {
+                let date = Date(timeIntervalSince1970: Double(sms.timestamp) / 1000.0)
+                let item = SmsMessageItem(senderOrRecipient: sms.sender, body: sms.message, isIncoming: true, timestamp: date)
+                self.smsMessages.append(item)
+                self.log("SMS received from \(sms.sender): \(sms.message)")
+            }
+            
+        case "sms_send_result":
+            if let res = try? JSONDecoder().decode(SmsSendResultMessage.self, from: data) {
+                if res.success {
+                    self.log("SMS to \(res.recipient) sent successfully")
+                } else {
+                    self.log("SMS to \(res.recipient) failed: \(res.error ?? "Unknown error")")
+                }
+            }
+            
         default:
             self.log("Unhandled message type: \(type)")
         }
@@ -318,6 +344,14 @@ public class GatewayConnection: ObservableObject {
         log("Sending DIAL for number: \(number)")
         let payload = DialPayload(number: number)
         sendPayload(payload)
+    }
+    
+    public func sendSms(recipient: String, message: String) {
+        log("Sending SMS to \(recipient): \(message)")
+        let payload = SendSmsPayload(recipient: recipient, message: message)
+        sendPayload(payload)
+        let item = SmsMessageItem(senderOrRecipient: recipient, body: message, isIncoming: false, timestamp: Date())
+        self.smsMessages.append(item)
     }
     
     private func sendPayload<T: Encodable>(_ payload: T) {

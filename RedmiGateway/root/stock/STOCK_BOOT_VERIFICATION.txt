@@ -1,0 +1,12 @@
+STOCK BOOT.IMG VERIFICATION METADATA
+===================================
+Source ROM: miui_GINKGOGlobal_V12.5.2.0.RCOMIXM_75abe1782e_11.0.zip
+Device: Xiaomi Redmi Note 8 (ginkgo / M1908C3JG)
+MIUI Version: V12.5.2.0.RCOMIXM (Android 11, RKQ1.201004.002)
+Kernel Base: Qualcomm Snapdragon 665 (SM6125)
+File: boot.img
+Raw Byte Size: 67108864
+SHA256: f38bf0f2ddf29d498bd84e0875a2a9c9db9e5a8c0542f71dc9cd3cca2b9934b9
+MD5: 7e75425f0ba32e7eec32498980d2538a
+CRC32: 0x853abd83
+Status: 100% Bit-for-bit official verified stock kernel

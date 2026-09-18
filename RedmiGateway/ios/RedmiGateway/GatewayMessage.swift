@@ -48,6 +48,20 @@ public struct StateResponseMessage: Codable {
     public let call: StateCallInfo?
 }
 
+public struct SmsReceivedMessage: Codable {
+    public let type: String
+    public let sender: String
+    public let message: String
+    public let timestamp: Int64
+}
+
+public struct SmsSendResultMessage: Codable {
+    public let type: String
+    public let recipient: String
+    public let success: Bool
+    public let error: String?
+}
+
 // MARK: - Outgoing Messages (From iPhone Client to Redmi Gateway)
 
 public struct AuthPayload: Codable {
@@ -98,6 +112,17 @@ public struct DialPayload: Codable {
     
     public init(number: String) {
         self.number = number
+    }
+}
+
+public struct SendSmsPayload: Codable {
+    public let type: String = "send_sms"
+    public let recipient: String
+    public let message: String
+    
+    public init(recipient: String, message: String) {
+        self.recipient = recipient
+        self.message = message
     }
 }
 

@@ -5,6 +5,8 @@ import android.util.Log
 import com.ilkay.redmigateway.RedmiGatewayApp
 import com.ilkay.redmigateway.telecom.CallManager
 import com.ilkay.redmigateway.audio.AudioProbeManager
+import com.ilkay.redmigateway.sms.SmsReceiver
+import com.ilkay.redmigateway.sms.SmsManagerHelper
 import org.java_websocket.WebSocket
 import org.java_websocket.handshake.ClientHandshake
 import org.java_websocket.server.WebSocketServer
@@ -39,6 +41,7 @@ class GatewayWebSocketServer(
     override fun onStart() {
         Log.i(TAG, "WebSocket server started on port $port")
         CallManager.addListener(this)
+        SmsReceiver.webSocketServer = this
         CallManager.log("WebSocket server listening on 0.0.0.0:$port")
     }
 
@@ -116,6 +119,19 @@ class GatewayWebSocketServer(
                     val source = json.optString("source", "ALL")
                     CallManager.log("WebSocket command: PROBE_AUDIO (source=$source)")
                     handleProbeAudio(conn, source)
+                }
+                "send_sms", "sms_send" -> {
+                    val recipient = json.optString("recipient", "")
+                    val smsText = json.optString("message", "")
+                    CallManager.log("WebSocket command: SEND_SMS to $recipient")
+                    val (success, error) = SmsManagerHelper.sendSms(context, recipient, smsText)
+                    val result = JSONObject().apply {
+                        put("type", "sms_send_result")
+                        put("recipient", recipient)
+                        put("success", success)
+                        if (error != null) put("error", error)
+                    }
+                    conn.send(result.toString())
                 }
                 else -> {
                     sendError(conn, "Unknown command type: $type")
@@ -268,9 +284,33 @@ class GatewayWebSocketServer(
         }
     }
 
+    fun broadcastSmsReceived(sender: String, message: String, timestamp: Long) {
+        if (authenticatedClients.isEmpty()) return
+
+        val event = JSONObject().apply {
+            put("type", "sms_received")
+            put("sender", sender)
+            put("message", message)
+            put("timestamp", timestamp)
+        }
+        val payload = event.toString()
+        Log.d(TAG, "Broadcasting SMS received event to ${authenticatedClients.size} client(s): $payload")
+
+        for (client in authenticatedClients) {
+            try {
+                if (client.isOpen) {
+                    client.send(payload)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to send SMS event to client", e)
+            }
+        }
+    }
+
     fun stopServer() {
         try {
             CallManager.removeListener(this)
+            SmsReceiver.webSocketServer = null
             authenticatedClients.clear()
             stop(1000)
             serverListener?.onClientCountChanged(0)
