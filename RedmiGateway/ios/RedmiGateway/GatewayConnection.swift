@@ -54,6 +54,7 @@ public class GatewayConnection: ObservableObject {
     private var seenSmsIds = Set<Int64>()
     private var pendingSms: [(recipient: String, message: String)] = []
     private var hasAttemptedAutoconnect = false
+    private let discovery = GatewayDiscovery()
     
     public var onCallEvent: ((CallEventMessage) -> Void)?
     
@@ -72,6 +73,18 @@ public class GatewayConnection: ObservableObject {
         if let savedToken = defaults.string(forKey: kPairingToken) {
             self.pairingToken = savedToken
         }
+
+        discovery.onAddress = { [weak self] address in
+            Task { @MainActor [weak self] in
+                guard let self = self,
+                      !self.isUserDisconnected,
+                      !self.pairingToken.isEmpty,
+                      self.state != .authenticated,
+                      address != self.currentHost else { return }
+                self.log("Redmi found at a new local address")
+                self.connect(host: address, port: self.currentPort, token: self.pairingToken)
+            }
+        }
         
         setupLifecycleObservers()
     }
@@ -86,6 +99,7 @@ public class GatewayConnection: ObservableObject {
                 guard let self = self else { return }
                 if !self.isUserDisconnected && (self.state == .disconnected || self.state == .failed) {
                     self.log("App foregrounded: reconnecting to gateway...")
+                    self.discovery.start()
                     self.scheduleReconnect(delaySeconds: 1.0)
                 }
             }
@@ -116,7 +130,13 @@ public class GatewayConnection: ObservableObject {
     public func connectSavedConfiguration() {
         guard !hasAttemptedAutoconnect else { return }
         hasAttemptedAutoconnect = true
-        guard !currentHost.isEmpty, !pairingToken.isEmpty else { return }
+        guard !pairingToken.isEmpty else { return }
+        if currentHost.isEmpty {
+            isUserDisconnected = false
+            state = .connecting
+            discovery.start()
+            return
+        }
         connect(host: currentHost, port: currentPort, token: pairingToken)
     }
     
@@ -126,6 +146,7 @@ public class GatewayConnection: ObservableObject {
         
         self.isUserDisconnected = false
         saveConfiguration(host: host, port: port, token: token)
+        discovery.start()
         
         self.state = .connecting
         log("Connecting to ws://\(host):\(port)...")
@@ -148,6 +169,7 @@ public class GatewayConnection: ObservableObject {
     
     public func disconnect() {
         isUserDisconnected = true
+        discovery.stop()
         cancelReconnect()
         disconnectInternal()
         log("Disconnected by user")
@@ -176,8 +198,12 @@ public class GatewayConnection: ObservableObject {
         log("Scheduling auto-reconnect in \(Int(delay))s (Attempt \(reconnectAttempt + 1))...")
         
         reconnectTimer = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard let self = self, !self.isUserDisconnected else { return }
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch {
+                return
+            }
+            guard let self = self, !Task.isCancelled, !self.isUserDisconnected else { return }
             self.reconnectAttempt += 1
             self.connect(host: self.currentHost, port: self.currentPort, token: self.pairingToken)
         }
@@ -243,6 +269,7 @@ public class GatewayConnection: ObservableObject {
             if let authRes = try? JSONDecoder().decode(AuthResultMessage.self, from: data) {
                 if authRes.success {
                     self.state = .authenticated
+                    self.discovery.stop()
                     self.reconnectAttempt = 0
                     self.log("Authenticated successfully. Syncing state...")
                     requestState()
@@ -419,6 +446,67 @@ public class GatewayConnection: ObservableObject {
                     self?.log("Send error: \(error.localizedDescription)")
                 }
             }
+        }
+    }
+}
+
+/// Resolves the Redmi's current hotspot address when Android assigns a new one.
+private final class GatewayDiscovery: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
+    var onAddress: ((String) -> Void)?
+
+    private let browser = NetServiceBrowser()
+    private var services: [NetService] = []
+    private var isSearching = false
+
+    override init() {
+        super.init()
+        browser.delegate = self
+    }
+
+    func start() {
+        guard !isSearching else { return }
+        isSearching = true
+        browser.searchForServices(ofType: "_redmigateway._tcp.", inDomain: "local.")
+    }
+
+    func stop() {
+        guard isSearching else { return }
+        isSearching = false
+        browser.stop()
+        services.forEach { $0.stop() }
+        services.removeAll()
+    }
+
+    func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
+        guard isSearching, service.name.hasPrefix("Telefon Gecidi") else { return }
+        services.append(service)
+        service.delegate = self
+        service.resolve(withTimeout: 5)
+    }
+
+    func netServiceBrowser(_ browser: NetServiceBrowser, didRemove service: NetService, moreComing: Bool) {
+        services.removeAll { $0.name == service.name }
+    }
+
+    func netServiceDidResolveAddress(_ sender: NetService) {
+        guard isSearching, sender.port == 8787 else { return }
+        for address in sender.addresses ?? [] {
+            guard let host = Self.ipv4Address(from: address) else { continue }
+            onAddress?(host)
+            return
+        }
+    }
+
+    private static func ipv4Address(from address: Data) -> String? {
+        address.withUnsafeBytes { bytes in
+            guard let sockaddrPointer = bytes.baseAddress?.assumingMemoryBound(to: sockaddr.self),
+                  sockaddrPointer.pointee.sa_family == sa_family_t(AF_INET) else { return nil }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let result = getnameinfo(
+                sockaddrPointer, socklen_t(bytes.count),
+                &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST
+            )
+            return result == 0 ? String(cString: host) : nil
         }
     }
 }

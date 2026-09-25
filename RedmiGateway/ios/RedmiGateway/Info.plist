@@ -29,6 +29,10 @@
     <string>Görüşme sesi aktarımı etkinleştirildiğinde mikrofon kullanılır.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Redmi telefonuyla aynı Wi-Fi ağında arama ve SMS bilgilerini eşitlemek için yerel ağ erişimi gerekir.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_redmigateway._tcp</string>
+    </array>
     <key>UILaunchScreen</key>
     <dict/>
     <key>UIRequiredDeviceCapabilities</key>

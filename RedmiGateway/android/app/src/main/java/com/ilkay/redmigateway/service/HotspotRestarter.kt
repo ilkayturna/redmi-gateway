@@ -8,15 +8,14 @@ import android.util.Log
 import java.lang.reflect.Proxy
 import java.util.concurrent.Executor
 
-/** Restores the saved Wi-Fi tether after MIUI turns it off at boot. */
+/** Restores the saved Wi-Fi tether after Android turns it off at boot. */
 internal object HotspotRestarter {
     private const val TAG = "HotspotRestarter"
 
     fun startIfNeeded(context: Context) {
-        if (Build.VERSION.SDK_INT != Build.VERSION_CODES.R) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         if (!Settings.System.canWrite(context)) {
-            Log.w(TAG, "Modify system settings permission is not granted")
-            return
+            Log.w(TAG, "Modify system settings permission is not granted; trying tethering permission")
         }
 
         try {

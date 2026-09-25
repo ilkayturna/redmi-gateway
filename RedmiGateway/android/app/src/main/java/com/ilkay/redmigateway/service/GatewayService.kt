@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -37,6 +39,9 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     private var webSocketServer: GatewayWebSocketServer? = null
     private var webPageServer: GatewayWebPageServer? = null
     private val handler = Handler(Looper.getMainLooper())
+    private val restoreHotspot = Runnable { if (isRunning) HotspotRestarter.startIfNeeded(this) }
+    private val advertiseGateway = Runnable { if (isRunning) registerGatewayService() }
+    private var nsdRegistration: NsdManager.RegistrationListener? = null
 
     inner class LocalBinder : Binder() {
         fun getService(): GatewayService = this@GatewayService
@@ -59,7 +64,12 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
         when (action) {
             ACTION_START -> {
                 startGateway()
-                handler.postDelayed({ HotspotRestarter.startIfNeeded(this) }, 10_000L)
+                if (isRunning) {
+                    handler.removeCallbacks(restoreHotspot)
+                    handler.removeCallbacks(advertiseGateway)
+                    handler.postDelayed(restoreHotspot, 10_000L)
+                    handler.postDelayed(advertiseGateway, 20_000L)
+                }
             }
             ACTION_STOP -> stopGateway()
         }
@@ -102,6 +112,16 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
 
     private fun stopGateway() {
         Log.i(TAG, "Stopping Gateway Service...")
+        handler.removeCallbacks(restoreHotspot)
+        handler.removeCallbacks(advertiseGateway)
+        nsdRegistration?.let { registration ->
+            try {
+                (getSystemService(Context.NSD_SERVICE) as NsdManager).unregisterService(registration)
+            } catch (error: Exception) {
+                Log.w(TAG, "Could not unregister local gateway service", error)
+            }
+        }
+        nsdRegistration = null
         webPageServer?.stop()
         webPageServer = null
         try {
@@ -115,6 +135,39 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
         CallManager.log("Gateway Foreground Service stopped")
+    }
+
+    private fun registerGatewayService() {
+        if (nsdRegistration != null) return
+        val manager = getSystemService(Context.NSD_SERVICE) as NsdManager
+        val service = NsdServiceInfo().apply {
+            serviceName = "Telefon Gecidi"
+            serviceType = "_redmigateway._tcp."
+            port = 8787
+        }
+        val registration = object : NsdManager.RegistrationListener {
+            override fun onServiceRegistered(serviceInfo: NsdServiceInfo) {
+                Log.i(TAG, "Gateway discovery advertised as ${serviceInfo.serviceName}")
+            }
+
+            override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                Log.w(TAG, "Gateway discovery failed: $errorCode")
+                nsdRegistration = null
+            }
+
+            override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit
+
+            override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                Log.w(TAG, "Gateway discovery unregister failed: $errorCode")
+            }
+        }
+        nsdRegistration = registration
+        try {
+            manager.registerService(service, NsdManager.PROTOCOL_DNS_SD, registration)
+        } catch (error: Exception) {
+            nsdRegistration = null
+            Log.w(TAG, "Could not advertise gateway discovery", error)
+        }
     }
 
     private fun createNotificationChannel() {
