@@ -33,8 +33,15 @@ class SmsReceiver : BroadcastReceiver() {
             Log.i(TAG, "SMS received (${fullMessage.length} characters)")
             CallManager.log("SMS received (${fullMessage.length} characters)")
 
+            val messageId = try {
+                SmsStore.get(context).saveIncoming(sender, fullMessage, timestamp)
+            } catch (e: Exception) {
+                Log.e(TAG, "Could not store incoming SMS for reconnect sync", e)
+                -1L
+            }
+
             // Broadcast to connected WebSocket clients (e.g. iOS client)
-            webSocketServer?.broadcastSmsReceived(sender, fullMessage, timestamp)
+            webSocketServer?.broadcastSmsReceived(sender, fullMessage, timestamp, messageId)
 
             // Notify in-app UI if registered
             onSmsReceivedListener?.invoke(sender, fullMessage, timestamp)

@@ -1,53 +1,27 @@
-name: Build iOS RedmiGateway IPA
+name: Build iOS Telefon Gecidi
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [main]
   pull_request:
-    branches: [ master, main ]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
-  build-ipa:
-    name: Build iOS IPA & CallKit Client
-    runs-on: macos-14
-
+  compile:
+    name: Compile iOS app
+    runs-on: macos-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Select Xcode Version
+      - uses: actions/checkout@v4
+      - name: Xcode version
+        run: xcodebuild -version
+      - name: Build for iOS Simulator
         run: |
-          sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode_15.2.app || true
-          xcodebuild -version
-
-      - name: Build Application with xcodebuild
-        run: |
-          xcodebuild -project RedmiGateway/ios/RedmiGateway.xcodeproj \
+          xcodebuild \
+            -project RedmiGateway/ios/RedmiGateway.xcodeproj \
             -scheme RedmiGateway \
-            -configuration Release \
-            -sdk iphoneos \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath derived_data \
             CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
             clean build
-
-      - name: Package into IPA
-        run: |
-          mkdir -p Payload
-          cp -r derived_data/Build/Products/Release-iphoneos/RedmiGateway.app Payload/
-          zip -r -9 RedmiGateway.ipa Payload
-
-      - name: Upload IPA Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: RedmiGateway-iOS-IPA
-          path: RedmiGateway.ipa
-          retention-days: 14
-
-      - name: Summary Info
-        run: |
-          echo "### 📱 iOS CallKit IPA Build Successful!" >> $GITHUB_STEP_SUMMARY
-          echo "The compiled **RedmiGateway.ipa** is ready for installation on your iPhone." >> $GITHUB_STEP_SUMMARY
-          echo "You can sideload it using Sideloadly, AltStore, or Scarlet with your personal Apple ID." >> $GITHUB_STEP_SUMMARY

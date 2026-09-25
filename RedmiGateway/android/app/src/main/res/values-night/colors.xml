@@ -1,0 +1,12 @@
+<resources>
+    <color name="bg_void">#10161B</color>
+    <color name="bg_card">#192127</color>
+    <color name="border_subtle">#34414A</color>
+    <color name="text_primary">#F0F3F4</color>
+    <color name="text_secondary">#B3BEC5</color>
+    <color name="accent">#91B8FA</color>
+    <color name="neon_emerald">#6FD9A7</color>
+    <color name="status_good">#6FD9A7</color>
+    <color name="status_bad">#FF9A8F</color>
+    <color name="status_attention">#F7C36B</color>
+</resources>

@@ -11,11 +11,21 @@ public enum ConnectionState: String {
 }
 
 public struct SmsMessageItem: Identifiable, Equatable {
-    public let id = UUID()
+    public let id: UUID
+    public let gatewayId: Int64?
     public let senderOrRecipient: String
     public let body: String
     public let isIncoming: Bool
     public let timestamp: Date
+
+    public init(gatewayId: Int64? = nil, senderOrRecipient: String, body: String, isIncoming: Bool, timestamp: Date) {
+        self.id = UUID()
+        self.gatewayId = gatewayId
+        self.senderOrRecipient = senderOrRecipient
+        self.body = body
+        self.isIncoming = isIncoming
+        self.timestamp = timestamp
+    }
 }
 
 @MainActor
@@ -41,6 +51,9 @@ public class GatewayConnection: ObservableObject {
     private var isUserDisconnected: Bool = true
     private var reconnectAttempt: Int = 0
     private var reconnectTimer: Task<Void, Never>? = nil
+    private var seenSmsIds = Set<Int64>()
+    private var pendingSms: [(recipient: String, message: String)] = []
+    private var hasAttemptedAutoconnect = false
     
     public var onCallEvent: ((CallEventMessage) -> Void)?
     
@@ -99,6 +112,13 @@ public class GatewayConnection: ObservableObject {
         defaults.set(port, forKey: kGatewayPort)
         defaults.set(token, forKey: kPairingToken)
     }
+
+    public func connectSavedConfiguration() {
+        guard !hasAttemptedAutoconnect else { return }
+        hasAttemptedAutoconnect = true
+        guard !currentHost.isEmpty, !pairingToken.isEmpty else { return }
+        connect(host: currentHost, port: currentPort, token: pairingToken)
+    }
     
     public func connect(host: String, port: Int = 8787, token: String) {
         cancelReconnect()
@@ -136,6 +156,7 @@ public class GatewayConnection: ObservableObject {
     private func disconnectInternal() {
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
+        pendingSms.removeAll()
         self.state = .disconnected
     }
     
@@ -173,6 +194,7 @@ public class GatewayConnection: ObservableObject {
         task.receive { [weak self] result in
             Task { @MainActor [weak self] in
                 guard let self = self else { return }
+                guard self.webSocketTask === task else { return }
                 
                 switch result {
                 case .success(let message):
@@ -189,6 +211,7 @@ public class GatewayConnection: ObservableObject {
                     self.listenForMessages()
                     
                 case .failure(let error):
+                    self.webSocketTask = nil
                     self.state = .failed
                     self.log("WebSocket dropped: \(error.localizedDescription)")
                     if !self.isUserDisconnected {
@@ -223,9 +246,13 @@ public class GatewayConnection: ObservableObject {
                     self.reconnectAttempt = 0
                     self.log("Authenticated successfully. Syncing state...")
                     requestState()
+                    requestSmsHistory(afterId: 0)
                 } else {
+                    self.isUserDisconnected = true
                     self.state = .failed
                     self.log("Authentication failed: \(authRes.message ?? "Invalid token")")
+                    self.webSocketTask?.cancel(with: .goingAway, reason: nil)
+                    self.webSocketTask = nil
                 }
             }
             
@@ -251,16 +278,30 @@ public class GatewayConnection: ObservableObject {
             
         case "sms_received":
             if let sms = try? JSONDecoder().decode(SmsReceivedMessage.self, from: data) {
-                let date = Date(timeIntervalSince1970: Double(sms.timestamp) / 1000.0)
-                let item = SmsMessageItem(senderOrRecipient: sms.sender, body: sms.message, isIncoming: true, timestamp: date)
-                self.smsMessages.append(item)
+                appendIncomingSms(id: sms.id, sender: sms.sender, message: sms.message, timestamp: sms.timestamp)
                 self.log("SMS received (\(sms.message.count) characters)")
+            }
+
+        case "sms_history":
+            if let history = try? JSONDecoder().decode(SmsHistoryResponse.self, from: data) {
+                for sms in history.messages {
+                    appendIncomingSms(id: sms.id, sender: sms.sender, message: sms.message, timestamp: sms.timestamp)
+                }
+                if history.hasMore && history.lastId > 0 {
+                    requestSmsHistory(afterId: history.lastId)
+                }
             }
             
         case "sms_send_result":
             if let res = try? JSONDecoder().decode(SmsSendResultMessage.self, from: data) {
+                if let index = pendingSms.firstIndex(where: { $0.recipient == res.recipient }) {
+                    let pending = pendingSms.remove(at: index)
+                    if res.success {
+                        smsMessages.append(SmsMessageItem(senderOrRecipient: pending.recipient, body: pending.message, isIncoming: false, timestamp: Date()))
+                    }
+                }
                 if res.success {
-                    self.log("SMS send request accepted")
+                    self.log("SMS send request accepted; delivery unconfirmed")
                 } else {
                     self.log("SMS send failed: \(res.error ?? "Unknown error")")
                 }
@@ -269,6 +310,13 @@ public class GatewayConnection: ObservableObject {
         default:
             self.log("Unhandled message type: \(type)")
         }
+    }
+
+    private func appendIncomingSms(id: Int64?, sender: String, message: String, timestamp: Int64) {
+        if let id = id, !seenSmsIds.insert(id).inserted { return }
+        let date = Date(timeIntervalSince1970: Double(timestamp) / 1000.0)
+        smsMessages.append(SmsMessageItem(gatewayId: id, senderOrRecipient: sender, body: message, isIncoming: true, timestamp: date))
+        smsMessages.sort { $0.timestamp < $1.timestamp }
     }
     
     private func applyCallEvent(_ callMsg: CallEventMessage) {
@@ -321,6 +369,10 @@ public class GatewayConnection: ObservableObject {
         let payload = GetStatePayload()
         sendPayload(payload)
     }
+
+    public func requestSmsHistory(afterId: Int64) {
+        sendPayload(GetSmsHistoryPayload(afterId: afterId))
+    }
     
     public func sendAnswer(callId: String) {
         log("Sending ANSWER for callId: \(callId)")
@@ -349,9 +401,8 @@ public class GatewayConnection: ObservableObject {
     public func sendSms(recipient: String, message: String) {
         log("Sending SMS (\(message.count) characters)")
         let payload = SendSmsPayload(recipient: recipient, message: message)
+        pendingSms.append((recipient: recipient, message: message))
         sendPayload(payload)
-        let item = SmsMessageItem(senderOrRecipient: recipient, body: message, isIncoming: false, timestamp: Date())
-        self.smsMessages.append(item)
     }
     
     private func sendPayload<T: Encodable>(_ payload: T) {

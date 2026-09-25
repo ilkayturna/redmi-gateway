@@ -101,8 +101,8 @@ Extracted from `dumpsys deviceidle`:
 ## 5. Debloat Optimization Roadmap (Scheduled for Later Phase)
 
 *Per project rules, no system services or packages have been disabled or removed at this stage.*  
-Once audio gateway routing is finalized, the following target packages can be safely uninstalled via `pm uninstall -k --user 0` to maximize standby battery life for pocket operation:
+Any optional package removal needs a one-package-at-a-time reboot test and a recovery path:
 - Disable `com.miui.msa.global`, `com.miui.analytics`, `com.miui.daemon` (eliminates background telemetry).
-- Disable `com.miui.cloudservice`, `com.xiaomi.finddevice` (eliminates sync alarms).
+- **Never disable or uninstall `com.xiaomi.finddevice` on this MIUI build.** During the 2026-09-25 reboot, `SecurityManagerService` crashed repeatedly with `System error: connot find system app : com.xiaomi.finddevice`, preventing Android from booting. Restore this package before further optimization.
 - Disable `com.google.android.googlequicksearchbox`, `com.google.android.projection.gearhead` (saves ~120MB RAM and periodic wakelocks).
 - Battery-life improvement must be measured on the actual device with hotspot, client, and call/SMS gateway active. No percentage reduction is established by this baseline.

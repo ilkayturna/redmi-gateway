@@ -10,6 +10,7 @@
   let reconnectDelay = 2000;
   let keepConnecting = false;
   let pendingSms = null;
+  const seenMessageIds = new Set();
 
   // Web Audio Ringtone & Duration Timer
   let audioCtx = null;
@@ -139,7 +140,9 @@
     }
   };
 
-  const addMessage = (number, body, timestamp, outgoing) => {
+  const addMessage = (number, body, timestamp, outgoing, id = null) => {
+    if (id != null && seenMessageIds.has(id)) return;
+    if (id != null) seenMessageIds.add(id);
     const item = document.createElement('li');
     if (outgoing) item.className = 'outgoing';
     const name = document.createElement('strong');
@@ -197,6 +200,7 @@
             showDashboard(true);
             notice('Bağlantı hazır.');
             send({type: 'get_state'});
+            send({type: 'get_sms_history', afterId: 0});
           } else {
             keepConnecting = false;
             forgetToken();
@@ -213,14 +217,22 @@
           if (packet.state === 'ringing') notice('Telefona gelen arama var. Ses geçit telefonunda kalır.');
           break;
         case 'sms_received':
-          addMessage(packet.sender || 'Bilinmeyen', packet.message || '', packet.timestamp || Date.now(), false);
+          addMessage(packet.sender || 'Bilinmeyen', packet.message || '', packet.timestamp || Date.now(), false, packet.id ?? null);
           notice('Yeni SMS alındı.');
+          break;
+        case 'sms_history':
+          for (const sms of packet.messages || []) {
+            addMessage(sms.sender || 'Bilinmeyen', sms.message || '', sms.timestamp || Date.now(), false, sms.id ?? null);
+          }
+          if (packet.hasMore && Number.isSafeInteger(packet.lastId) && packet.lastId > 0) {
+            send({type: 'get_sms_history', afterId: packet.lastId});
+          }
           break;
         case 'sms_send_result':
           if (packet.success && pendingSms) {
             addMessage(pendingSms.number, pendingSms.body, Date.now(), true);
             $('sms-text').value = '';
-            notice('SMS gönderildi.');
+            notice('SMS gönderim isteği kabul edildi; teslim onayı alınmadı.');
           } else {
             notice(`SMS gönderilemedi: ${packet.error || 'Bilinmeyen hata'}`);
           }

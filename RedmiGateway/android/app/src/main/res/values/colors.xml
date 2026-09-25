@@ -1,19 +1,19 @@
 <resources>
     <!-- Backgrounds -->
-    <color name="bg_void">#040711</color>
+    <color name="bg_void">#F5F7F8</color>
     <color name="bg_surface">#0A101D</color>
-    <color name="bg_card">#0F172A</color>
+    <color name="bg_card">#FFFFFF</color>
     <color name="bg_card_secondary">#131E35</color>
     <color name="bg_terminal">#03060B</color>
 
     <!-- Borders & Dividers -->
-    <color name="border_subtle">#1E293B</color>
+    <color name="border_subtle">#DDE3E7</color>
     <color name="border_glow">#334155</color>
     <color name="border_neon_emerald">#059669</color>
     <color name="border_neon_cyan">#0284C7</color>
 
     <!-- Neon Accents -->
-    <color name="neon_emerald">#00F59B</color>
+    <color name="neon_emerald">#137A4D</color>
     <color name="neon_cyan">#00F0FF</color>
     <color name="neon_sky">#38BDF8</color>
     <color name="neon_violet">#818CF8</color>
@@ -21,17 +21,20 @@
     <color name="neon_crimson">#F43F5E</color>
 
     <!-- Typography -->
-    <color name="text_primary">#F8FAFC</color>
-    <color name="text_secondary">#94A3B8</color>
+    <color name="text_primary">#18232C</color>
+    <color name="text_secondary">#55636E</color>
     <color name="text_muted">#64748B</color>
     <color name="text_terminal">#38BDF8</color>
 
     <!-- Legacy Mappings for Compatibility -->
     <color name="primary">#0F172A</color>
     <color name="primary_dark">#040711</color>
-    <color name="accent">#00F59B</color>
-    <color name="background">#040711</color>
-    <color name="card_bg">#0F172A</color>
+    <color name="accent">#2356A8</color>
+    <color name="background">#F5F7F8</color>
+    <color name="card_bg">#FFFFFF</color>
+    <color name="status_good">#137A4D</color>
+    <color name="status_bad">#B42318</color>
+    <color name="status_attention">#945D00</color>
     <color name="green_500">#00F59B</color>
     <color name="red_500">#F43F5E</color>
     <color name="amber_500">#FBBF24</color>

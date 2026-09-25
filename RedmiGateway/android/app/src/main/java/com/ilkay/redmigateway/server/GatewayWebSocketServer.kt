@@ -8,6 +8,7 @@ import com.ilkay.redmigateway.telecom.CallManager
 import com.ilkay.redmigateway.audio.AudioProbeManager
 import com.ilkay.redmigateway.sms.SmsReceiver
 import com.ilkay.redmigateway.sms.SmsManagerHelper
+import com.ilkay.redmigateway.sms.SmsStore
 import org.java_websocket.WebSocket
 import org.java_websocket.handshake.ClientHandshake
 import org.java_websocket.server.WebSocketServer
@@ -135,6 +136,9 @@ class GatewayWebSocketServer(
                     CallManager.log("WebSocket command: GET_STATE")
                     handleGetState(conn)
                 }
+                "get_sms_history" -> {
+                    handleGetSmsHistory(conn, json.optLong("afterId", 0L))
+                }
                 "probe_audio" -> {
                     val source = json.optString("source", "ALL")
                     CallManager.log("WebSocket command: PROBE_AUDIO (source=$source)")
@@ -179,6 +183,27 @@ class GatewayWebSocketServer(
             }
         }
         conn.send(response.toString())
+    }
+
+    private fun handleGetSmsHistory(conn: WebSocket, afterId: Long) {
+        val store = SmsStore.get(context)
+        store.importFromSystemInbox()
+        val page = store.readAfter(afterId)
+        val items = JSONArray()
+        for (sms in page.messages) {
+            items.put(JSONObject().apply {
+                put("id", sms.id)
+                put("sender", sms.sender)
+                put("message", sms.message)
+                put("timestamp", sms.timestamp)
+            })
+        }
+        conn.send(JSONObject().apply {
+            put("type", "sms_history")
+            put("messages", items)
+            put("hasMore", page.hasMore)
+            put("lastId", page.messages.lastOrNull()?.id ?: afterId)
+        }.toString())
     }
 
     private fun handleProbeAudio(conn: WebSocket, targetSource: String) {
@@ -309,7 +334,7 @@ class GatewayWebSocketServer(
         }
     }
 
-    fun broadcastSmsReceived(sender: String, message: String, timestamp: Long) {
+    fun broadcastSmsReceived(sender: String, message: String, timestamp: Long, messageId: Long) {
         if (authenticatedClients.isEmpty()) return
 
         val event = JSONObject().apply {
@@ -317,6 +342,7 @@ class GatewayWebSocketServer(
             put("sender", sender)
             put("message", message)
             put("timestamp", timestamp)
+            if (messageId > 0) put("id", messageId)
         }
         val payload = event.toString()
         Log.d(TAG, "Broadcasting SMS received event to ${authenticatedClients.size} authenticated client(s)")

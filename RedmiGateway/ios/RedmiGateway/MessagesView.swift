@@ -10,7 +10,7 @@ struct MessagesView: View {
             // Header / Recipient Bar
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text("To:")
+                    Text("Alıcı")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundColor(.secondary)
                     TextField("+90 5xx xxx xx xx", text: $recipient)
@@ -30,10 +30,10 @@ struct MessagesView: View {
                                 Image(systemName: "message.badge")
                                     .font(.system(size: 44))
                                     .foregroundColor(.secondary)
-                                Text("No SMS Messages")
+                                Text("Henüz SMS yok")
                                     .font(.system(size: 16, weight: .medium))
                                     .foregroundColor(.secondary)
-                                Text("Incoming and outgoing SMS via Turkcell cellular SIM will appear here.")
+                                Text("Redmi hattına gelen mesajlar burada görünür. Bağlantı kesilirse yeniden bağlanınca eşitlenir.")
                                     .font(.system(size: 13))
                                     .foregroundColor(.secondary)
                                     .multilineTextAlignment(.center)
@@ -48,7 +48,7 @@ struct MessagesView: View {
                                     VStack(alignment: msg.isIncoming ? .leading : .trailing, spacing: 4) {
                                         Text(msg.senderOrRecipient)
                                             .font(.system(size: 11, weight: .bold))
-                                            .foregroundColor(msg.isIncoming ? .blue : .secondary)
+                                            .foregroundColor(.secondary)
                                         
                                         Text(msg.body)
                                             .font(.system(size: 15))
@@ -56,13 +56,22 @@ struct MessagesView: View {
                                             .padding(.horizontal, 14)
                                             .padding(.vertical, 10)
                                             .background(msg.isIncoming ? Color(UIColor.systemGray5) : Color.blue)
-                                            .cornerRadius(18)
+                                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                                        if !msg.isIncoming {
+                                            Text("Teslim doğrulanmadı")
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                        }
                                         
                                         Text(formatDate(msg.timestamp))
                                             .font(.system(size: 10))
                                             .foregroundColor(.secondary)
                                     }
                                     .id(msg.id)
+                                    .contextMenu {
+                                        Button("Bu numaraya yanıtla") { recipient = msg.senderOrRecipient }
+                                    }
                                     
                                     if msg.isIncoming { Spacer() }
                                 }
@@ -85,7 +94,7 @@ struct MessagesView: View {
             
             // Compose Bar
             HStack(spacing: 10) {
-                TextField("iMessage / SMS...", text: $messageText)
+                TextField("SMS yaz", text: $messageText)
                     .textFieldStyle(.roundedBorder)
                 
                 Button(action: sendCurrentMessage) {
@@ -99,7 +108,7 @@ struct MessagesView: View {
             .padding(.vertical, 8)
             .background(Color(UIColor.systemBackground))
         }
-        .navigationTitle("Cellular SMS")
+        .navigationTitle("SMS")
         .navigationBarTitleDisplayMode(.inline)
     }
     

@@ -53,6 +53,8 @@ These system managers handle power profiles and background memory limits. In MIU
 ### Category C: NEVER TOUCH (CRITICAL CELLULAR & HARDWARE LAYER)
 Touching or disabling any of these packages will brick cellular radio, disable SIM registration, destroy ALSA audio routing, or prevent ADB communication.
 
+**Boot-critical MIUI package:** Keep `com.xiaomi.finddevice` installed and enabled. A 2026-09-25 reboot demonstrated that MIUI 12.5.2 `SecurityManagerService` crashes if it cannot find this app, leaving the phone in a boot loop. Do not classify it as optional cloud software.
+
 | Critical Subsystem | Package Names / Components | Why It Must NOT Be Touched |
 |---|---|---|
 | **Cellular Radio & RIL** | `com.android.phone`, `com.android.server.telecom`, `com.android.providers.telephony` | RIL bridge to Snapdragon 665 modem, SIM authentication, call setup. |

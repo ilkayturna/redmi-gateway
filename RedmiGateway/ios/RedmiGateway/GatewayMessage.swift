@@ -50,9 +50,24 @@ public struct StateResponseMessage: Codable {
 
 public struct SmsReceivedMessage: Codable {
     public let type: String
+    public let id: Int64?
     public let sender: String
     public let message: String
     public let timestamp: Int64
+}
+
+public struct SmsHistoryItem: Codable {
+    public let id: Int64
+    public let sender: String
+    public let message: String
+    public let timestamp: Int64
+}
+
+public struct SmsHistoryResponse: Codable {
+    public let type: String
+    public let messages: [SmsHistoryItem]
+    public let hasMore: Bool
+    public let lastId: Int64
 }
 
 public struct SmsSendResultMessage: Codable {
@@ -77,6 +92,15 @@ public struct GetStatePayload: Codable {
     public let type: String = "get_state"
     
     public init() {}
+}
+
+public struct GetSmsHistoryPayload: Codable {
+    public let type: String = "get_sms_history"
+    public let afterId: Int64
+
+    public init(afterId: Int64) {
+        self.afterId = afterId
+    }
 }
 
 public struct AnswerPayload: Codable {
