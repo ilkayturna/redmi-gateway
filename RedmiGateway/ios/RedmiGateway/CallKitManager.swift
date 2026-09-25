@@ -13,6 +13,7 @@ import AVFoundation
  * 5. Outgoing calls via CallKit -> triggers CXStartCallAction -> sends "dial" to Redmi.
  * 6. Reflecting state transitions (ringing -> active -> disconnected) in CallKit.
  */
+@MainActor
 public class CallKitManager: NSObject, CXProviderDelegate {
     public static let shared = CallKitManager()
     
@@ -28,8 +29,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     private var reportedIncomingUuids: Set<UUID> = []
     
     override private init() {
-        let config = CXProviderConfiguration()
-        config.localizedName = "Telefon Geçidi"
+        let config = CXProviderConfiguration(localizedName: "Telefon Geçidi")
         config.supportsVideo = false
         config.maximumCallsPerCallGroup = 1
         config.maximumCallGroups = 1
@@ -37,7 +37,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         
         self.provider = CXProvider(configuration: config)
         super.init()
-        self.provider.setDelegate(self, queue: nil)
+        self.provider.setDelegate(self, queue: DispatchQueue.main)
         
         setupGatewayObserver()
     }
