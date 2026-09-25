@@ -11,6 +11,8 @@ import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.ilkay.redmigateway.server.GatewayWebSocketServer
@@ -34,6 +36,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
 
     private var webSocketServer: GatewayWebSocketServer? = null
     private var webPageServer: GatewayWebPageServer? = null
+    private val handler = Handler(Looper.getMainLooper())
 
     inner class LocalBinder : Binder() {
         fun getService(): GatewayService = this@GatewayService
@@ -54,7 +57,10 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
         Log.d(TAG, "onStartCommand action=$action")
 
         when (action) {
-            ACTION_START -> startGateway()
+            ACTION_START -> {
+                startGateway()
+                handler.postDelayed({ HotspotRestarter.startIfNeeded(this) }, 10_000L)
+            }
             ACTION_STOP -> stopGateway()
         }
 
