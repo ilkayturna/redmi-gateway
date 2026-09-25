@@ -30,8 +30,8 @@ class SmsReceiver : BroadcastReceiver() {
             }
             val fullMessage = bodyBuilder.toString()
 
-            Log.i(TAG, "SMS received from $sender: $fullMessage")
-            CallManager.log("SMS received from $sender: $fullMessage")
+            Log.i(TAG, "SMS received (${fullMessage.length} characters)")
+            CallManager.log("SMS received (${fullMessage.length} characters)")
 
             // Broadcast to connected WebSocket clients (e.g. iOS client)
             webSocketServer?.broadcastSmsReceived(sender, fullMessage, timestamp)

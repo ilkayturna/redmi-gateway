@@ -8,14 +8,13 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.net.wifi.WifiManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
-import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.ilkay.redmigateway.server.GatewayWebSocketServer
+import com.ilkay.redmigateway.server.GatewayWebPageServer
 import com.ilkay.redmigateway.telecom.CallManager
 import com.ilkay.redmigateway.ui.MainActivity
 
@@ -34,8 +33,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     }
 
     private var webSocketServer: GatewayWebSocketServer? = null
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
+    private var webPageServer: GatewayWebPageServer? = null
 
     inner class LocalBinder : Binder() {
         fun getService(): GatewayService = this@GatewayService
@@ -70,9 +68,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
         }
 
         Log.i(TAG, "Starting Gateway Service...")
-        acquireLocks()
-
-        val notification = buildNotification("Redmi Gateway active (0 clients)")
+        val notification = buildNotification("Geçit etkin (0 bağlı cihaz)")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -88,6 +84,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
                 serverListener = this@GatewayService
                 start()
             }
+            webPageServer = GatewayWebPageServer(this, 8788).apply { start() }
             isRunning = true
             CallManager.log("Gateway Foreground Service started on port 8787")
         } catch (e: Exception) {
@@ -99,6 +96,8 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
 
     private fun stopGateway() {
         Log.i(TAG, "Stopping Gateway Service...")
+        webPageServer?.stop()
+        webPageServer = null
         try {
             webSocketServer?.stopServer()
             webSocketServer = null
@@ -106,58 +105,17 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
             Log.e(TAG, "Error stopping WebSocket server", e)
         }
 
-        releaseLocks()
         isRunning = false
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
         CallManager.log("Gateway Foreground Service stopped")
     }
 
-    private fun acquireLocks() {
-        try {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = powerManager.newWakeLock(
-                PowerManager.PARTIAL_WAKE_LOCK,
-                "RedmiGateway::WakeLock"
-            ).apply {
-                setReferenceCounted(false)
-                acquire(12 * 60 * 60 * 1000L) // 12 hours max safety
-            }
-
-            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            wifiLock = wifiManager.createWifiLock(
-                WifiManager.WIFI_MODE_FULL_HIGH_PERF,
-                "RedmiGateway::WifiLock"
-            ).apply {
-                setReferenceCounted(false)
-                acquire()
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to acquire power/wifi locks: ${e.message}")
-        }
-    }
-
-    private fun releaseLocks() {
-        try {
-            wakeLock?.let {
-                if (it.isHeld) it.release()
-            }
-            wakeLock = null
-
-            wifiLock?.let {
-                if (it.isHeld) it.release()
-            }
-            wifiLock = null
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to release locks: ${e.message}")
-        }
-    }
-
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Redmi Gateway Service",
+                "Telefon Geçidi",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Foreground service maintaining cellular gateway link"
@@ -178,7 +136,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Redmi Gateway")
+            .setContentTitle("Telefon Geçidi")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_call)
             .setContentIntent(pendingIntent)
@@ -193,7 +151,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     }
 
     override fun onClientCountChanged(authenticatedCount: Int) {
-        updateNotification("Redmi Gateway active ($authenticatedCount client(s))")
+        updateNotification("Geçit etkin ($authenticatedCount bağlı cihaz)")
     }
 
     override fun onServerError(error: String) {

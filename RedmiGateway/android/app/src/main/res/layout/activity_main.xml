@@ -3,464 +3,612 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#0F172A"
+    android:background="@color/bg_void"
     android:fillViewport="true">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="16dp">
+        android:padding="20dp">
 
-        <!-- Header -->
-        <TextView
-            android:id="@+id/tvHeaderTitle"
-            android:layout_width="wrap_content"
+        <!-- Futuristic Top Bar -->
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="REDMI GATEWAY"
-            android:textColor="#F8FAFC"
-            android:textSize="24sp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/tvHeaderTitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="REDMI GATEWAY"
+                    android:textColor="@color/text_primary"
+                    android:textSize="22sp"
+                    android:textStyle="bold"
+                    android:letterSpacing="0.08" />
+
+                <TextView
+                    android:id="@+id/tvDeviceModel"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="Xiaomi Redmi Note 8 • Ginkgo"
+                    android:textColor="@color/text_muted"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <!-- Status Pill Badge -->
+            <LinearLayout
+                android:id="@+id/layoutStatusBadge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_pill_chip"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="12dp"
+                android:paddingTop="6dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="6dp">
+
+                <View
+                    android:id="@+id/ivStatusDot"
+                    android:layout_width="8dp"
+                    android:layout_height="8dp"
+                    android:background="@drawable/bg_pulse_dot" />
+
+                <TextView
+                    android:id="@+id/tvGatewayStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="ONLINE"
+                    android:textColor="@color/neon_emerald"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    android:letterSpacing="0.05" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- System Capability Chips -->
+        <HorizontalScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/chipVolte"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_pill_chip"
+                    android:text="TURKCELL 4.5G VoLTE"
+                    android:textColor="@color/neon_sky"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/chipDialer"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_pill_chip"
+                    android:text="DEFAULT DIALER"
+                    android:textColor="@color/neon_emerald"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/chipDoze"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:background="@drawable/bg_pill_chip"
+                    android:text="DOZE BYPASS: ACTIVE"
+                    android:textColor="@color/neon_violet"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+        </HorizontalScrollView>
+
+        <!-- Dialer Role Request Warning Card (hidden if already granted) -->
+        <Button
+            android:id="@+id/btnRequestDialer"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="14dp"
+            android:backgroundTint="@color/neon_amber"
+            android:text="⚠️ VARSAYILAN ARAMA İZNİNİ VER"
+            android:textColor="#000000"
             android:textStyle="bold"
-            android:letterSpacing="0.05" />
+            android:visibility="gone"
+            app:cornerRadius="12dp" />
 
-        <TextView
-            android:id="@+id/tvDeviceModel"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:text="Device: Xiaomi Redmi Note 8 (ginkgo)"
-            android:textColor="#94A3B8"
-            android:textSize="13sp" />
-
-        <!-- Status Card -->
+        <!-- Card: Security Token & Access (Hero Card) -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            app:cardBackgroundColor="#1E293B"
-            app:cardCornerRadius="12dp"
+            app:cardBackgroundColor="@color/bg_card"
+            app:cardCornerRadius="16dp"
             app:cardElevation="0dp"
-            app:strokeColor="#334155"
+            app:strokeColor="@color/border_subtle"
             app:strokeWidth="1dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="16dp">
+                android:padding="18dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
                     android:orientation="horizontal">
 
                     <TextView
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="Gateway Service:"
-                        android:textColor="#94A3B8"
-                        android:textSize="14sp" />
-
-                    <TextView
-                        android:id="@+id/tvGatewayStatus"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="STOPPED"
-                        android:textColor="#EF4444"
-                        android:textSize="14sp"
-                        android:textStyle="bold" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="Default Dialer:"
-                        android:textColor="#94A3B8"
-                        android:textSize="14sp" />
-
-                    <TextView
-                        android:id="@+id/tvDialerStatus"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="NO"
-                        android:textColor="#EF4444"
-                        android:textSize="14sp"
-                        android:textStyle="bold" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="Local IP:"
-                        android:textColor="#94A3B8"
-                        android:textSize="14sp" />
-
-                    <TextView
-                        android:id="@+id/tvLocalIp"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="0.0.0.0"
-                        android:textColor="#F8FAFC"
-                        android:textSize="14sp"
-                        android:fontFamily="monospace" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="Port:"
-                        android:textColor="#94A3B8"
-                        android:textSize="14sp" />
-
-                    <TextView
-                        android:id="@+id/tvPort"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="8787"
-                        android:textColor="#F8FAFC"
-                        android:textSize="14sp"
-                        android:fontFamily="monospace" />
-                </LinearLayout>
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="Pairing Token:"
-                        android:textColor="#94A3B8"
-                        android:textSize="14sp" />
-
-                    <TextView
-                        android:id="@+id/tvPairingToken"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="------"
-                        android:textColor="#10B981"
-                        android:textSize="16sp"
+                        android:text="EŞLEŞTİRME &amp; GÜVENLİK"
+                        android:textColor="@color/text_muted"
+                        android:textSize="11sp"
                         android:textStyle="bold"
-                        android:fontFamily="monospace" />
-                </LinearLayout>
+                        android:letterSpacing="0.08" />
 
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:orientation="horizontal">
-
+                    <!-- Authenticated clients count -->
                     <TextView
-                        android:layout_width="0dp"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="Authenticated Clients:"
-                        android:textColor="#94A3B8"
-                        android:textSize="14sp" />
+                        android:text="Bağlı İstemci: "
+                        android:textColor="@color/text_muted"
+                        android:textSize="12sp" />
 
                     <TextView
                         android:id="@+id/tvClientsCount"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="0"
-                        android:textColor="#F8FAFC"
-                        android:textSize="14sp"
+                        android:textColor="@color/neon_emerald"
+                        android:textSize="13sp"
                         android:textStyle="bold" />
                 </LinearLayout>
+
+                <!-- Token Display Box -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/bg_token_box"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="GÜVENLİK TOKENİ"
+                            android:textColor="@color/neon_sky"
+                            android:textSize="10sp"
+                            android:letterSpacing="0.05" />
+
+                        <TextView
+                            android:id="@+id/tvPairingToken"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:fontFamily="monospace"
+                            android:text="RU8JFN"
+                            android:textColor="@color/neon_emerald"
+                            android:textSize="24sp"
+                            android:textStyle="bold"
+                            android:letterSpacing="0.2" />
+                    </LinearLayout>
+
+                    <Button
+                        android:id="@+id/btnCopyToken"
+                        style="@style/Widget.MaterialComponents.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="KOPYALA"
+                        android:textColor="@color/neon_sky"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <!-- Network Endpoints -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:orientation="horizontal">
+
+                    <!-- Local IP -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="GEÇİT IP ADRESİ"
+                            android:textColor="@color/text_muted"
+                            android:textSize="10sp"
+                            android:letterSpacing="0.05" />
+
+                        <TextView
+                            android:id="@+id/tvLocalIp"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:fontFamily="monospace"
+                            android:text="192.168.42.108"
+                            android:textColor="@color/text_primary"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+
+                    <!-- Port -->
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:gravity="end"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="PORT (WS/HTTP)"
+                            android:textColor="@color/text_muted"
+                            android:textSize="10sp"
+                            android:letterSpacing="0.05" />
+
+                        <TextView
+                            android:id="@+id/tvPort"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:fontFamily="monospace"
+                            android:text="8787 / 8788"
+                            android:textColor="@color/text_primary"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+                </LinearLayout>
+
+                <!-- Web Panel Direct Launcher Button -->
+                <Button
+                    android:id="@+id/btnOpenWebUi"
+                    android:layout_width="match_parent"
+                    android:layout_height="42dp"
+                    android:layout_marginTop="14dp"
+                    android:backgroundTint="#13233E"
+                    android:text="🌐 WEB KONTROL PANELİ (:8788)"
+                    android:textColor="@color/neon_sky"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    app:cornerRadius="10dp"
+                    app:strokeColor="@color/border_neon_cyan"
+                    app:strokeWidth="1dp" />
+
+                <!-- Hidden legacy dialer status view for code compatibility -->
+                <TextView
+                    android:id="@+id/tvDialerStatus"
+                    android:layout_width="0dp"
+                    android:layout_height="0dp"
+                    android:visibility="gone" />
 
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Service & Dialer Control Buttons -->
-        <LinearLayout
+        <!-- Hardware & 24/7 Autonomy Status Card -->
+        <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:orientation="vertical">
-
-            <Button
-                android:id="@+id/btnRequestDialer"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:backgroundTint="#3B82F6"
-                android:text="REQUEST DEFAULT DIALER"
-                android:textColor="#FFFFFF"
-                android:textStyle="bold" />
+            android:layout_marginTop="14dp"
+            app:cardBackgroundColor="@color/bg_card"
+            app:cardCornerRadius="16dp"
+            app:cardElevation="0dp"
+            app:strokeColor="@color/border_subtle"
+            app:strokeWidth="1dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
-                android:orientation="horizontal">
+                android:orientation="horizontal"
+                android:padding="16dp">
 
-                <Button
-                    android:id="@+id/btnStartGateway"
+                <!-- Battery Monitor -->
+                <LinearLayout
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:layout_marginEnd="4dp"
-                    android:backgroundTint="#10B981"
-                    android:text="START GATEWAY"
-                    android:textColor="#FFFFFF"
-                    android:textStyle="bold" />
+                    android:orientation="vertical">
 
-                <Button
-                    android:id="@+id/btnStopGateway"
-                    android:layout_width="0dp"
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="BATARYA &amp; ISI"
+                        android:textColor="@color/text_muted"
+                        android:textSize="10sp"
+                        android:letterSpacing="0.05" />
+
+                    <TextView
+                        android:id="@+id/tvBatteryStats"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="95% • 28°C • AC Şarj"
+                        android:textColor="@color/neon_emerald"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <!-- Uptime Monitor -->
+                <LinearLayout
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:layout_marginStart="4dp"
-                    android:backgroundTint="#64748B"
-                    android:text="STOP GATEWAY"
-                    android:textColor="#FFFFFF"
-                    android:textStyle="bold" />
+                    android:gravity="end"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="KÖPRÜ ÇALIŞMA SÜRESİ"
+                        android:textColor="@color/text_muted"
+                        android:textSize="10sp"
+                        android:letterSpacing="0.05" />
+
+                    <TextView
+                        android:id="@+id/tvUptime"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:fontFamily="monospace"
+                        android:text="00:00:00"
+                        android:textColor="@color/text_primary"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
             </LinearLayout>
-        </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
 
-        <!-- Current Call Card -->
+        <!-- Live Call & Telephony HUD Card -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            app:cardBackgroundColor="#1E293B"
-            app:cardCornerRadius="12dp"
+            android:layout_marginTop="14dp"
+            app:cardBackgroundColor="@color/bg_card"
+            app:cardCornerRadius="16dp"
             app:cardElevation="0dp"
-            app:strokeColor="#334155"
+            app:strokeColor="@color/border_subtle"
             app:strokeWidth="1dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="16dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="CURRENT CALL"
-                    android:textColor="#F8FAFC"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
+                android:padding="18dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
+                    android:gravity="center_vertical"
                     android:orientation="horizontal">
 
                     <TextView
-                        android:layout_width="wrap_content"
+                        android:layout_width="0dp"
                         android:layout_height="wrap_content"
-                        android:text="State: "
-                        android:textColor="#94A3B8"
-                        android:textSize="14sp" />
+                        android:layout_weight="1"
+                        android:text="HÜCRESEL ÇAĞRI MONİTÖRÜ"
+                        android:textColor="@color/text_muted"
+                        android:textSize="11sp"
+                        android:textStyle="bold"
+                        android:letterSpacing="0.08" />
 
                     <TextView
                         android:id="@+id/tvCallState"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="IDLE"
-                        android:textColor="#94A3B8"
-                        android:textSize="14sp"
+                        android:background="@drawable/bg_pill_chip"
+                        android:text="BOŞTA (IDLE)"
+                        android:textColor="@color/text_muted"
+                        android:textSize="11sp"
                         android:textStyle="bold" />
                 </LinearLayout>
 
+                <!-- Call details -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
+                    android:layout_marginTop="12dp"
                     android:orientation="horizontal">
 
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Number: "
-                        android:textColor="#94A3B8"
-                        android:textSize="14sp" />
+                        android:text="Numara: "
+                        android:textColor="@color/text_muted"
+                        android:textSize="13sp" />
 
                     <TextView
                         android:id="@+id/tvCallNumber"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:layout_marginStart="4dp"
+                        android:fontFamily="monospace"
                         android:text="None"
-                        android:textColor="#F8FAFC"
-                        android:textSize="14sp"
-                        android:fontFamily="monospace" />
+                        android:textColor="@color/text_primary"
+                        android:textSize="15sp"
+                        android:textStyle="bold" />
                 </LinearLayout>
 
-                <LinearLayout
-                    android:layout_width="match_parent"
+                <TextView
+                    android:id="@+id/tvCallId"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:orientation="horizontal">
+                    android:layout_marginTop="4dp"
+                    android:ellipsize="middle"
+                    android:fontFamily="monospace"
+                    android:maxLines="1"
+                    android:text="Call ID: None"
+                    android:textColor="@color/text_muted"
+                    android:textSize="11sp" />
 
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="Call ID: "
-                        android:textColor="#94A3B8"
-                        android:textSize="14sp" />
-
-                    <TextView
-                        android:id="@+id/tvCallId"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:ellipsize="middle"
-                        android:maxLines="1"
-                        android:text="None"
-                        android:textColor="#64748B"
-                        android:textSize="12sp"
-                        android:fontFamily="monospace" />
-                </LinearLayout>
-
-                <!-- Incoming Call Actions -->
+                <!-- Incoming Call Actions (Answer / Reject) -->
                 <LinearLayout
                     android:id="@+id/layoutIncomingActions"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
+                    android:layout_marginTop="14dp"
                     android:orientation="horizontal"
                     android:visibility="gone">
 
                     <Button
                         android:id="@+id/btnAnswerCall"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
+                        android:layout_height="48dp"
                         android:layout_weight="1"
-                        android:layout_marginEnd="4dp"
-                        android:backgroundTint="#22C55E"
-                        android:text="ANSWER"
-                        android:textColor="#FFFFFF"
-                        android:textStyle="bold" />
+                        android:layout_marginEnd="6dp"
+                        android:backgroundTint="@color/neon_emerald"
+                        android:text="YANITLA"
+                        android:textColor="#000000"
+                        android:textStyle="bold"
+                        app:cornerRadius="12dp" />
 
                     <Button
                         android:id="@+id/btnRejectCall"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
+                        android:layout_height="48dp"
                         android:layout_weight="1"
-                        android:layout_marginStart="4dp"
-                        android:backgroundTint="#EF4444"
-                        android:text="REJECT"
+                        android:layout_marginStart="6dp"
+                        android:backgroundTint="@color/neon_crimson"
+                        android:text="REDDET"
                         android:textColor="#FFFFFF"
-                        android:textStyle="bold" />
+                        android:textStyle="bold"
+                        app:cornerRadius="12dp" />
                 </LinearLayout>
 
-                <!-- Active Call Actions -->
+                <!-- Active Call Hangup Action -->
                 <Button
                     android:id="@+id/btnHangupCall"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:backgroundTint="#EF4444"
-                    android:text="HANG UP"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="14dp"
+                    android:backgroundTint="@color/neon_crimson"
+                    android:text="ARAMAYI SONLANDIR"
                     android:textColor="#FFFFFF"
                     android:textStyle="bold"
-                    android:visibility="gone" />
+                    android:visibility="gone"
+                    app:cornerRadius="12dp" />
 
-            </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
-
-        <!-- Outgoing Call Section -->
-        <com.google.android.material.card.MaterialCardView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            app:cardBackgroundColor="#1E293B"
-            app:cardCornerRadius="12dp"
-            app:cardElevation="0dp"
-            app:strokeColor="#334155"
-            app:strokeWidth="1dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="OUTGOING GSM CALL"
-                    android:textColor="#F8FAFC"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
-
+                <!-- Outgoing Call Trigger -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
+                    android:layout_marginTop="14dp"
+                    android:gravity="center_vertical"
                     android:orientation="horizontal">
 
                     <com.google.android.material.textfield.TextInputLayout
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:textColorHint="#64748B"
-                        app:boxBackgroundColor="#0F172A"
-                        app:boxCornerRadiusBottomEnd="8dp"
-                        app:boxCornerRadiusBottomStart="8dp"
-                        app:boxCornerRadiusTopEnd="8dp"
-                        app:boxCornerRadiusTopStart="8dp"
-                        app:boxStrokeColor="#3B82F6">
+                        android:textColorHint="@color/text_muted"
+                        app:boxBackgroundColor="@color/bg_void"
+                        app:boxCornerRadiusBottomEnd="12dp"
+                        app:boxCornerRadiusBottomStart="12dp"
+                        app:boxCornerRadiusTopEnd="12dp"
+                        app:boxCornerRadiusTopStart="12dp"
+                        app:boxStrokeColor="@color/border_neon_cyan">
 
                         <com.google.android.material.textfield.TextInputEditText
                             android:id="@+id/etDialNumber"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
-                            android:hint="Phone Number (e.g. +905...)"
+                            android:fontFamily="monospace"
+                            android:hint="Yeni Arama (+905...)"
                             android:inputType="phone"
-                            android:textColor="#F8FAFC"
-                            android:textSize="14sp" />
+                            android:textColor="@color/text_primary"
+                            android:textSize="13sp" />
                     </com.google.android.material.textfield.TextInputLayout>
 
                     <Button
                         android:id="@+id/btnDialCall"
                         android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_gravity="center_vertical"
+                        android:layout_height="52dp"
                         android:layout_marginStart="8dp"
-                        android:backgroundTint="#3B82F6"
-                        android:text="CALL"
+                        android:backgroundTint="#0284C7"
+                        android:text="ARA"
                         android:textColor="#FFFFFF"
-                        android:textStyle="bold" />
+                        android:textStyle="bold"
+                        app:cornerRadius="12dp" />
                 </LinearLayout>
+
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Audio Probe Diagnostic Card -->
+        <!-- Gateway Control Switch Buttons -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnStartGateway"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:layout_marginEnd="6dp"
+                android:backgroundTint="@color/neon_emerald"
+                android:text="BAŞLAT"
+                android:textColor="#000000"
+                android:textStyle="bold"
+                app:cornerRadius="12dp" />
+
+            <Button
+                android:id="@+id/btnStopGateway"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:layout_marginStart="6dp"
+                android:backgroundTint="#334155"
+                android:text="DURDUR"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                app:cornerRadius="12dp" />
+        </LinearLayout>
+
+        <!-- Audio Probe Diagnostic Card (Collapsible) -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            app:cardBackgroundColor="#1E293B"
-            app:cardCornerRadius="12dp"
+            android:layout_marginTop="14dp"
+            app:cardBackgroundColor="@color/bg_card"
+            app:cardCornerRadius="16dp"
             app:cardElevation="0dp"
-            app:strokeColor="#475569"
+            app:strokeColor="@color/border_subtle"
             app:strokeWidth="1dp">
 
             <LinearLayout
@@ -472,35 +620,29 @@
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
                     android:orientation="horizontal">
 
                     <TextView
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:text="AUDIO PROBE"
-                        android:textColor="#F59E0B"
-                        android:textSize="14sp"
-                        android:textStyle="bold" />
+                        android:text="SES YÖNLENDİRME TESTİ (PROBE)"
+                        android:textColor="@color/neon_amber"
+                        android:textSize="11sp"
+                        android:textStyle="bold"
+                        android:letterSpacing="0.05" />
 
                     <TextView
                         android:id="@+id/tvAudioProbeCallState"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:fontFamily="monospace"
                         android:text="CALL: IDLE"
-                        android:textColor="#94A3B8"
-                        android:textSize="12sp"
-                        android:textStyle="bold"
-                        android:fontFamily="monospace" />
+                        android:textColor="@color/text_muted"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
                 </LinearLayout>
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:text="Stock Qualcomm modem audio path diagnostics (5s PCM RMS test)"
-                    android:textColor="#64748B"
-                    android:textSize="11sp" />
 
                 <!-- Probe Buttons Row 1 -->
                 <LinearLayout
@@ -512,24 +654,26 @@
                     <Button
                         android:id="@+id/btnProbeMic"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
+                        android:layout_height="40dp"
                         android:layout_weight="1"
                         android:layout_marginEnd="4dp"
-                        android:backgroundTint="#334155"
+                        android:backgroundTint="#1E293B"
                         android:text="MIC"
                         android:textSize="11sp"
-                        android:textColor="#FFFFFF" />
+                        android:textColor="#FFFFFF"
+                        app:cornerRadius="8dp" />
 
                     <Button
                         android:id="@+id/btnProbeVoiceComm"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
+                        android:layout_height="40dp"
                         android:layout_weight="1"
                         android:layout_marginStart="4dp"
-                        android:backgroundTint="#334155"
+                        android:backgroundTint="#1E293B"
                         android:text="VOICE_COMM"
                         android:textSize="11sp"
-                        android:textColor="#FFFFFF" />
+                        android:textColor="#FFFFFF"
+                        app:cornerRadius="8dp" />
                 </LinearLayout>
 
                 <!-- Probe Buttons Row 2 -->
@@ -542,24 +686,26 @@
                     <Button
                         android:id="@+id/btnProbeVoiceCall"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
+                        android:layout_height="40dp"
                         android:layout_weight="1"
                         android:layout_marginEnd="4dp"
-                        android:backgroundTint="#334155"
+                        android:backgroundTint="#1E293B"
                         android:text="VOICE_CALL"
                         android:textSize="11sp"
-                        android:textColor="#FFFFFF" />
+                        android:textColor="#FFFFFF"
+                        app:cornerRadius="8dp" />
 
                     <Button
                         android:id="@+id/btnProbeVoiceUplink"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
+                        android:layout_height="40dp"
                         android:layout_weight="1"
                         android:layout_marginStart="4dp"
-                        android:backgroundTint="#334155"
+                        android:backgroundTint="#1E293B"
                         android:text="VOICE_UPLINK"
                         android:textSize="11sp"
-                        android:textColor="#FFFFFF" />
+                        android:textColor="#FFFFFF"
+                        app:cornerRadius="8dp" />
                 </LinearLayout>
 
                 <!-- Probe Buttons Row 3 -->
@@ -572,90 +718,114 @@
                     <Button
                         android:id="@+id/btnProbeVoiceDownlink"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
+                        android:layout_height="40dp"
                         android:layout_weight="1"
                         android:layout_marginEnd="4dp"
-                        android:backgroundTint="#334155"
+                        android:backgroundTint="#1E293B"
                         android:text="VOICE_DOWNLINK"
                         android:textSize="11sp"
-                        android:textColor="#FFFFFF" />
+                        android:textColor="#FFFFFF"
+                        app:cornerRadius="8dp" />
 
                     <Button
                         android:id="@+id/btnProbeRemoteSubmix"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
+                        android:layout_height="40dp"
                         android:layout_weight="1"
                         android:layout_marginStart="4dp"
-                        android:backgroundTint="#334155"
+                        android:backgroundTint="#1E293B"
                         android:text="REMOTE_SUBMIX"
                         android:textSize="11sp"
-                        android:textColor="#FFFFFF" />
+                        android:textColor="#FFFFFF"
+                        app:cornerRadius="8dp" />
                 </LinearLayout>
 
-                <!-- Run All Probes Button -->
                 <Button
                     android:id="@+id/btnProbeAll"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
+                    android:layout_height="42dp"
                     android:layout_marginTop="8dp"
-                    android:backgroundTint="#F59E0B"
-                    android:text="RUN ALL 6 AUDIO PROBES (SEQUENTIAL)"
-                    android:textColor="#000000"
+                    android:backgroundTint="#D97706"
+                    android:text="TÜM SES KANALLARINI TARA (RMS TEST)"
+                    android:textColor="#FFFFFF"
+                    android:textSize="11sp"
                     android:textStyle="bold"
-                    android:textSize="12sp" />
+                    app:cornerRadius="8dp" />
 
-                <!-- Probe Status Output -->
                 <TextView
                     android:id="@+id/tvProbeStatus"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="8dp"
-                    android:background="#0F172A"
+                    android:background="@drawable/bg_terminal_box"
                     android:fontFamily="monospace"
-                    android:padding="8dp"
-                    android:text="Audio probe ready. Dial 9333 before testing call sources."
-                    android:textColor="#38BDF8"
+                    android:padding="10dp"
+                    android:text="Ses testi hazır. Aramadayken 9333 arayıp deneyin."
+                    android:textColor="@color/neon_sky"
                     android:textSize="11sp" />
-
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Event Log Section -->
-        <TextView
-            android:layout_width="wrap_content"
+        <!-- Live Cyber Terminal / Event Stream -->
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="EVENT LOG"
-            android:textColor="#94A3B8"
-            android:textSize="12sp"
-            android:textStyle="bold" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="CANLI SİSTEM KONSOLU"
+                android:textColor="@color/text_muted"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:letterSpacing="0.08" />
+
+            <Button
+                android:id="@+id/btnClearLogs"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:padding="0dp"
+                android:text="TEMİZLE"
+                android:textColor="@color/text_muted"
+                android:textSize="10sp" />
+        </LinearLayout>
 
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
-            android:layout_height="180dp"
+            android:layout_height="160dp"
             android:layout_marginTop="6dp"
-            app:cardBackgroundColor="#0B1120"
-            app:cardCornerRadius="8dp"
+            app:cardBackgroundColor="@color/bg_terminal"
+            app:cardCornerRadius="12dp"
             app:cardElevation="0dp"
-            app:strokeColor="#1E293B"
+            app:strokeColor="@color/border_subtle"
             app:strokeWidth="1dp">
 
             <ScrollView
                 android:id="@+id/scrollEventLog"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
-                android:padding="8dp">
+                android:padding="10dp">
 
                 <TextView
                     android:id="@+id/tvEventLog"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:fontFamily="monospace"
-                    android:text="Ready.\n"
-                    android:textColor="#38BDF8"
+                    android:lineSpacingExtra="3dp"
+                    android:text="[KONSOL] Telefon Geçidi Sistemi Hazır.\n"
+                    android:textColor="@color/neon_emerald"
                     android:textSize="11sp" />
             </ScrollView>
         </com.google.android.material.card.MaterialCardView>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="32dp" />
 
     </LinearLayout>
 </ScrollView>

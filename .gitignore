@@ -1,10 +1,13 @@
-﻿*.zip
+*.zip
 *.tgz
 *.tar
 *.log
 *.png
 *.tmp
 *.msi
+*.txt
+*.pyc
+__pycache__/
 clean_usb_driver/
 clockworkmod/
 miflash_unlock/
@@ -14,3 +17,8 @@ research_firehose/
 build/
 .cxx/
 *.apk
+derived_data/
+Payload/
+*.ipa
+RedmiGateway/root/
+

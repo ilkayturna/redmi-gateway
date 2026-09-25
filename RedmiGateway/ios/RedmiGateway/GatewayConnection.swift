@@ -50,7 +50,7 @@ public class GatewayConnection: ObservableObject {
         if let savedIp = defaults.string(forKey: kGatewayIp), !savedIp.isEmpty {
             self.currentHost = savedIp
         } else {
-            self.currentHost = "192.168.207.155"
+            self.currentHost = ""
         }
         
         let savedPort = defaults.integer(forKey: kGatewayPort)
@@ -254,15 +254,15 @@ public class GatewayConnection: ObservableObject {
                 let date = Date(timeIntervalSince1970: Double(sms.timestamp) / 1000.0)
                 let item = SmsMessageItem(senderOrRecipient: sms.sender, body: sms.message, isIncoming: true, timestamp: date)
                 self.smsMessages.append(item)
-                self.log("SMS received from \(sms.sender): \(sms.message)")
+                self.log("SMS received (\(sms.message.count) characters)")
             }
             
         case "sms_send_result":
             if let res = try? JSONDecoder().decode(SmsSendResultMessage.self, from: data) {
                 if res.success {
-                    self.log("SMS to \(res.recipient) sent successfully")
+                    self.log("SMS send request accepted")
                 } else {
-                    self.log("SMS to \(res.recipient) failed: \(res.error ?? "Unknown error")")
+                    self.log("SMS send failed: \(res.error ?? "Unknown error")")
                 }
             }
             
@@ -276,7 +276,7 @@ public class GatewayConnection: ObservableObject {
         let rawId = callMsg.callId ?? ""
         let number = callMsg.number ?? ""
         
-        self.log("Call Event: state=\(callMsg.state), num=\(number), id=\(rawId)")
+        self.log("Call Event: state=\(callMsg.state)")
         
         if callState == .idle || callState == .disconnected {
             self.currentCall = nil
@@ -295,7 +295,7 @@ public class GatewayConnection: ObservableObject {
             let rawId = call.callId ?? ""
             let number = call.number ?? ""
             
-            self.log("State Sync: Active call found (\(call.state), num=\(number))")
+            self.log("State Sync: Active call found (\(call.state))")
             let existingId = self.currentCall?.id ?? UUID()
             self.currentCall = GSMCall(id: existingId, rawCallId: rawId, number: number, state: callState)
             
@@ -341,13 +341,13 @@ public class GatewayConnection: ObservableObject {
     }
     
     public func sendDial(number: String) {
-        log("Sending DIAL for number: \(number)")
+        log("Sending DIAL")
         let payload = DialPayload(number: number)
         sendPayload(payload)
     }
     
     public func sendSms(recipient: String, message: String) {
-        log("Sending SMS to \(recipient): \(message)")
+        log("Sending SMS (\(message.count) characters)")
         let payload = SendSmsPayload(recipient: recipient, message: message)
         sendPayload(payload)
         let item = SmsMessageItem(senderOrRecipient: recipient, body: message, isIncoming: false, timestamp: Date())

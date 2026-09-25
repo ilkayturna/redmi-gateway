@@ -1,0 +1,82 @@
+:root {
+  color-scheme: light dark;
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  font-size: 17px;
+  --background: #f2f2f7;
+  --surface: #fff;
+  --label: #1c1c1e;
+  --secondary: #636366;
+  --separator: #d1d1d6;
+  --accent: #0a84ff;
+  --danger: #d70015;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #000;
+    --surface: #1c1c1e;
+    --label: #f2f2f7;
+    --secondary: #aeaeb2;
+    --separator: #38383a;
+    --accent: #0a84ff;
+    --danger: #ff453a;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--background); color: var(--label); -webkit-text-size-adjust: 100%; }
+main {
+  width: min(100%, 640px);
+  margin: 0 auto;
+  padding: calc(env(safe-area-inset-top) + 32px) 16px calc(env(safe-area-inset-bottom) + 40px);
+}
+header { padding: 0 8px 24px; }
+.eyebrow { margin: 0 0 8px; color: var(--secondary); font-size: .75rem; font-weight: 700; letter-spacing: .06em; }
+h1 { margin: 0; font-size: 2rem; line-height: 1.15; font-weight: 700; letter-spacing: -.03em; }
+h2 { margin: 0 0 16px; font-size: 1.3rem; line-height: 1.25; }
+p { line-height: 1.4; }
+.secondary, .footnote { color: var(--secondary); }
+.secondary { margin: -8px 0 24px; }
+.footnote { margin: 16px 0 0; font-size: .82rem; }
+.status { margin: 12px 0 0; color: var(--secondary); font-size: .88rem; font-variant-numeric: tabular-nums; }
+.status.connected { color: #248a3d; }
+.group { padding: 20px 16px 24px; margin: 0 0 16px; background: var(--surface); border-radius: 16px; }
+form { display: grid; gap: 8px; }
+label { font-size: .88rem; font-weight: 600; }
+input, textarea, button { font: inherit; }
+input:not([type="checkbox"]), textarea {
+  width: 100%; min-height: 48px; padding: 12px;
+  border: 1px solid var(--separator); border-radius: 10px;
+  background: var(--surface); color: var(--label);
+}
+textarea { resize: vertical; }
+input:focus-visible, textarea:focus-visible, button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+button {
+  min-height: 44px; padding: 10px 16px; border: 0; border-radius: 10px;
+  background: var(--background); color: var(--accent); font-weight: 600;
+  touch-action: manipulation;
+}
+button:disabled { opacity: .5; }
+button.primary { background: var(--accent); color: #fff; }
+button.destructive { background: var(--danger); color: #fff; }
+button.secondary-button { color: var(--danger); }
+.remember-row { display: flex; align-items: center; gap: 8px; margin: 8px 0 16px; font-weight: 400; }
+.remember-row input { width: 20px; height: 20px; accent-color: var(--accent); }
+.call-state { display: grid; gap: 4px; min-height: 56px; }
+.call-state span { color: var(--secondary); }
+.call-state strong { font-size: 1.2rem; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.actions { display: flex; gap: 8px; margin: 16px 0; }
+.actions button { flex: 1; }
+.input-action { display: flex; gap: 8px; }
+.input-action input { min-width: 0; flex: 1; }
+.input-action button { flex: 0 0 auto; }
+#dial-form, #sms-form { margin-top: 24px; }
+.message-list { display: grid; gap: 8px; list-style: none; margin: 16px 0 0; padding: 0; }
+.message-list li { padding: 12px; border-radius: 10px; background: var(--background); overflow-wrap: anywhere; }
+.message-list li.outgoing { border-left: 3px solid var(--accent); }
+.message-list strong { display: block; font-size: .84rem; font-variant-numeric: tabular-nums; }
+.message-list time { display: block; color: var(--secondary); font-size: .75rem; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.message-list p { margin: 8px 0 0; white-space: pre-wrap; }
+.empty { padding: 16px 0; color: var(--secondary); text-align: center; }
+.link-button { display: block; margin: 24px auto 0; background: transparent; }
+.feedback { min-height: 20px; padding: 0 8px; font-size: .88rem; color: var(--secondary); }
+@media (max-width: 360px) { .input-action { flex-wrap: wrap; } .input-action button { width: 100%; } }

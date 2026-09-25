@@ -29,7 +29,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     
     override private init() {
         let config = CXProviderConfiguration()
-        config.localizedName = "Redmi Cellular"
+        config.localizedName = "Telefon Geçidi"
         config.supportsVideo = false
         config.maximumCallsPerCallGroup = 1
         config.maximumCallGroups = 1

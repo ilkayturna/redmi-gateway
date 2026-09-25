@@ -3,7 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var connection = GatewayConnection.shared
     
-    @AppStorage("gateway_ip") private var gatewayIp: String = "192.168.207.155"
+    @AppStorage("gateway_ip") private var gatewayIp: String = ""
     @AppStorage("gateway_port") private var gatewayPort: String = "8787"
     @AppStorage("pairing_token") private var pairingToken: String = ""
     
@@ -24,7 +24,7 @@ struct ContentView: View {
                             Text("Gateway IP:")
                                 .font(.system(size: 14, weight: .medium))
                                 .frame(width: 100, alignment: .leading)
-                            TextField("e.g. 192.168.207.155", text: $gatewayIp)
+                            TextField("Redmi hotspot IP adresi", text: $gatewayIp)
                                 .textFieldStyle(.roundedBorder)
                                 .keyboardType(.numbersAndPunctuation)
                                 .autocapitalization(.none)
@@ -204,7 +204,7 @@ struct ContentView: View {
                 }
                 .padding()
             }
-            .navigationTitle("Redmi Gateway")
+            .navigationTitle("Telefon Geçidi")
             .navigationBarTitleDisplayMode(.inline)
         }
     }

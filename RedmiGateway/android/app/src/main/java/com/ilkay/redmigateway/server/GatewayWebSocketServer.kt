@@ -1,6 +1,7 @@
 package com.ilkay.redmigateway.server
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import com.ilkay.redmigateway.RedmiGatewayApp
 import com.ilkay.redmigateway.telecom.CallManager
@@ -32,6 +33,7 @@ class GatewayWebSocketServer(
 
     var serverListener: ServerListener? = null
     private val authenticatedClients = ConcurrentHashMap.newKeySet<WebSocket>()
+    private val failedAuthAttempts = ConcurrentHashMap<WebSocket, Int>()
 
     init {
         isReuseAddr = true
@@ -53,7 +55,7 @@ class GatewayWebSocketServer(
         // Send hello handshake
         val hello = JSONObject().apply {
             put("type", "hello")
-            put("device", "Redmi Note 8")
+            put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
             put("protocol", 1)
         }
         conn.send(hello.toString())
@@ -61,6 +63,7 @@ class GatewayWebSocketServer(
 
     override fun onClose(conn: WebSocket, code: Int, reason: String?, remote: Boolean) {
         val wasAuth = authenticatedClients.remove(conn)
+        failedAuthAttempts.remove(conn)
         val remoteAddr = conn.remoteSocketAddress?.toString() ?: "unknown"
         Log.i(TAG, "Client disconnected: $remoteAddr (Auth: $wasAuth, Reason: $reason)")
         CallManager.log("Client disconnected: $remoteAddr")
@@ -69,11 +72,16 @@ class GatewayWebSocketServer(
 
     override fun onMessage(conn: WebSocket, message: String) {
         val remoteAddr = conn.remoteSocketAddress?.toString() ?: "unknown"
-        Log.d(TAG, "Received message from $remoteAddr: $message")
+
+        if (message.length > 8192) {
+            sendError(conn, "Message exceeds 8192 characters")
+            return
+        }
 
         try {
             val json = JSONObject(message)
             val type = json.optString("type", "")
+            Log.d(TAG, "Received command type=$type from $remoteAddr")
 
             if (type == "auth") {
                 handleAuth(conn, json)
@@ -89,25 +97,37 @@ class GatewayWebSocketServer(
             when (type) {
                 "answer" -> {
                     val callId = json.optString("callId")
+                    if (callId.isBlank()) {
+                        sendError(conn, "answer requires callId")
+                        return
+                    }
                     CallManager.log("WebSocket command: ANSWER (callId=$callId)")
-                    val success = CallManager.answer()
+                    val success = CallManager.answer(callId)
                     sendAck(conn, "answer", success)
                 }
                 "reject" -> {
                     val callId = json.optString("callId")
+                    if (callId.isBlank()) {
+                        sendError(conn, "reject requires callId")
+                        return
+                    }
                     CallManager.log("WebSocket command: REJECT (callId=$callId)")
-                    val success = CallManager.reject()
+                    val success = CallManager.reject(callId)
                     sendAck(conn, "reject", success)
                 }
                 "hangup" -> {
                     val callId = json.optString("callId")
+                    if (callId.isBlank()) {
+                        sendError(conn, "hangup requires callId")
+                        return
+                    }
                     CallManager.log("WebSocket command: HANGUP (callId=$callId)")
-                    val success = CallManager.hangup()
+                    val success = CallManager.hangup(callId)
                     sendAck(conn, "hangup", success)
                 }
                 "dial" -> {
                     val number = json.optString("number", "")
-                    CallManager.log("WebSocket command: DIAL $number")
+                    CallManager.log("WebSocket command: DIAL")
                     val success = CallManager.dial(context, number)
                     sendAck(conn, "dial", success)
                 }
@@ -123,7 +143,7 @@ class GatewayWebSocketServer(
                 "send_sms", "sms_send" -> {
                     val recipient = json.optString("recipient", "")
                     val smsText = json.optString("message", "")
-                    CallManager.log("WebSocket command: SEND_SMS to $recipient")
+                    CallManager.log("WebSocket command: SEND_SMS")
                     val (success, error) = SmsManagerHelper.sendSms(context, recipient, smsText)
                     val result = JSONObject().apply {
                         put("type", "sms_send_result")
@@ -192,6 +212,7 @@ class GatewayWebSocketServer(
         val expectedToken = RedmiGatewayApp.getPairingToken()
 
         if (token.equals(expectedToken, ignoreCase = true)) {
+            failedAuthAttempts.remove(conn)
             authenticatedClients.add(conn)
             CallManager.log("Client authenticated successfully: ${conn.remoteSocketAddress}")
 
@@ -215,13 +236,17 @@ class GatewayWebSocketServer(
                 conn.send(callEvent.toString())
             }
         } else {
-            CallManager.log("Client authentication failed: invalid token '$token'")
+            val failures = failedAuthAttempts.merge(conn, 1, Int::plus) ?: 1
+            CallManager.log("Client authentication failed")
             val authResult = JSONObject().apply {
                 put("type", "auth_result")
                 put("success", false)
                 put("message", "Invalid pairing token")
             }
             conn.send(authResult.toString())
+            if (failures >= 5) {
+                conn.close(1008, "Too many authentication failures")
+            }
         }
     }
 
@@ -271,7 +296,7 @@ class GatewayWebSocketServer(
             }
         }
         val payload = event.toString()
-        Log.d(TAG, "Broadcasting call event to ${authenticatedClients.size} client(s): $payload")
+        Log.d(TAG, "Broadcasting call state=$state to ${authenticatedClients.size} client(s)")
 
         for (client in authenticatedClients) {
             try {
@@ -294,7 +319,7 @@ class GatewayWebSocketServer(
             put("timestamp", timestamp)
         }
         val payload = event.toString()
-        Log.d(TAG, "Broadcasting SMS received event to ${authenticatedClients.size} client(s): $payload")
+        Log.d(TAG, "Broadcasting SMS received event to ${authenticatedClients.size} authenticated client(s)")
 
         for (client in authenticatedClients) {
             try {
@@ -312,6 +337,7 @@ class GatewayWebSocketServer(
             CallManager.removeListener(this)
             SmsReceiver.webSocketServer = null
             authenticatedClients.clear()
+            failedAuthAttempts.clear()
             stop(1000)
             serverListener?.onClientCountChanged(0)
             CallManager.log("WebSocket server stopped")

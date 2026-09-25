@@ -26,13 +26,13 @@ class GatewayInCallService : InCallService() {
 
     override fun onCallAdded(call: Call) {
         super.onCallAdded(call)
-        Log.d(TAG, "onCallAdded: $call")
+        Log.d(TAG, "onCallAdded")
         CallManager.onCallAdded(call)
     }
 
     override fun onCallRemoved(call: Call) {
         super.onCallRemoved(call)
-        Log.d(TAG, "onCallRemoved: $call")
+        Log.d(TAG, "onCallRemoved")
         CallManager.onCallRemoved(call)
     }
 }

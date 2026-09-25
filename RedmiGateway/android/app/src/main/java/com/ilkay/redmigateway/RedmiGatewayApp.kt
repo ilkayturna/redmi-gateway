@@ -3,6 +3,7 @@ package com.ilkay.redmigateway
 import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
+import java.security.SecureRandom
 
 class RedmiGatewayApp : Application() {
 
@@ -12,6 +13,7 @@ class RedmiGatewayApp : Application() {
 
         private const val PREFS_NAME = "redmi_gateway_prefs"
         private const val KEY_PAIRING_TOKEN = "pairing_token"
+        private val secureRandom = SecureRandom()
 
         fun getPairingToken(): String {
             val prefs = instance.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -26,7 +28,7 @@ class RedmiGatewayApp : Application() {
         private fun generateRandomToken(): String {
             val chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // Exclude confusing chars like 0/O, 1/I
             return (1..6)
-                .map { chars.random() }
+                .map { chars[secureRandom.nextInt(chars.length)] }
                 .joinToString("")
         }
     }

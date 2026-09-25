@@ -15,6 +15,8 @@
 		1006 /* GatewayMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2006 /* GatewayMessage.swift */; };
 		1007 /* CallKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2007 /* CallKit.framework */; };
 		1008 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2008 /* AVFoundation.framework */; };
+		1009 /* AudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2010 /* AudioEngine.swift */; };
+		1010 /* MessagesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2011 /* MessagesView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +30,8 @@
 		2007 /* CallKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CallKit.framework; path = System/Library/Frameworks/CallKit.framework; sourceTree = SDKROOT; };
 		2008 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
 		2009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		2010 /* AudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEngine.swift; sourceTree = "<group>"; };
+		2011 /* MessagesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagesView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -61,6 +65,8 @@
 				2004 /* CallKitManager.swift */,
 				2005 /* CallState.swift */,
 				2006 /* GatewayMessage.swift */,
+				2010 /* AudioEngine.swift */,
+				2011 /* MessagesView.swift */,
 				2009 /* Info.plist */,
 			);
 			path = RedmiGateway;
@@ -157,6 +163,8 @@
 				1004 /* CallKitManager.swift in Sources */,
 				1005 /* CallState.swift in Sources */,
 				1006 /* GatewayMessage.swift in Sources */,
+				1009 /* AudioEngine.swift in Sources */,
+				1010 /* MessagesView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

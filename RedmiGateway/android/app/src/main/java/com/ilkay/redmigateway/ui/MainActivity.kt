@@ -1,20 +1,27 @@
 package com.ilkay.redmigateway.ui
 
 import android.Manifest
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
 import android.app.role.RoleManager
+import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.graphics.Color
-import android.net.ConnectivityManager
-import android.net.LinkProperties
+import android.net.Uri
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.telecom.TelecomManager
 import android.view.View
 import android.widget.Toast
@@ -38,8 +45,43 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var gatewayService: GatewayService? = null
     private var isBound = false
+    private var pulseAnimator: ObjectAnimator? = null
 
     private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    private val serviceStartElapsed = SystemClock.elapsedRealtime()
+
+    private val uptimeRunnable = object : Runnable {
+        override fun run() {
+            val elapsedSec = (SystemClock.elapsedRealtime() - serviceStartElapsed) / 1000
+            val hours = elapsedSec / 3600
+            val mins = (elapsedSec % 3600) / 60
+            val secs = elapsedSec % 60
+            binding.tvUptime.text = String.format(Locale.getDefault(), "%02d:%02d:%02d", hours, mins, secs)
+            mainHandler.postDelayed(this, 1000)
+        }
+    }
+
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_BATTERY_CHANGED) {
+                val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+                val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+                val tempTenths = intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1)
+                val plugged = intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)
+
+                val pct = if (level >= 0 && scale > 0) (level * 100) / scale else level
+                val tempC = if (tempTenths > 0) tempTenths / 10.0 else 0.0
+                val chargeStr = when (plugged) {
+                    BatteryManager.BATTERY_PLUGGED_AC -> "AC Şarj"
+                    BatteryManager.BATTERY_PLUGGED_USB -> "USB Şarj"
+                    BatteryManager.BATTERY_PLUGGED_WIRELESS -> "Kablosuz Şarj"
+                    else -> "Pilde"
+                }
+
+                binding.tvBatteryStats.text = "%d%% • %.1f°C • %s".format(Locale.getDefault(), pct, tempC, chargeStr)
+            }
+        }
+    }
 
     private val dialerRoleLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -52,9 +94,9 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
     ) { permissions ->
         val allGranted = permissions.entries.all { it.value }
         if (allGranted) {
-            CallManager.log("All requested permissions granted")
+            CallManager.log("Tüm izinler başarıyla verildi.")
         } else {
-            CallManager.log("Some permissions were denied: $permissions")
+            CallManager.log("Bazı izinler reddedildi: $permissions")
         }
     }
 
@@ -83,6 +125,8 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
         requestAppPermissions()
 
         CallManager.addListener(this)
+        startGatewayService()
+        startPulseAnimation()
     }
 
     override fun onResume() {
@@ -91,14 +135,28 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
         updateNetworkIp()
         updateGatewayStatusUi()
 
-        if (GatewayService.isRunning && !isBound) {
+        registerReceiver(batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        mainHandler.post(uptimeRunnable)
+
+        if (!GatewayService.isRunning) {
+            startGatewayService()
+        } else if (!isBound) {
             val intent = Intent(this, GatewayService::class.java)
             bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
         }
     }
 
+    override fun onPause() {
+        super.onPause()
+        try {
+            unregisterReceiver(batteryReceiver)
+        } catch (_: Exception) {}
+        mainHandler.removeCallbacks(uptimeRunnable)
+    }
+
     override fun onDestroy() {
         CallManager.removeListener(this)
+        stopPulseAnimation()
         if (isBound) {
             unbindService(serviceConnection)
             isBound = false
@@ -107,9 +165,23 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
     }
 
     private fun setupStaticInfo() {
-        binding.tvDeviceModel.text = "Device: Xiaomi Redmi Note 8 (ginkgo)"
-        binding.tvPort.text = "8787"
+        binding.tvDeviceModel.text = "Xiaomi Redmi Note 8 • Ginkgo (Turkcell VoLTE)"
+        binding.tvPort.text = "8787 / 8788"
         binding.tvPairingToken.text = RedmiGatewayApp.getPairingToken()
+    }
+
+    private fun startPulseAnimation() {
+        pulseAnimator = ObjectAnimator.ofFloat(binding.ivStatusDot, "alpha", 0.3f, 1.0f).apply {
+            duration = 900
+            repeatMode = ValueAnimator.REVERSE
+            repeatCount = ValueAnimator.INFINITE
+            start()
+        }
+    }
+
+    private fun stopPulseAnimation() {
+        pulseAnimator?.cancel()
+        pulseAnimator = null
     }
 
     private fun setupListeners() {
@@ -125,24 +197,48 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
             stopGatewayService()
         }
 
+        binding.btnCopyToken.setOnClickListener {
+            val token = binding.tvPairingToken.text.toString()
+            val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("Gateway Token", token))
+            Toast.makeText(this, "Eşleşme tokeni kopyalandı: $token", Toast.LENGTH_SHORT).show()
+        }
+
+        binding.btnOpenWebUi.setOnClickListener {
+            val ip = binding.tvLocalIp.text.toString()
+            val url = "http://$ip:8788"
+            try {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                startActivity(intent)
+            } catch (e: Exception) {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("Web UI URL", url))
+                Toast.makeText(this, "Web adresi kopyalandı: $url", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        binding.btnClearLogs.setOnClickListener {
+            binding.tvEventLog.text = "[KONSOL] Temizlendi.\n"
+        }
+
         binding.btnAnswerCall.setOnClickListener {
             val success = CallManager.answer()
             if (!success) {
-                Toast.makeText(this, "Failed to answer call", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Arama yanıtlanamadı", Toast.LENGTH_SHORT).show()
             }
         }
 
         binding.btnRejectCall.setOnClickListener {
             val success = CallManager.reject()
             if (!success) {
-                Toast.makeText(this, "Failed to reject call", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Arama reddedilemedi", Toast.LENGTH_SHORT).show()
             }
         }
 
         binding.btnHangupCall.setOnClickListener {
             val success = CallManager.hangup()
             if (!success) {
-                Toast.makeText(this, "Failed to hang up call", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Arama sonlandırılamadı", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -153,10 +249,10 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
                 if (success) {
                     binding.etDialNumber.text?.clear()
                 } else {
-                    Toast.makeText(this, "Failed to initiate call", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Arama başlatılamadı", Toast.LENGTH_SHORT).show()
                 }
             } else {
-                Toast.makeText(this, "Please enter a phone number", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Lütfen bir telefon numarası girin", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -171,7 +267,7 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
     }
 
     private fun runSingleProbe(sourceName: String) {
-        binding.tvProbeStatus.text = "Running probe: $sourceName (5s)..."
+        binding.tvProbeStatus.text = "Test başlatıldı: $sourceName (5s)..."
         Thread {
             val res = AudioProbeManager.runProbeForSource(sourceName)
             mainHandler.post {
@@ -185,7 +281,7 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
 
     private fun runAllProbes() {
         binding.btnProbeAll.isEnabled = false
-        binding.tvProbeStatus.text = "Starting sequential test of all 6 AudioSources (approx 35s)..."
+        binding.tvProbeStatus.text = "Tüm 6 ses kaynağı taranıyor (yaklaşık 35 sn)..."
         Thread {
             val sb = StringBuilder()
             val results = AudioProbeManager.runAllProbes()
@@ -208,7 +304,10 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
             Manifest.permission.ANSWER_PHONE_CALLS,
             Manifest.permission.READ_CALL_LOG,
             Manifest.permission.RECORD_AUDIO,
-            Manifest.permission.MODIFY_AUDIO_SETTINGS
+            Manifest.permission.MODIFY_AUDIO_SETTINGS,
+            Manifest.permission.RECEIVE_SMS,
+            Manifest.permission.READ_SMS,
+            Manifest.permission.SEND_SMS
         )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
@@ -228,7 +327,7 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
             val roleManager = getSystemService(RoleManager::class.java)
             if (roleManager != null && roleManager.isRoleAvailable(RoleManager.ROLE_DIALER)) {
                 if (roleManager.isRoleHeld(RoleManager.ROLE_DIALER)) {
-                    Toast.makeText(this, "Redmi Gateway is already default dialer", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Telefon Geçidi zaten varsayılan arama uygulaması", Toast.LENGTH_SHORT).show()
                     updateDialerStatus()
                     return
                 }
@@ -238,7 +337,6 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
             }
         }
 
-        // Fallback for earlier versions or standard telecom intent
         val telecomManager = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
         if (telecomManager != null && packageName != telecomManager.defaultDialerPackage) {
             @Suppress("DEPRECATION")
@@ -247,7 +345,7 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
             }
             dialerRoleLauncher.launch(intent)
         } else {
-            Toast.makeText(this, "Already default dialer", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Zaten varsayılan arama uygulaması", Toast.LENGTH_SHORT).show()
             updateDialerStatus()
         }
     }
@@ -256,12 +354,12 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
         val telecomManager = getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
         val isDefault = telecomManager?.defaultDialerPackage == packageName
         if (isDefault) {
-            binding.tvDialerStatus.text = "YES"
-            binding.tvDialerStatus.setTextColor(Color.parseColor("#22C55E"))
+            binding.chipDialer.text = "DIALER: AKTİF"
+            binding.chipDialer.setTextColor(Color.parseColor("#00F59B"))
             binding.btnRequestDialer.visibility = View.GONE
         } else {
-            binding.tvDialerStatus.text = "NO"
-            binding.tvDialerStatus.setTextColor(Color.parseColor("#EF4444"))
+            binding.chipDialer.text = "DIALER: PASİF"
+            binding.chipDialer.setTextColor(Color.parseColor("#F43F5E"))
             binding.btnRequestDialer.visibility = View.VISIBLE
         }
     }
@@ -284,8 +382,7 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
                     val addr = addresses.nextElement()
                     if (addr is Inet4Address && !addr.isLoopbackAddress) {
                         val host = addr.hostAddress ?: continue
-                        CallManager.log("Network discovered: ${iface.name} -> $host")
-                        // Prioritize Wi-Fi / SoftAP interfaces (wlan, ap) or private hotspot subnets (192.168.x.x)
+                        CallManager.log("Ağ tespit edildi: ${iface.name} -> $host")
                         if (iface.name.contains("wlan") || iface.name.contains("ap") || host.startsWith("192.168.")) {
                             if (selectedIp == null || iface.name.startsWith("wlan") || iface.name.startsWith("ap")) {
                                 selectedIp = host
@@ -297,7 +394,7 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
                 }
             }
         } catch (e: Exception) {
-            CallManager.log("Error determining IP: ${e.message}")
+            CallManager.log("IP tespiti hatası: ${e.message}")
         }
         return selectedIp
     }
@@ -330,56 +427,61 @@ class MainActivity : AppCompatActivity(), CallManager.CallListener {
     private fun updateGatewayStatusUi() {
         val running = GatewayService.isRunning
         if (running) {
-            binding.tvGatewayStatus.text = "RUNNING"
-            binding.tvGatewayStatus.setTextColor(Color.parseColor("#22C55E"))
+            binding.tvGatewayStatus.text = "ONLINE"
+            binding.tvGatewayStatus.setTextColor(Color.parseColor("#00F59B"))
+            binding.ivStatusDot.setBackgroundResource(com.ilkay.redmigateway.R.drawable.bg_pulse_dot)
             binding.btnStartGateway.isEnabled = false
             binding.btnStopGateway.isEnabled = true
         } else {
-            binding.tvGatewayStatus.text = "STOPPED"
-            binding.tvGatewayStatus.setTextColor(Color.parseColor("#EF4444"))
+            binding.tvGatewayStatus.text = "OFFLINE"
+            binding.tvGatewayStatus.setTextColor(Color.parseColor("#F43F5E"))
             binding.btnStartGateway.isEnabled = true
             binding.btnStopGateway.isEnabled = false
         }
 
         val clientCount = gatewayService?.getAuthenticatedClientCount() ?: 0
-        binding.tvClientsCount.text = "$clientCount"
+        binding.tvClientsCount.text = "$clientCount Cihaz"
     }
 
     // CallManager.CallListener implementation
     override fun onCallStateChanged(callId: String, state: String, number: String?) {
         mainHandler.post {
-            binding.tvCallState.text = state.uppercase(Locale.getDefault())
-            binding.tvCallNumber.text = if (!number.isNullOrBlank()) number else "None"
-            binding.tvCallId.text = if (callId != "none") callId else "None"
-
-            binding.tvAudioProbeCallState.text = "CALL: ${state.uppercase(Locale.getDefault())}"
+            val stateUpper = state.uppercase(Locale.getDefault())
+            binding.tvCallNumber.text = if (!number.isNullOrBlank()) number else "Gizli Numara"
+            binding.tvCallId.text = if (callId != "none") "ID: $callId" else "Boşta"
+            binding.tvAudioProbeCallState.text = "CALL: $stateUpper"
 
             when (state.lowercase(Locale.getDefault())) {
                 "ringing" -> {
-                    binding.tvCallState.setTextColor(Color.parseColor("#F59E0B"))
-                    binding.tvAudioProbeCallState.setTextColor(Color.parseColor("#F59E0B"))
+                    binding.tvCallState.text = "🔔 ÇALIYOR (RINGING)"
+                    binding.tvCallState.setTextColor(Color.parseColor("#FBBF24"))
+                    binding.tvAudioProbeCallState.setTextColor(Color.parseColor("#FBBF24"))
                     binding.layoutIncomingActions.visibility = View.VISIBLE
                     binding.btnHangupCall.visibility = View.GONE
                 }
                 "active" -> {
-                    binding.tvCallState.setTextColor(Color.parseColor("#22C55E"))
-                    binding.tvAudioProbeCallState.setTextColor(Color.parseColor("#22C55E"))
+                    binding.tvCallState.text = "🟢 AKTİF GÖRÜŞME"
+                    binding.tvCallState.setTextColor(Color.parseColor("#00F59B"))
+                    binding.tvAudioProbeCallState.setTextColor(Color.parseColor("#00F59B"))
                     binding.layoutIncomingActions.visibility = View.GONE
                     binding.btnHangupCall.visibility = View.VISIBLE
                 }
                 "dialing", "connecting", "holding" -> {
+                    binding.tvCallState.text = "📞 BAĞLANIYOR ($stateUpper)"
                     binding.tvCallState.setTextColor(Color.parseColor("#38BDF8"))
                     binding.tvAudioProbeCallState.setTextColor(Color.parseColor("#38BDF8"))
                     binding.layoutIncomingActions.visibility = View.GONE
                     binding.btnHangupCall.visibility = View.VISIBLE
                 }
                 "disconnected", "idle" -> {
+                    binding.tvCallState.text = "BOŞTA (IDLE)"
                     binding.tvCallState.setTextColor(Color.parseColor("#94A3B8"))
                     binding.tvAudioProbeCallState.setTextColor(Color.parseColor("#94A3B8"))
                     binding.layoutIncomingActions.visibility = View.GONE
                     binding.btnHangupCall.visibility = View.GONE
                 }
                 else -> {
+                    binding.tvCallState.text = stateUpper
                     binding.tvCallState.setTextColor(Color.parseColor("#94A3B8"))
                     binding.tvAudioProbeCallState.setTextColor(Color.parseColor("#94A3B8"))
                     binding.layoutIncomingActions.visibility = View.GONE

@@ -24,14 +24,15 @@ object CallManager {
 
     private val listeners = CopyOnWriteArrayList<CallListener>()
 
-    var activeCall: Call? = null
+    @Volatile var activeCall: Call? = null
         private set
-    var currentCallId: String? = null
+    @Volatile var currentCallId: String? = null
         private set
-    var currentCallState: String = "idle"
+    @Volatile var currentCallState: String = "idle"
         private set
-    var currentPhoneNumber: String? = null
+    @Volatile var currentPhoneNumber: String? = null
         private set
+    private var activeCallCallback: Call.Callback? = null
 
     fun addListener(listener: CallListener) {
         listeners.add(listener)
@@ -55,41 +56,51 @@ object CallManager {
     }
 
     fun onCallAdded(call: Call) {
+        if (activeCall != null && activeCall !== call) {
+            log("Additional call ignored: single-call gateway mode")
+            return
+        }
         activeCall = call
         currentCallId = UUID.randomUUID().toString()
         currentPhoneNumber = extractPhoneNumber(call)
         val stateStr = mapCallState(call.state)
         currentCallState = stateStr
 
-        log("Call Added: ID=$currentCallId, Number=$currentPhoneNumber, State=$stateStr")
+        log("Call Added: ID=$currentCallId, State=$stateStr")
         notifyStateChanged()
 
-        call.registerCallback(object : Call.Callback() {
+        val callback = object : Call.Callback() {
             override fun onStateChanged(c: Call, state: Int) {
+                if (activeCall !== c) return
                 val mapped = mapCallState(state)
                 currentCallState = mapped
                 val num = extractPhoneNumber(c)
                 if (!num.isNullOrBlank() && currentPhoneNumber.isNullOrBlank()) {
                     currentPhoneNumber = num
                 }
-                log("Call State Changed: ID=$currentCallId, State=$mapped, Number=$currentPhoneNumber")
+                log("Call State Changed: ID=$currentCallId, State=$mapped")
                 notifyStateChanged()
             }
 
             override fun onDetailsChanged(c: Call, details: Call.Details) {
+                if (activeCall !== c) return
                 val num = extractPhoneNumber(c)
                 if (!num.isNullOrBlank() && num != currentPhoneNumber) {
                     currentPhoneNumber = num
-                    log("Call Details Changed: Number=$num")
+                    log("Call Details Changed")
                     notifyStateChanged()
                 }
             }
-        })
+        }
+        activeCallCallback = callback
+        call.registerCallback(callback)
     }
 
     fun onCallRemoved(call: Call) {
-        if (activeCall == call || activeCall == null) {
-            val finalId = currentCallId ?: UUID.randomUUID().toString()
+        if (activeCall === call) {
+            activeCallCallback?.let { call.unregisterCallback(it) }
+            activeCallCallback = null
+            val finalId = currentCallId ?: return
             log("Call Removed / Terminated: ID=$finalId")
             currentCallState = "disconnected"
             notifyStateChanged()
@@ -116,9 +127,11 @@ object CallManager {
         }
     }
 
-    fun answer(): Boolean {
+    fun answer(expectedCallId: String? = null): Boolean {
         val call = activeCall
-        if (call != null) {
+        if (call != null &&
+            (expectedCallId == null || expectedCallId == currentCallId) &&
+            call.state == Call.STATE_RINGING) {
             log("Executing ANSWER on call: $currentCallId")
             return try {
                 call.answer(VideoProfile.STATE_AUDIO_ONLY)
@@ -128,14 +141,16 @@ object CallManager {
                 false
             }
         } else {
-            log("Cannot answer: No active call")
+            log("Cannot answer: call ID or state does not match a ringing call")
             return false
         }
     }
 
-    fun reject(): Boolean {
+    fun reject(expectedCallId: String? = null): Boolean {
         val call = activeCall
-        if (call != null) {
+        if (call != null &&
+            (expectedCallId == null || expectedCallId == currentCallId) &&
+            call.state == Call.STATE_RINGING) {
             log("Executing REJECT on call: $currentCallId")
             return try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -150,14 +165,17 @@ object CallManager {
                 false
             }
         } else {
-            log("Cannot reject: No active call")
+            log("Cannot reject: call ID or state does not match a ringing call")
             return false
         }
     }
 
-    fun hangup(): Boolean {
+    fun hangup(expectedCallId: String? = null): Boolean {
         val call = activeCall
-        if (call != null) {
+        if (call != null &&
+            (expectedCallId == null || expectedCallId == currentCallId) &&
+            call.state != Call.STATE_DISCONNECTED &&
+            call.state != Call.STATE_DISCONNECTING) {
             log("Executing HANGUP / DISCONNECT on call: $currentCallId")
             return try {
                 call.disconnect()
@@ -167,15 +185,19 @@ object CallManager {
                 false
             }
         } else {
-            log("Cannot hangup: No active call")
+            log("Cannot hangup: call ID or state does not match a current call")
             return false
         }
     }
 
     fun dial(context: Context, number: String): Boolean {
         val cleanNumber = number.trim()
-        if (cleanNumber.isBlank()) {
-            log("Cannot dial: Blank number")
+        if (!cleanNumber.matches(Regex("^\\+?[0-9]{3,15}$"))) {
+            log("Cannot dial: invalid number")
+            return false
+        }
+        if (activeCall != null) {
+            log("Cannot dial: gateway is already handling a call")
             return false
         }
         val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
@@ -189,7 +211,7 @@ object CallManager {
             return false
         }
 
-        log("Initiating outgoing GSM call to: $cleanNumber")
+        log("Initiating outgoing GSM call")
         return try {
             val uri = Uri.fromParts("tel", cleanNumber, null)
             val extras = Bundle()

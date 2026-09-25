@@ -14,7 +14,7 @@ Extracted from `dumpsys battery` and kernel battery driver:
 | Parameter | Current Value | Specification / Assessment |
 | :--- | :--- | :--- |
 | **Nominal Capacity** | 4,000 mAh | Typical factory rating for BN40 battery |
-| **Reported Charge Counter** | 3,625,440 µAh (~3,625 mAh) | Battery health remains high (~90.6% nominal) |
+| **Reported Charge Counter** | 3,625,440 µAh (~3,625 mAh) | Remaining charge at this moment; it does not measure battery health or full-charge capacity. |
 | **Battery Level** | 86% | Stable |
 | **Battery Voltage** | 4,214 mV | Normal operating voltage |
 | **Battery Temperature** | 31.5 °C | Optimal thermal baseline (idle/charging) |
@@ -30,7 +30,7 @@ Extracted from `dumpsys power`:
 - **Wakelocks Active (Count: 1):**
   - `PARTIAL_WAKE_LOCK 'RedmiGateway::WakeLock'` (UID 10021, PID 1610, held by `com.ilkay.redmigateway.service.GatewayService`)
   - **Purpose:** Prevents Android CPU sleep while listening for incoming WebSocket connections and hotspot telemetry.
-  - **Assessment:** Clean. No rogue 3rd-party wakelocks currently holding the CPU permanently active.
+  - **Assessment:** This long-lived partial wake lock prevented CPU sleep while held and needed to be removed for battery-oriented gateway use.
 
 ---
 
@@ -105,4 +105,4 @@ Once audio gateway routing is finalized, the following target packages can be sa
 - Disable `com.miui.msa.global`, `com.miui.analytics`, `com.miui.daemon` (eliminates background telemetry).
 - Disable `com.miui.cloudservice`, `com.xiaomi.finddevice` (eliminates sync alarms).
 - Disable `com.google.android.googlequicksearchbox`, `com.google.android.projection.gearhead` (saves ~120MB RAM and periodic wakelocks).
-- Estimated standby power reduction: **~35% to 45% reduction in idle battery drain**.
+- Battery-life improvement must be measured on the actual device with hotspot, client, and call/SMS gateway active. No percentage reduction is established by this baseline.
