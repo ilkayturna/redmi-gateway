@@ -24,6 +24,13 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     private var callIdToUuidMap: [String: UUID] = [:]
     private var uuidToCallIdMap: [UUID: String] = [:]
     private var callStates: [UUID: String] = [:]
+    private var outgoingUuids: Set<UUID> = []
+    private var pendingOutgoingUuid: UUID?
+    private var answeredOnIPhone: Set<UUID> = []
+    private var connectedOutgoing: Set<UUID> = []
+    private var callKitAudioActivated = false
+    private var audioStartRequested = false
+    private var audioCallUuid: UUID?
     
     // Set of call UUIDs that have already been reported as incoming to CallKit
     private var reportedIncomingUuids: Set<UUID> = []
@@ -38,6 +45,10 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         self.provider = CXProvider(configuration: config)
         super.init()
         self.provider.setDelegate(self, queue: DispatchQueue.main)
+        AudioEngine.shared.prepareSession()
+        AudioEngine.shared.onStatus = { status in
+            Task { @MainActor in GatewayConnection.shared.audioStatus = status }
+        }
         
         setupGatewayObserver()
     }
@@ -51,11 +62,12 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     // MARK: - Incoming Gateway Event Processing
     
     public func handleIncomingGatewayCallEvent(_ event: CallEventMessage) {
-        let rawId = (event.callId?.isEmpty == false) ? event.callId! : "gateway_call"
         let state = event.state.lowercased()
+        guard state != "idle" else { return }
+        let rawId = (event.callId?.isEmpty == false) ? event.callId! : "gateway_call"
         let number = (event.number?.isEmpty == false) ? event.number! : "Unknown Cellular"
         
-        let uuid = getOrCreateUuid(for: rawId)
+        let uuid = uuidForGatewayEvent(rawId: rawId, state: state)
         let previousState = callStates[uuid]
         callStates[uuid] = state
         
@@ -72,19 +84,48 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             }
             
         case "active":
-            reportCallConnected(uuid: uuid)
+            if outgoingUuids.contains(uuid) {
+                if connectedOutgoing.insert(uuid).inserted { reportCallConnected(uuid: uuid) }
+                maybeStartAudio(for: uuid)
+            } else if reportedIncomingUuids.contains(uuid) {
+                if answeredOnIPhone.contains(uuid) {
+                    maybeStartAudio(for: uuid)
+                } else {
+                    // Answered directly on Redmi: stop the iPhone ringtone without ending GSM.
+                    reportCallEnded(uuid: uuid, reason: .answeredElsewhere)
+                    cleanupCall(uuid: uuid, rawId: rawId)
+                }
+            }
             
         case "disconnected":
-            reportCallEnded(uuid: uuid, reason: .remoteEnded)
+            if outgoingUuids.contains(uuid) || reportedIncomingUuids.contains(uuid) {
+                reportCallEnded(uuid: uuid, reason: .remoteEnded)
+            }
             cleanupCall(uuid: uuid, rawId: rawId)
             
         case "dialing", "connecting":
-            // Outgoing call in progress
-            GatewayConnection.shared.log("CallKit: Call progressing (\(state))")
+            if outgoingUuids.contains(uuid) && previousState != "dialing" && previousState != "connecting" {
+                provider.reportOutgoingCall(with: uuid, startedConnectingAt: Date())
+            }
             
         default:
             break
         }
+    }
+
+    private func uuidForGatewayEvent(rawId: String, state: String) -> UUID {
+        if let existing = callIdToUuidMap[rawId] {
+            return existing
+        }
+        if let pending = pendingOutgoingUuid,
+           state == "dialing" || state == "connecting" || state == "active" {
+            pendingOutgoingUuid = nil
+            callIdToUuidMap = callIdToUuidMap.filter { $0.value != pending }
+            callIdToUuidMap[rawId] = pending
+            uuidToCallIdMap[pending] = rawId
+            return pending
+        }
+        return getOrCreateUuid(for: rawId)
     }
     
     private func getOrCreateUuid(for rawId: String) -> UUID {
@@ -98,15 +139,52 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     }
     
     private func cleanupCall(uuid: UUID, rawId: String) {
-        callIdToUuidMap.removeValue(forKey: rawId)
+        callIdToUuidMap = callIdToUuidMap.filter { $0.value != uuid }
         uuidToCallIdMap.removeValue(forKey: uuid)
         callStates.removeValue(forKey: uuid)
         reportedIncomingUuids.remove(uuid)
+        outgoingUuids.remove(uuid)
+        answeredOnIPhone.remove(uuid)
+        connectedOutgoing.remove(uuid)
+        if pendingOutgoingUuid == uuid { pendingOutgoingUuid = nil }
+        if audioCallUuid == uuid { stopAudio() }
+    }
+
+    private func maybeStartAudio(for uuid: UUID) {
+        guard callKitAudioActivated,
+              !audioStartRequested,
+              callStates[uuid] == "active",
+              GatewayConnection.shared.state == .authenticated else { return }
+        audioCallUuid = uuid
+        audioStartRequested = true
+        GatewayConnection.shared.audioStatus = "Görüşme sesi bağlanıyor"
+        GatewayConnection.shared.sendAudioStart()
+    }
+
+    public func handleAudioReady(session: UInt32, port: UInt16) {
+        guard audioStartRequested,
+              callKitAudioActivated,
+              let uuid = audioCallUuid,
+              callStates[uuid] == "active" else { return }
+        AudioEngine.shared.start(
+            host: GatewayConnection.shared.connectedHost,
+            port: port,
+            session: session
+        )
+    }
+
+    private func stopAudio() {
+        AudioEngine.shared.stop()
+        if audioStartRequested { GatewayConnection.shared.sendAudioStop() }
+        audioStartRequested = false
+        audioCallUuid = nil
+        GatewayConnection.shared.audioStatus = "Görüşme sesi Redmi'de"
     }
     
     // MARK: - CallKit Reporting
     
     private func reportIncomingCall(uuid: UUID, phoneNumber: String) {
+        AudioEngine.shared.prepareSession()
         let update = CXCallUpdate()
         update.remoteHandle = CXHandle(type: .phoneNumber, value: phoneNumber)
         update.localizedCallerName = phoneNumber
@@ -116,11 +194,14 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         update.supportsGrouping = false
         update.supportsUngrouping = false
         
-        provider.reportNewIncomingCall(with: uuid, update: update) { error in
-            if let error = error {
-                GatewayConnection.shared.log("CallKit report incoming error: \(error.localizedDescription)")
-            } else {
-                GatewayConnection.shared.log("CallKit incoming call UI presented for: \(phoneNumber)")
+        provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] error in
+            Task { @MainActor [weak self] in
+                if let error = error {
+                    GatewayConnection.shared.log("CallKit report incoming error: \(error.localizedDescription)")
+                    self?.cleanupCall(uuid: uuid, rawId: self?.uuidToCallIdMap[uuid] ?? "")
+                } else {
+                    GatewayConnection.shared.log("CallKit incoming call UI presented for: \(phoneNumber)")
+                }
             }
         }
     }
@@ -136,16 +217,42 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     }
     
     // MARK: - Outgoing Call Action (From iPhone Client)
+
+    public func answerIncomingFromApp(callId: String) {
+        guard let uuid = callIdToUuidMap[callId], reportedIncomingUuids.contains(uuid) else {
+            GatewayConnection.shared.lastCallError = "Çağrı ekranı hazır değil; Redmi'den yanıtla."
+            return
+        }
+        callController.request(CXTransaction(action: CXAnswerCallAction(call: uuid))) { error in
+            if let error {
+                Task { @MainActor in
+                    GatewayConnection.shared.lastCallError = "iPhone'da yanıtlanamadı: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
     
     public func startOutgoingCall(phoneNumber: String) {
-        let cleanNumber = phoneNumber.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanNumber.isEmpty else { return }
+        let cleanNumber = phoneNumber.replacingOccurrences(
+            of: "[\\s().-]", with: "", options: .regularExpression
+        )
+        guard cleanNumber.range(of: "^\\+?[0-9]{3,15}$", options: .regularExpression) != nil else {
+            GatewayConnection.shared.lastCallError = "Geçerli bir telefon numarası gir."
+            return
+        }
+        guard GatewayConnection.shared.state == .authenticated else {
+            GatewayConnection.shared.lastCallError = "Redmi bağlantısı yok. Arama başlatılamadı."
+            return
+        }
+        AudioEngine.shared.prepareSession()
         
         let uuid = UUID()
         let tempRawId = "outgoing_\(uuid.uuidString.prefix(8))"
         callIdToUuidMap[tempRawId] = uuid
         uuidToCallIdMap[uuid] = tempRawId
         callStates[uuid] = "dialing"
+        outgoingUuids.insert(uuid)
+        pendingOutgoingUuid = uuid
         
         let handle = CXHandle(type: .phoneNumber, value: cleanNumber)
         let action = CXStartCallAction(call: uuid, handle: handle)
@@ -153,12 +260,15 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         let transaction = CXTransaction(action: action)
         
         callController.request(transaction) { [weak self] error in
-            if let error = error {
-                GatewayConnection.shared.log("CallKit start call transaction failed: \(error.localizedDescription)")
-                self?.cleanupCall(uuid: uuid, rawId: tempRawId)
-            } else {
-                GatewayConnection.shared.log("CallKit start call transaction accepted. Signaling Redmi...")
-                GatewayConnection.shared.sendDial(number: cleanNumber)
+            Task { @MainActor [weak self] in
+                if let error = error {
+                    GatewayConnection.shared.lastCallError = "iPhone arama ekranı açılamadı: \(error.localizedDescription)"
+                    GatewayConnection.shared.log("CallKit start call transaction failed: \(error.localizedDescription)")
+                    self?.cleanupCall(uuid: uuid, rawId: tempRawId)
+                } else {
+                    GatewayConnection.shared.log("CallKit start call accepted. Dialing on Redmi.")
+                    GatewayConnection.shared.sendDial(number: cleanNumber)
+                }
             }
         }
     }
@@ -167,18 +277,32 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     
     public func providerDidReset(_ provider: CXProvider) {
         GatewayConnection.shared.log("CallKit provider reset")
+        stopAudio()
+        callKitAudioActivated = false
         callIdToUuidMap.removeAll()
         uuidToCallIdMap.removeAll()
         callStates.removeAll()
         reportedIncomingUuids.removeAll()
+        outgoingUuids.removeAll()
+        answeredOnIPhone.removeAll()
+        connectedOutgoing.removeAll()
+        pendingOutgoingUuid = nil
     }
     
     public func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         let uuid = action.callUUID
         let rawId = uuidToCallIdMap[uuid] ?? ""
+        guard GatewayConnection.shared.state == .authenticated,
+              !rawId.isEmpty,
+              callStates[uuid] == "ringing" else {
+            GatewayConnection.shared.lastCallError = "Redmi bağlantısı yok; arama Redmi'de çalmaya devam ediyor."
+            action.fail()
+            return
+        }
         GatewayConnection.shared.log("CallKit user ANSWERED call (uuid=\(uuid.uuidString.prefix(8)), callId=\(rawId))")
         
         // Signal Redmi Gateway to answer the cellular call
+        answeredOnIPhone.insert(uuid)
         GatewayConnection.shared.sendAnswer(callId: rawId)
         action.fulfill()
     }
@@ -187,6 +311,11 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         let uuid = action.callUUID
         let rawId = uuidToCallIdMap[uuid] ?? ""
         let currentState = callStates[uuid] ?? "active"
+        guard GatewayConnection.shared.state == .authenticated, !rawId.isEmpty else {
+            GatewayConnection.shared.lastCallError = "Redmi bağlantısı yok; görüşmeyi Redmi'den sonlandır."
+            action.fail()
+            return
+        }
         
         GatewayConnection.shared.log("CallKit user ENDED call (state=\(currentState), uuid=\(uuid.uuidString.prefix(8)), callId=\(rawId))")
         
@@ -208,10 +337,16 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     }
     
     public func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
-        GatewayConnection.shared.log("CallKit audio session activated (Ready for Phase 3 audio bridge)")
+        callKitAudioActivated = true
+        GatewayConnection.shared.log("CallKit audio session activated")
+        for uuid in answeredOnIPhone.union(outgoingUuids) {
+            maybeStartAudio(for: uuid)
+        }
     }
     
     public func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+        callKitAudioActivated = false
+        stopAudio()
         GatewayConnection.shared.log("CallKit audio session deactivated")
     }
 }

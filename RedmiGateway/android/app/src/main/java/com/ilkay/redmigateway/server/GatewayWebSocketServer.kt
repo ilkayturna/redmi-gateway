@@ -6,6 +6,7 @@ import android.util.Log
 import com.ilkay.redmigateway.RedmiGatewayApp
 import com.ilkay.redmigateway.telecom.CallManager
 import com.ilkay.redmigateway.audio.AudioProbeManager
+import com.ilkay.redmigateway.audio.CallAudioRelay
 import com.ilkay.redmigateway.sms.SmsReceiver
 import com.ilkay.redmigateway.sms.SmsManagerHelper
 import com.ilkay.redmigateway.sms.SmsStore
@@ -21,7 +22,8 @@ import java.util.concurrent.ConcurrentHashMap
 class GatewayWebSocketServer(
     private val context: Context,
     port: Int = 8787
-) : WebSocketServer(InetSocketAddress("0.0.0.0", port)), CallManager.CallListener {
+) : WebSocketServer(InetSocketAddress("0.0.0.0", port)), CallManager.CallListener,
+    CallAudioRelay.Listener {
 
     companion object {
         private const val TAG = "GatewayWSServer"
@@ -35,6 +37,7 @@ class GatewayWebSocketServer(
     var serverListener: ServerListener? = null
     private val authenticatedClients = ConcurrentHashMap.newKeySet<WebSocket>()
     private val failedAuthAttempts = ConcurrentHashMap<WebSocket, Int>()
+    @Volatile private var audioOwner: WebSocket? = null
 
     init {
         isReuseAddr = true
@@ -44,6 +47,7 @@ class GatewayWebSocketServer(
     override fun onStart() {
         Log.i(TAG, "WebSocket server started on port $port")
         CallManager.addListener(this)
+        CallAudioRelay.listener = this
         SmsReceiver.webSocketServer = this
         CallManager.log("WebSocket server listening on 0.0.0.0:$port")
     }
@@ -65,6 +69,10 @@ class GatewayWebSocketServer(
     override fun onClose(conn: WebSocket, code: Int, reason: String?, remote: Boolean) {
         val wasAuth = authenticatedClients.remove(conn)
         failedAuthAttempts.remove(conn)
+        if (audioOwner === conn) {
+            audioOwner = null
+            CallAudioRelay.disarm("iPhone connection lost")
+        }
         val remoteAddr = conn.remoteSocketAddress?.toString() ?: "unknown"
         Log.i(TAG, "Client disconnected: $remoteAddr (Auth: $wasAuth, Reason: $reason)")
         CallManager.log("Client disconnected: $remoteAddr")
@@ -138,6 +146,43 @@ class GatewayWebSocketServer(
                 }
                 "get_sms_history" -> {
                     handleGetSmsHistory(conn, json.optLong("afterId", 0L))
+                }
+                "audio_start" -> {
+                    if (CallManager.currentCallState !in setOf("ringing", "dialing", "connecting", "active")) {
+                        sendError(conn, "No current cellular call")
+                        return
+                    }
+                    if (audioOwner != null && audioOwner !== conn) {
+                        sendError(conn, "Another client owns call audio")
+                        return
+                    }
+                    val session = CallAudioRelay.arm(context)
+                    audioOwner = conn
+                    conn.send(JSONObject().apply {
+                        put("type", "audio_ready")
+                        put("session", session.toLong() and 0xFFFFFFFFL)
+                        put("port", CallAudioRelay.PORT)
+                        put("sampleRate", CallAudioRelay.SAMPLE_RATE)
+                        put("frameSamples", CallAudioRelay.FRAME_SAMPLES)
+                    }.toString())
+                }
+                "audio_stop" -> {
+                    if (audioOwner !== conn) {
+                        sendError(conn, "This client does not own call audio")
+                        return
+                    }
+                    audioOwner = null
+                    CallAudioRelay.disarm("iPhone ended the audio session")
+                    sendAck(conn, "audio_stop", true)
+                }
+                "audio_selftest" -> {
+                    val muteMic = json.optBoolean("muteLocalMic", false)
+                    val seconds = json.optInt("seconds", 5).coerceIn(1, 15)
+                    Thread {
+                        val result = CallAudioRelay.selfTest(context, muteMic, seconds)
+                        result.put("type", "audio_selftest_result")
+                        if (conn.isOpen) conn.send(result.toString())
+                    }.start()
                 }
                 "probe_audio" -> {
                     val source = json.optString("source", "ALL")
@@ -334,6 +379,17 @@ class GatewayWebSocketServer(
         }
     }
 
+    override fun onAudioRelayState(running: Boolean, detail: String) {
+        val payload = JSONObject().apply {
+            put("type", "audio_state")
+            put("running", running)
+            put("detail", detail)
+        }.toString()
+        for (client in authenticatedClients) {
+            runCatching { if (client.isOpen) client.send(payload) }
+        }
+    }
+
     fun broadcastSmsReceived(sender: String, message: String, timestamp: Long, messageId: Long) {
         if (authenticatedClients.isEmpty()) return
 
@@ -361,6 +417,9 @@ class GatewayWebSocketServer(
     fun stopServer() {
         try {
             CallManager.removeListener(this)
+            if (CallAudioRelay.listener === this) CallAudioRelay.listener = null
+            audioOwner = null
+            CallAudioRelay.disarm("gateway stopped")
             SmsReceiver.webSocketServer = null
             authenticatedClients.clear()
             failedAuthAttempts.clear()

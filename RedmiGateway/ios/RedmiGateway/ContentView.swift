@@ -38,7 +38,7 @@ struct ContentView: View {
                         .background(Color(UIColor.secondarySystemGroupedBackground))
                         .cornerRadius(16)
                     }
-                    Text("Arama sesi şu anda Redmi'den gelir. iPhone bildirimleri uygulama açıkken çalışır.")
+                    Text(connection.audioStatus)
                         .font(.footnote)
                         .foregroundColor(.secondary)
                         .padding(.horizontal, 4)
@@ -114,7 +114,9 @@ struct ContentView: View {
                     .foregroundColor(.secondary)
                 if call.state == .ringing {
                     HStack(spacing: 12) {
-                        Button("Yanıtla") { connection.sendAnswer(callId: call.rawCallId) }
+                        Button("iPhone'da yanıtla") {
+                            CallKitManager.shared.answerIncomingFromApp(callId: call.rawCallId)
+                        }
                             .buttonStyle(.borderedProminent)
                         Button("Reddet") { connection.sendReject(callId: call.rawCallId) }
                             .buttonStyle(.bordered)
@@ -127,6 +129,11 @@ struct ContentView: View {
                 Text("Arama yok")
                     .font(.body)
                     .foregroundColor(.secondary)
+            }
+            if let error = connection.lastCallError {
+                Text(error)
+                    .font(.footnote)
+                    .foregroundColor(.red)
             }
             HStack(spacing: 8) {
                 TextField("Telefon numarası", text: $outgoingNumber)
@@ -142,7 +149,6 @@ struct ContentView: View {
                     let number = outgoingNumber.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !number.isEmpty else { return }
                     CallKitManager.shared.startOutgoingCall(phoneNumber: number)
-                    outgoingNumber = ""
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(connection.state != .authenticated || outgoingNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

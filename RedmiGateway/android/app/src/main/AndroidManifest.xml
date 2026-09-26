@@ -18,6 +18,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.CAPTURE_AUDIO_OUTPUT" />
+    <uses-permission android:name="android.permission.CALL_AUDIO_INTERCEPTION"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.MODIFY_PHONE_STATE"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
@@ -70,6 +76,17 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ui.CallActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true" />
+
+        <receiver
+            android:name=".telecom.CallActionReceiver"
+            android:exported="false" />
+
         <!-- Telecom InCallService for Default Dialer -->
         <service
             android:name=".telecom.GatewayInCallService"
@@ -87,7 +104,7 @@
         <service
             android:name=".service.GatewayService"
             android:exported="true"
-            android:foregroundServiceType="connectedDevice|phoneCall" />
+            android:foregroundServiceType="connectedDevice|phoneCall|microphone" />
 
         <!-- SMS Receiver for incoming text messages -->
         <receiver

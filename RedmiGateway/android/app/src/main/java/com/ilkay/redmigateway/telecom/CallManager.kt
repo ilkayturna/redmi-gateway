@@ -191,7 +191,8 @@ object CallManager {
     }
 
     fun dial(context: Context, number: String): Boolean {
-        val cleanNumber = number.trim()
+        // Contacts commonly format numbers with spaces, parentheses and hyphens.
+        val cleanNumber = number.trim().replace(Regex("[\\s().-]"), "")
         if (!cleanNumber.matches(Regex("^\\+?[0-9]{3,15}$"))) {
             log("Cannot dial: invalid number")
             return false

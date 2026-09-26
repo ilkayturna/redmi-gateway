@@ -37,6 +37,18 @@ public struct AckMessage: Codable {
     public let success: Bool
 }
 
+public struct AudioReadyMessage: Codable {
+    public let type: String
+    public let session: UInt32
+    public let port: UInt16
+}
+
+public struct AudioStateMessage: Codable {
+    public let type: String
+    public let running: Bool
+    public let detail: String
+}
+
 public struct StateCallInfo: Codable {
     public let callId: String?
     public let number: String?
@@ -137,6 +149,14 @@ public struct DialPayload: Codable {
     public init(number: String) {
         self.number = number
     }
+}
+
+public struct AudioStartPayload: Codable {
+    public let type = "audio_start"
+}
+
+public struct AudioStopPayload: Codable {
+    public let type = "audio_stop"
 }
 
 public struct SendSmsPayload: Codable {

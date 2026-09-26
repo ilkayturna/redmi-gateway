@@ -34,6 +34,17 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
 
         var isRunning: Boolean = false
             private set
+
+        @Volatile private var instance: GatewayService? = null
+
+        /**
+         * Adds the microphone and phone-call types to the foreground service while call audio
+         * is relayed, so Android keeps delivering call audio with the screen off.
+         */
+        fun setCallAudioForeground(active: Boolean) {
+            val service = instance ?: return
+            service.handler.post { service.applyForegroundTypes(active) }
+        }
     }
 
     private var webSocketServer: GatewayWebSocketServer? = null
@@ -54,6 +65,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "onCreate")
+        instance = this
         createNotificationChannel()
     }
 
@@ -209,6 +221,23 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
         manager.notify(NOTIFICATION_ID, buildNotification(text))
     }
 
+    private fun applyForegroundTypes(callAudio: Boolean) {
+        if (!isRunning || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        if (callAudio) {
+            types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+        }
+        val text = if (callAudio) "Görüşme sesi iPhone'a aktarılıyor" else
+            "Geçit etkin (${getAuthenticatedClientCount()} bağlı cihaz)"
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification(text), types)
+        } catch (error: Exception) {
+            Log.w(TAG, "Could not change foreground service types", error)
+            CallManager.log("Foreground call audio type rejected: ${error.message}")
+        }
+    }
+
     override fun onClientCountChanged(authenticatedCount: Int) {
         updateNotification("Geçit etkin ($authenticatedCount bağlı cihaz)")
     }
@@ -223,6 +252,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
 
     override fun onDestroy() {
         stopGateway()
+        if (instance === this) instance = null
         super.onDestroy()
     }
 }

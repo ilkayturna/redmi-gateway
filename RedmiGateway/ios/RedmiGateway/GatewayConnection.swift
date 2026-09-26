@@ -36,6 +36,8 @@ public class GatewayConnection: ObservableObject {
     @Published public var currentCall: GSMCall? = nil
     @Published public var smsMessages: [SmsMessageItem] = []
     @Published public var logs: [String] = []
+    @Published public var audioStatus = "Görüşme sesi Redmi'de"
+    @Published public var lastCallError: String? = nil
     
     // Persistence keys
     private let kGatewayIp = "gateway_ip"
@@ -57,6 +59,7 @@ public class GatewayConnection: ObservableObject {
     private let discovery = GatewayDiscovery()
     
     public var onCallEvent: ((CallEventMessage) -> Void)?
+    public var connectedHost: String { currentHost }
     
     public init() {
         // Load persisted settings
@@ -174,6 +177,7 @@ public class GatewayConnection: ObservableObject {
     }
     
     private func disconnectInternal() {
+        AudioEngine.shared.stop()
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         pendingSms.removeAll()
@@ -235,6 +239,7 @@ public class GatewayConnection: ObservableObject {
                     self.listenForMessages()
                     
                 case .failure(let error):
+                    AudioEngine.shared.stop()
                     self.webSocketTask = nil
                     self.state = .failed
                     self.log("WebSocket dropped: \(error.localizedDescription)")
@@ -294,6 +299,22 @@ public class GatewayConnection: ObservableObject {
         case "ack":
             if let ack = try? JSONDecoder().decode(AckMessage.self, from: data) {
                 self.log("ACK [\(ack.action)]: \(ack.success ? "SUCCESS" : "FAILED")")
+                if ack.action == "dial" {
+                    self.lastCallError = ack.success ? nil : "Arama Redmi'de başlatılamadı. Numarayı ve hattı kontrol et."
+                } else if ack.action == "answer" && !ack.success {
+                    self.lastCallError = "Arama Redmi'de yanıtlanamadı."
+                }
+            }
+
+        case "audio_ready":
+            if let ready = try? JSONDecoder().decode(AudioReadyMessage.self, from: data) {
+                CallKitManager.shared.handleAudioReady(session: ready.session, port: ready.port)
+            }
+
+        case "audio_state":
+            if let audioState = try? JSONDecoder().decode(AudioStateMessage.self, from: data) {
+                self.audioStatus = audioState.running ? "Görüşme sesi bağlanıyor" : "Görüşme sesi Redmi'de"
+                self.log("Audio relay: \(audioState.detail)")
             }
             
         case "error":
@@ -418,9 +439,24 @@ public class GatewayConnection: ObservableObject {
     }
     
     public func sendDial(number: String) {
+        guard state == .authenticated else {
+            lastCallError = "Redmi bağlantısı yok. Arama başlatılamadı."
+            return
+        }
+        lastCallError = nil
         log("Sending DIAL")
         let payload = DialPayload(number: number)
         sendPayload(payload)
+    }
+
+    public func sendAudioStart() {
+        guard state == .authenticated else { return }
+        sendPayload(AudioStartPayload())
+    }
+
+    public func sendAudioStop() {
+        guard state == .authenticated else { return }
+        sendPayload(AudioStopPayload())
     }
     
     public func sendSms(recipient: String, message: String) {

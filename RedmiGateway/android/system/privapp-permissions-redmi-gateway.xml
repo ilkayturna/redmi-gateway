@@ -3,5 +3,7 @@
     <privapp-permissions package="com.ilkay.redmigateway">
         <permission name="android.permission.TETHER_PRIVILEGED" />
         <permission name="android.permission.CAPTURE_AUDIO_OUTPUT" />
+        <permission name="android.permission.CALL_AUDIO_INTERCEPTION" />
+        <permission name="android.permission.MODIFY_PHONE_STATE" />
     </privapp-permissions>
 </permissions>
