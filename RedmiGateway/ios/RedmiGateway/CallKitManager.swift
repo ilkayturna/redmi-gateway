@@ -42,8 +42,6 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         config.maximumCallsPerCallGroup = 1
         config.maximumCallGroups = 1
         config.supportedHandleTypes = [.phoneNumber]
-        config.supportsHolding = false
-        config.supportsGrouping = false
         
         self.provider = CXProvider(configuration: config)
         super.init()

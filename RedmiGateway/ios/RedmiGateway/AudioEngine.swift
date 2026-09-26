@@ -54,7 +54,7 @@ final class AudioEngine {
     func prepareSession() {
         do {
             try AVAudioSession.sharedInstance().setCategory(
-                .playAndRecord, mode: .voiceChat, options: [.allowBluetooth]
+                .playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP]
             )
             try AVAudioSession.sharedInstance().setPreferredIOBufferDuration(0.02)
         } catch {
