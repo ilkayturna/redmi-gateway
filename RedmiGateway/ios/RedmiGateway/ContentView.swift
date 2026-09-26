@@ -3,6 +3,7 @@ import Combine
 
 struct ContentView: View {
     @StateObject private var connection = GatewayConnection.shared
+    @StateObject private var contactDirectory = PhoneContactDirectory.shared
     @AppStorage("gateway_ip") private var gatewayIp = ""
     @AppStorage("gateway_port") private var gatewayPort = "8787"
     @AppStorage("pairing_token") private var pairingToken = ""
@@ -12,6 +13,8 @@ struct ContentView: View {
     @State private var showingContactPicker = false
     @State private var contactPickerAddsFavorite = false
     @State private var outgoingNumber = ""
+    @State private var contactSearch = ""
+    @State private var messageRecipient = ""
     @State private var isMuted = false
     @State private var isSpeaker = false
     @State private var showingDtmfSheet = false
@@ -70,7 +73,7 @@ struct ContentView: View {
 
                 // Tab 4: Mesajlar
                 NavigationView {
-                    MessagesView()
+                    MessagesView(prefilledRecipient: $messageRecipient)
                         .toolbar { settingsToolbarItem }
                 }
                 .tabItem {
@@ -179,7 +182,7 @@ struct ContentView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(num)
                                     .font(.body.weight(.medium))
-                                Text("Hızlı Arama")
+                                Text(contactDirectory.name(for: num) ?? "Hızlı Arama")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -267,31 +270,103 @@ struct ContentView: View {
     // MARK: - Tab 2: Kişiler
 
     private var contactsView: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            Image(systemName: "person.crop.circle.badge.plus")
-                .font(.system(size: 64))
-                .foregroundColor(.blue)
-            Text("Rehberden Ara")
-                .font(.title2.weight(.bold))
-            Text("iPhone rehberinizdeki kişileri seçerek Redmi GSM hattı üzerinden arama başlatabilirsiniz.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 36)
-            Button {
-                contactPickerAddsFavorite = false
-                showingContactPicker = true
-            } label: {
-                Label("Kişileri Aç", systemImage: "person.2.fill")
-                    .font(.headline)
-                    .frame(maxWidth: 240, minHeight: 48)
+        Group {
+            if contactDirectory.contacts.isEmpty {
+                VStack(spacing: 16) {
+                    Image(systemName: "person.crop.circle")
+                        .font(.system(size: 48))
+                        .foregroundColor(.secondary)
+                    Text("Kişiler Görünmüyor")
+                        .font(.headline)
+                    Text("iPhone rehberini burada aramak için Kişiler iznini aç.")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                    Button("Yeniden Dene") { contactDirectory.reload() }
+                        .buttonStyle(.borderedProminent)
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List {
+                    ForEach(filteredContacts) { contact in
+                        NavigationLink {
+                            contactDetail(contact)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "person.crop.circle.fill")
+                                    .font(.title2)
+                                    .foregroundColor(.blue)
+                                    .frame(width: 36)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(contact.name).font(.body.weight(.medium))
+                                    if let first = contact.numbers.first {
+                                        Text(first).font(.footnote).foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+                .listStyle(.plain)
             }
-            .buttonStyle(.borderedProminent)
-            Spacer()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(UIColor.systemGroupedBackground))
+        .searchable(text: $contactSearch, prompt: "Ad veya numara ara")
+        .onAppear { contactDirectory.ensureLoaded() }
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button("Yenile") { contactDirectory.reload() }
+            }
+        }
+    }
+
+    private var filteredContacts: [PhoneContact] {
+        let query = contactSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return contactDirectory.contacts }
+        return contactDirectory.contacts.filter { contact in
+            contact.name.localizedCaseInsensitiveContains(query)
+                || contact.numbers.contains { $0.localizedCaseInsensitiveContains(query) }
+        }
+    }
+
+    private func contactDetail(_ contact: PhoneContact) -> some View {
+        List {
+            Section {
+                ForEach(contact.numbers, id: \.self) { number in
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(number).font(.body.monospacedDigit())
+                        HStack(spacing: 12) {
+                            Button {
+                                CallKitManager.shared.startOutgoingCall(phoneNumber: number)
+                            } label: {
+                                Label("Ara", systemImage: "phone.fill")
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            Button {
+                                messageRecipient = number
+                                selectedTab = 4
+                            } label: {
+                                Label("Mesaj", systemImage: "message.fill")
+                            }
+                            .buttonStyle(.bordered)
+
+                            Button {
+                                addFavorite(number: number)
+                            } label: {
+                                Image(systemName: "star")
+                            }
+                            .buttonStyle(.bordered)
+                            .accessibilityLabel("Favorilere ekle")
+                        }
+                    }
+                    .padding(.vertical, 8)
+                }
+            }
+        }
+        .navigationTitle(contact.name)
+        .navigationBarTitleDisplayMode(.large)
     }
 
     // MARK: - Tab 3: Klavye (Keypad)
@@ -406,14 +481,25 @@ struct ContentView: View {
 
     private func activeCallOverlay(call: GSMCall) -> some View {
         VStack(spacing: 0) {
+            Spacer(minLength: 48)
             VStack(spacing: 16) {
                 // Header status
-                VStack(spacing: 4) {
-                    Text(call.number.isEmpty ? "Gizli Numara" : call.number)
-                        .font(.title2.weight(.bold))
+                VStack(spacing: 8) {
+                    Text("Telefon Geçidi")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundColor(.secondary)
+                    Text(call.number.isEmpty ? "Gizli Numara" : contactDirectory.displayName(for: call.number))
+                        .font(.largeTitle.weight(.semibold))
                         .foregroundColor(.primary)
+                        .minimumScaleFactor(0.7)
+                        .lineLimit(2)
+                    if let name = contactDirectory.name(for: call.number), name != call.number {
+                        Text(call.number)
+                            .font(.body.monospacedDigit())
+                            .foregroundColor(.secondary)
+                    }
                     Text(callStateDescription(call.state))
-                        .font(.subheadline)
+                        .font(.headline)
                         .foregroundColor(.secondary)
                     HStack(spacing: 6) {
                         Image(systemName: connection.isIPhoneAudioConfirmed
@@ -431,7 +517,9 @@ struct ContentView: View {
                     .background(Color.blue.opacity(0.12))
                     .clipShape(Capsule())
                 }
-                .padding(.top, 8)
+                .multilineTextAlignment(.center)
+
+                Spacer(minLength: 36)
 
                 if call.state == .ringing {
                     // Incoming Ringing Controls
@@ -470,8 +558,8 @@ struct ContentView: View {
                     .padding(.vertical, 8)
                 } else {
                     // Active / Dialing 2x2 Control Grid
-                    VStack(spacing: 16) {
-                        HStack(spacing: 36) {
+                    VStack(spacing: 28) {
+                        HStack(spacing: 48) {
                             // Mute button
                             Button {
                                 isMuted.toggle()
@@ -481,7 +569,7 @@ struct ContentView: View {
                                     Image(systemName: isMuted ? "mic.slash.fill" : "mic.fill")
                                         .font(.title2)
                                         .foregroundColor(isMuted ? .white : .primary)
-                                        .frame(width: 58, height: 58)
+                                        .frame(width: 72, height: 72)
                                         .background(isMuted ? Color.orange : Color(UIColor.secondarySystemBackground))
                                         .clipShape(Circle())
                                     Text(isMuted ? "Sessizde" : "Sessiz")
@@ -501,7 +589,7 @@ struct ContentView: View {
                                     Image(systemName: isSpeaker ? "speaker.wave.3.fill" : "speaker.fill")
                                         .font(.title2)
                                         .foregroundColor(isSpeaker ? .white : .primary)
-                                        .frame(width: 58, height: 58)
+                                        .frame(width: 72, height: 72)
                                         .background(isSpeaker ? Color.blue : Color(UIColor.secondarySystemBackground))
                                         .clipShape(Circle())
                                     Text("Hoparlör")
@@ -511,7 +599,7 @@ struct ContentView: View {
                             }
                         }
 
-                        HStack(spacing: 36) {
+                        HStack(spacing: 48) {
                             // DTMF Keypad sheet toggle
                             Button {
                                 showingDtmfSheet.toggle()
@@ -520,7 +608,7 @@ struct ContentView: View {
                                     Image(systemName: "circle.grid.3x3.fill")
                                         .font(.title2)
                                         .foregroundColor(.primary)
-                                        .frame(width: 58, height: 58)
+                                        .frame(width: 72, height: 72)
                                         .background(Color(UIColor.secondarySystemBackground))
                                         .clipShape(Circle())
                                     Text("Tuşlar")
@@ -537,7 +625,7 @@ struct ContentView: View {
                                     Image(systemName: "phone.down.fill")
                                         .font(.title2)
                                         .foregroundColor(.white)
-                                        .frame(width: 58, height: 58)
+                                        .frame(width: 72, height: 72)
                                         .background(Color.red)
                                         .clipShape(Circle())
                                     Text("Bitir")
@@ -550,15 +638,11 @@ struct ContentView: View {
                     .padding(.top, 4)
                 }
             }
-            .padding(20)
-            .background(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .fill(Color(UIColor.systemBackground))
-                    .shadow(color: Color.black.opacity(0.2), radius: 16, x: 0, y: 4)
-            )
-            .padding(.horizontal, 16)
-            .padding(.bottom, 64)
+            .padding(.horizontal, 24)
+            Spacer(minLength: 48)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(UIColor.systemBackground).ignoresSafeArea())
         .sheet(isPresented: $showingDtmfSheet) {
             dtmfKeypadSheet(callId: call.rawCallId)
         }

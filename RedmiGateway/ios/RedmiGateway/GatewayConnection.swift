@@ -327,7 +327,13 @@ public class GatewayConnection: ObservableObject {
                 } else {
                     self.isIPhoneAudioConfirmed = audioState.running
                     self.audioStatus = audioState.running ? "Görüşme sesi iPhone'da" : "Görüşme sesi Redmi'de"
-                    if !audioState.running { AudioEngine.shared.stop() }
+                    if !audioState.running {
+                        if audioState.detail.hasPrefix("Packet timeout") {
+                            CallKitManager.shared.recoverCallAudio()
+                        } else {
+                            AudioEngine.shared.stop()
+                        }
+                    }
                 }
             }
             

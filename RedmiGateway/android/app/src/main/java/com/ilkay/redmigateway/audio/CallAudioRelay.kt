@@ -531,9 +531,9 @@ object CallAudioRelay : CallManager.CallListener {
                 savedVoiceVolume = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
             }
             val minVol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                audioManager.getStreamMinVolume(AudioManager.STREAM_VOICE_CALL).coerceAtLeast(1)
+                audioManager.getStreamMinVolume(AudioManager.STREAM_VOICE_CALL).coerceAtLeast(0)
             } else {
-                1
+                0
             }
             audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, minVol, 0)
         }

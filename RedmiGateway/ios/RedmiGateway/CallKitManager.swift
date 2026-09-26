@@ -50,6 +50,9 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         AudioEngine.shared.onStatus = { status in
             Task { @MainActor in GatewayConnection.shared.audioStatus = status }
         }
+        AudioEngine.shared.onNeedsRestart = { [weak self] in
+            Task { @MainActor [weak self] in self?.recoverCallAudio() }
+        }
         
         setupGatewayObserver()
     }
@@ -175,6 +178,16 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         if callKitAudioActivated, let uuid = audioCallUuid, callStates[uuid] == "active" {
             startAudioEngine(endpoint: endpoint)
         }
+    }
+
+    public func recoverCallAudio() {
+        guard callKitAudioActivated,
+              let uuid = audioCallUuid,
+              callStates[uuid] == "active",
+              let endpoint = pendingAudioEndpoint,
+              GatewayConnection.shared.state == .authenticated else { return }
+        GatewayConnection.shared.log("Rebuilding iPhone call audio after route or microphone interruption")
+        startAudioEngine(endpoint: endpoint)
     }
 
     private func startAudioEngine(endpoint: (session: UInt32, port: UInt16)) {

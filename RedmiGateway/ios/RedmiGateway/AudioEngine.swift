@@ -8,7 +8,9 @@ final class AudioEngine {
     static let shared = AudioEngine()
 
     var onStatus: ((String) -> Void)?
+    var onNeedsRestart: (() -> Void)?
     var isMuted: Bool = false
+    private(set) var isSpeakerEnabled = false
 
     private let sampleRate: Double = 16_000
     private let frameSamples = 320
@@ -25,9 +27,26 @@ final class AudioEngine {
     private var lastDownlink: Date?
     private var tapInstalled = false
     private var running = false
+    private var lastPcmSentAt: Date?
+    private var recoveryRequested = false
+    private var lastRecoveryRequest = Date.distantPast
 
     private init() {
         engine.attach(player)
+        NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main
+        ) { [weak self] _ in
+            self?.requestRecovery("Ses donanımı değişti")
+        }
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] _ in
+            self?.requestRecovery("Ses yolu değişti")
+        }
     }
 
     /// Ask while the app is open so a first incoming call never has to show a
@@ -65,8 +84,13 @@ final class AudioEngine {
     /// Enables or disables speakerphone route without altering Bluetooth availability.
     @discardableResult
     func setSpeakerEnabled(_ enabled: Bool) -> Bool {
+        guard running else {
+            report("Önce görüşme sesi bağlansın")
+            return false
+        }
         do {
             try AVAudioSession.sharedInstance().overrideOutputAudioPort(enabled ? .speaker : .none)
+            isSpeakerEnabled = enabled
             return true
         } catch {
             report("Hoparlör geçişi başarısız: \(error.localizedDescription)")
@@ -76,7 +100,7 @@ final class AudioEngine {
 
     /// Called only after CXProviderDelegate.didActivate and Redmi's audio_ready response.
     func start(host: String, port: UInt16, session: UInt32) {
-        stop()
+        stop(preservingControls: true)
         guard AVAudioSession.sharedInstance().recordPermission == .granted else {
             report("iPhone mikrofon izni gerekli. Uygulamayı açıp izin ver.")
             return
@@ -144,6 +168,9 @@ final class AudioEngine {
             try engine.start()
             player.play()
             running = true
+            if isSpeakerEnabled {
+                try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
+            }
 
             networkQueue.async { [weak self] in
                 guard let self else { return }
@@ -153,6 +180,8 @@ final class AudioEngine {
                 self.playbackQueue.removeAll()
                 self.queuedBuffers = 0
                 self.lastDownlink = nil
+                self.lastPcmSentAt = Date()
+                self.recoveryRequested = false
 
                 let socket = NWConnection(host: NWEndpoint.Host(host), port: endpointPort, using: .udp)
                 self.connection = socket
@@ -173,7 +202,18 @@ final class AudioEngine {
 
                 let timer = DispatchSource.makeTimerSource(queue: self.networkQueue)
                 timer.schedule(deadline: .now() + 1, repeating: 1)
-                timer.setEventHandler { [weak self] in self?.sendKeepalive() }
+                timer.setEventHandler { [weak self] in
+                    guard let self else { return }
+                    self.sendKeepalive()
+                    if let last = self.lastPcmSentAt,
+                       Date().timeIntervalSince(last) > 3,
+                       !self.recoveryRequested {
+                        self.recoveryRequested = true
+                        DispatchQueue.main.async { [weak self] in
+                            self?.requestRecovery("iPhone mikrofon akışı durdu")
+                        }
+                    }
+                }
                 self.heartbeat = timer
                 timer.resume()
             }
@@ -183,9 +223,12 @@ final class AudioEngine {
         }
     }
 
-    func stop() {
-        isMuted = false
-        setSpeakerEnabled(false)
+    func stop(preservingControls: Bool = false) {
+        if !preservingControls {
+            isMuted = false
+            isSpeakerEnabled = false
+            try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.none)
+        }
         if tapInstalled {
             engine.inputNode.removeTap(onBus: 0)
             tapInstalled = false
@@ -204,6 +247,21 @@ final class AudioEngine {
             self.sessionId = 0
             self.playbackQueue.removeAll()
             self.playbackPrimed = false
+            self.lastPcmSentAt = nil
+            self.recoveryRequested = false
+        }
+    }
+
+    /// A route switch can invalidate the input tap without ending the CallKit call.
+    /// Rebuild the graph on the main queue and keep the selected audio controls.
+    private func requestRecovery(_ reason: String) {
+        guard running else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastRecoveryRequest) > 1.5 else { return }
+        lastRecoveryRequest = now
+        report("\(reason); ses yeniden bağlanıyor")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.onNeedsRestart?()
         }
     }
 
@@ -220,6 +278,7 @@ final class AudioEngine {
             pcm.append(UInt8(truncatingIfNeeded: bits >> 8))
         }
         sendPacket(type: 1, pcm: pcm)
+        lastPcmSentAt = Date()
     }
 
     private func sendPacket(type: UInt8, pcm: Data) {
