@@ -37,6 +37,7 @@ public class GatewayConnection: ObservableObject {
     @Published public var smsMessages: [SmsMessageItem] = []
     @Published public var logs: [String] = []
     @Published public var audioStatus = "Görüşme sesi Redmi'de"
+    @Published public private(set) var isIPhoneAudioConfirmed = false
     @Published public var lastCallError: String? = nil
     
     // Persistence keys
@@ -178,6 +179,8 @@ public class GatewayConnection: ObservableObject {
     
     private func disconnectInternal() {
         AudioEngine.shared.stop()
+        isIPhoneAudioConfirmed = false
+        audioStatus = "Görüşme sesi Redmi'de"
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         pendingSms.removeAll()
@@ -317,12 +320,14 @@ public class GatewayConnection: ObservableObject {
 
         case "audio_state":
             if let audioState = try? JSONDecoder().decode(AudioStateMessage.self, from: data) {
-                self.audioStatus = audioState.running ? "Görüşme sesi iPhone'da" : "Görüşme sesi Redmi'de"
                 self.log("Audio relay: \(audioState.detail)")
                 if audioState.detail == "request_iphone_audio" {
+                    self.audioStatus = "iPhone'a aktarılıyor"
                     if self.currentCall?.state == .active { self.sendAudioStart() }
-                } else if !audioState.running {
-                    AudioEngine.shared.stop()
+                } else {
+                    self.isIPhoneAudioConfirmed = audioState.running
+                    self.audioStatus = audioState.running ? "Görüşme sesi iPhone'da" : "Görüşme sesi Redmi'de"
+                    if !audioState.running { AudioEngine.shared.stop() }
                 }
             }
             
@@ -384,6 +389,8 @@ public class GatewayConnection: ObservableObject {
         if callState == .idle || callState == .disconnected {
             self.currentCall = nil
             self.lastCallError = nil
+            self.isIPhoneAudioConfirmed = false
+            self.audioStatus = "Görüşme sesi Redmi'de"
         } else {
             let existingId = self.currentCall?.id ?? UUID()
             self.currentCall = GSMCall(id: existingId, rawCallId: rawId, number: number, state: callState)
@@ -407,6 +414,8 @@ public class GatewayConnection: ObservableObject {
             self.onCallEvent?(event)
         } else {
             self.log("State Sync: No active calls on gateway")
+            self.isIPhoneAudioConfirmed = false
+            self.audioStatus = "Görüşme sesi Redmi'de"
             if self.currentCall != nil {
                 let prevId = self.currentCall?.rawCallId ?? ""
                 self.currentCall = nil

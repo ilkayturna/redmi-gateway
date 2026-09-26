@@ -416,9 +416,13 @@ struct ContentView: View {
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                     HStack(spacing: 6) {
-                        Image(systemName: isSpeaker ? "speaker.wave.3.fill" : "ear.fill")
+                        Image(systemName: connection.isIPhoneAudioConfirmed
+                              ? (isSpeaker ? "speaker.wave.3.fill" : "ear.fill")
+                              : "iphone")
                             .font(.caption)
-                        Text(isSpeaker ? "Hoparlör" : "Ahize")
+                        Text(connection.isIPhoneAudioConfirmed
+                             ? (isSpeaker ? "Ses iPhone hoparlöründe" : "Ses iPhone ahizesinde")
+                             : connection.audioStatus)
                             .font(.caption.weight(.medium))
                     }
                     .foregroundColor(.blue)
@@ -651,11 +655,13 @@ struct ContentView: View {
                 }
 
                 if !connection.logs.isEmpty {
-                    Section(header: Text("Son Olaylar")) {
-                        ForEach(connection.logs.suffix(8), id: \.self) { log in
-                            Text(log)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(.secondary)
+                    Section {
+                        DisclosureGroup("Tanılama") {
+                            ForEach(connection.logs.suffix(8), id: \.self) { log in
+                                Text(log)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
                         }
                     }
                 }
