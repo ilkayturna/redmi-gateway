@@ -131,12 +131,6 @@ public class GatewayConnection: ObservableObject {
         guard !hasAttemptedAutoconnect else { return }
         hasAttemptedAutoconnect = true
         guard !pairingToken.isEmpty else { return }
-        if currentHost.isEmpty {
-            isUserDisconnected = false
-            state = .connecting
-            discovery.start()
-            return
-        }
         connect(host: currentHost, port: currentPort, token: pairingToken)
     }
     
@@ -149,6 +143,10 @@ public class GatewayConnection: ObservableObject {
         discovery.start()
         
         self.state = .connecting
+        if host.isEmpty {
+            log("Searching for Redmi on the local network")
+            return
+        }
         log("Connecting to ws://\(host):\(port)...")
         
         guard let url = URL(string: "ws://\(host):\(port)") else {

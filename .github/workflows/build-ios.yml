@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release:
+        description: Upload a signed build to TestFlight
+        type: boolean
+        required: true
+        default: false
 
 jobs:
   compile:
@@ -25,3 +31,93 @@ jobs:
             -derivedDataPath derived_data \
             CODE_SIGNING_ALLOWED=NO \
             clean build
+
+  testflight:
+    name: Sign and upload TestFlight build
+    if: github.event_name == 'workflow_dispatch' && inputs.release == true
+    needs: compile
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Apple signing assets
+        shell: bash
+        env:
+          IOS_DIST_P12_B64: ${{ secrets.IOS_DIST_P12_B64 }}
+          IOS_DIST_P12_PASSWORD: ${{ secrets.IOS_DIST_P12_PASSWORD }}
+          IOS_PROFILE_B64: ${{ secrets.IOS_PROFILE_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$IOS_DIST_P12_B64"
+          test -n "$IOS_DIST_P12_PASSWORD"
+          test -n "$IOS_PROFILE_B64"
+          printf '%s' "$IOS_DIST_P12_B64" | base64 -D > "$RUNNER_TEMP/dist.p12"
+          printf '%s' "$IOS_PROFILE_B64" | base64 -D > "$RUNNER_TEMP/profile.mobileprovision"
+          keychain="$RUNNER_TEMP/telefon-gecidi.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security import "$RUNNER_TEMP/dist.p12" -k "$keychain" -P "$IOS_DIST_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          profiles="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$profiles"
+          cp "$RUNNER_TEMP/profile.mobileprovision" "$profiles/N6ZRK2NV2U.mobileprovision"
+          rm "$RUNNER_TEMP/dist.p12" "$RUNNER_TEMP/profile.mobileprovision"
+
+      - name: Archive iPhone app
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" RedmiGateway/ios/RedmiGateway/Info.plist
+          xcodebuild archive \
+            -project RedmiGateway/ios/RedmiGateway.xcodeproj \
+            -scheme RedmiGateway \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/RedmiGateway.xcarchive" \
+            DEVELOPMENT_TEAM=6FR2S79P48 \
+            CODE_SIGN_STYLE=Manual \
+            'PROVISIONING_PROFILE_SPECIFIER=Telefon Gecidi App Store 2026' \
+            'CODE_SIGN_IDENTITY=iPhone Distribution'
+
+      - name: Export IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>teamID</key><string>6FR2S79P48</string>
+            <key>provisioningProfiles</key><dict>
+              <key>com.ilkay.redmigateway.ios</key><string>Telefon Gecidi App Store 2026</string>
+            </dict>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/RedmiGateway.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export"
+
+      - name: Upload to App Store Connect
+        shell: bash
+        env:
+          ASC_API_KEY_B64: ${{ secrets.ASC_API_KEY_B64 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$ASC_API_KEY_B64"
+          test -n "$ASC_API_KEY_ID"
+          test -n "$ASC_ISSUER_ID"
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          printf '%s' "$ASC_API_KEY_B64" | base64 -D > "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_API_KEY_ID}.p8"
+          chmod 600 "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_API_KEY_ID}.p8"
+          ipa="$(find "$RUNNER_TEMP/export" -maxdepth 1 -name '*.ipa' -print -quit)"
+          test -n "$ipa"
+          xcrun altool --upload-app -f "$ipa" -t ios --apiKey "$ASC_API_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"

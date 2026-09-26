@@ -2,7 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var connection = GatewayConnection.shared
-    @AppStorage("gateway_ip") private var gatewayIp = "192.168.42.108"
+    @AppStorage("gateway_ip") private var gatewayIp = ""
     @AppStorage("gateway_port") private var gatewayPort = "8787"
     @AppStorage("pairing_token") private var pairingToken = ""
     @State private var showingSettings = false
@@ -61,6 +61,8 @@ struct ContentView: View {
                 settingsSheet
             }
             .onAppear {
+                // Register the CallKit observer before connecting and receiving call events.
+                _ = CallKitManager.shared
                 connection.connectSavedConfiguration()
                 if pairingToken.isEmpty { showingSettings = true }
             }
@@ -78,7 +80,7 @@ struct ContentView: View {
                     .font(.body.weight(.medium))
                 Spacer()
             }
-            Text("Redmi Note 8 · \(gatewayIp)")
+            Text(gatewayIp.isEmpty ? "Redmi otomatik aranıyor" : "Redmi Note 8 · \(gatewayIp)")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
             if connection.state == .failed || connection.state == .disconnected {
@@ -126,7 +128,7 @@ struct ContentView: View {
                 Button("Ara") {
                     let number = outgoingNumber.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !number.isEmpty else { return }
-                    connection.sendDial(number: number)
+                    CallKitManager.shared.startOutgoingCall(phoneNumber: number)
                     outgoingNumber = ""
                 }
                 .buttonStyle(.borderedProminent)
@@ -143,8 +145,8 @@ struct ContentView: View {
         NavigationView {
             Form {
                 Section(header: Text("Redmi bağlantısı"),
-                        footer: Text("Kodu bir kez girmeniz yeterli. Uygulama sonraki açılışlarda yeniden bağlanır.")) {
-                    TextField("Redmi adresi", text: $gatewayIp)
+                        footer: Text("Redmi adresi otomatik bulunur. Eşleştirme kodunu yalnızca ilk kurulumda girin.")) {
+                    TextField("Redmi adresi (isteğe bağlı)", text: $gatewayIp)
                         .keyboardType(.numbersAndPunctuation)
                         .autocapitalization(.none)
                         .disableAutocorrection(true)
