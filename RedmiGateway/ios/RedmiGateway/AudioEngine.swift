@@ -29,6 +29,26 @@ final class AudioEngine {
         engine.attach(player)
     }
 
+    /// Ask while the app is open so a first incoming call never has to show a
+    /// recording permission prompt over the locked CallKit screen.
+    func requestMicrophonePermission() {
+        let session = AVAudioSession.sharedInstance()
+        switch session.recordPermission {
+        case .undetermined:
+            session.requestRecordPermission { [weak self] granted in
+                if !granted {
+                    self?.report("iPhone mikrofon izni kapalı. Ayarlar'dan aç.")
+                }
+            }
+        case .denied:
+            report("iPhone mikrofon izni kapalı. Ayarlar'dan aç.")
+        case .granted:
+            break
+        @unknown default:
+            break
+        }
+    }
+
     /// CallKit activates the audio session. Configure its policy before reporting a call.
     func prepareSession() {
         do {
@@ -44,6 +64,10 @@ final class AudioEngine {
     /// Called only after CXProviderDelegate.didActivate and Redmi's audio_ready response.
     func start(host: String, port: UInt16, session: UInt32) {
         stop()
+        guard AVAudioSession.sharedInstance().recordPermission == .granted else {
+            report("iPhone mikrofon izni gerekli. Uygulamayı açıp izin ver.")
+            return
+        }
         guard !host.isEmpty, session != 0, let endpointPort = NWEndpoint.Port(rawValue: port) else {
             report("Görüşme sesi: geçersiz bağlantı")
             return

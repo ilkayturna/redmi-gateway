@@ -70,6 +70,7 @@ struct ContentView: View {
             .onAppear {
                 // Register the CallKit observer before connecting and receiving call events.
                 _ = CallKitManager.shared
+                AudioEngine.shared.requestMicrophonePermission()
                 connection.connectSavedConfiguration()
                 if pairingToken.isEmpty { showingSettings = true }
             }
