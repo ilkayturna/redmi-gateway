@@ -12,10 +12,16 @@ on:
         type: boolean
         required: true
         default: false
+      promote_build:
+        description: Add an existing processed build number to the internal TestFlight group
+        type: string
+        required: false
+        default: ''
 
 jobs:
   compile:
     name: Compile iOS app
+    if: github.event_name != 'workflow_dispatch' || inputs.promote_build == ''
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -137,3 +143,21 @@ jobs:
           ipa="$(find "$RUNNER_TEMP/export" -maxdepth 1 -name '*.ipa' -print -quit)"
           test -n "$ipa"
           xcrun altool --upload-app -f "$ipa" -t ios --apiKey "$ASC_API_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+
+  promote_existing:
+    name: Add build to internal TestFlight group
+    if: github.event_name == 'workflow_dispatch' && inputs.promote_build != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Apple API signing library
+        run: python3 -m pip install --disable-pip-version-check 'PyJWT[crypto]>=2,<3'
+      - name: Wait for processing and add build to group
+        env:
+          ASC_API_KEY_B64: ${{ secrets.ASC_API_KEY_B64 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_BUILD_NUMBER: ${{ inputs.promote_build }}
+        run: python3 scripts/assign_testflight.py
