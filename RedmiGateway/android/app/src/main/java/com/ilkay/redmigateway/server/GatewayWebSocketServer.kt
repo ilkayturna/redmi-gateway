@@ -35,8 +35,9 @@ class GatewayWebSocketServer(
     }
 
     var serverListener: ServerListener? = null
+    private data class AuthFailureRecord(var count: Int, var lockedUntil: Long)
     private val authenticatedClients = ConcurrentHashMap.newKeySet<WebSocket>()
-    private val failedAuthAttempts = ConcurrentHashMap<WebSocket, Int>()
+    private val ipAuthFailures = ConcurrentHashMap<String, AuthFailureRecord>()
     @Volatile private var audioOwner: WebSocket? = null
 
     init {
@@ -47,7 +48,7 @@ class GatewayWebSocketServer(
     override fun onStart() {
         Log.i(TAG, "WebSocket server started on port $port")
         CallManager.addListener(this)
-        CallAudioRelay.listener = this
+        CallAudioRelay.addListener(this)
         SmsReceiver.webSocketServer = this
         CallManager.log("WebSocket server listening on 0.0.0.0:$port")
     }
@@ -68,7 +69,6 @@ class GatewayWebSocketServer(
 
     override fun onClose(conn: WebSocket, code: Int, reason: String?, remote: Boolean) {
         val wasAuth = authenticatedClients.remove(conn)
-        failedAuthAttempts.remove(conn)
         if (audioOwner === conn) {
             audioOwner = null
             CallAudioRelay.disarm("iPhone connection lost")
@@ -140,6 +140,16 @@ class GatewayWebSocketServer(
                     val success = CallManager.dial(context, number)
                     sendAck(conn, "dial", success)
                 }
+                "dtmf" -> {
+                    val digit = json.optString("digit", "")
+                    if (digit.isNotEmpty()) {
+                        CallManager.log("WebSocket command: DTMF tone")
+                        val success = CallManager.playDtmf(digit[0])
+                        sendAck(conn, "dtmf", success)
+                    } else {
+                        sendError(conn, "dtmf requires digit")
+                    }
+                }
                 "get_state" -> {
                     CallManager.log("WebSocket command: GET_STATE")
                     handleGetState(conn)
@@ -156,7 +166,8 @@ class GatewayWebSocketServer(
                         sendError(conn, "Another client owns call audio")
                         return
                     }
-                    val session = CallAudioRelay.arm(context)
+                    val clientAddress = conn.remoteSocketAddress?.address
+                    val session = CallAudioRelay.arm(context, clientAddress)
                     audioOwner = conn
                     conn.send(JSONObject().apply {
                         put("type", "audio_ready")
@@ -278,13 +289,29 @@ class GatewayWebSocketServer(
     }
 
     private fun handleAuth(conn: WebSocket, json: JSONObject) {
+        val remoteIp = conn.remoteSocketAddress?.address?.hostAddress ?: "unknown"
+        val now = System.currentTimeMillis()
+        val failureRecord = ipAuthFailures[remoteIp]
+        if (failureRecord != null && failureRecord.lockedUntil > now) {
+            val waitSec = ((failureRecord.lockedUntil - now) / 1000).coerceAtLeast(1)
+            CallManager.log("Auth rejected: IP $remoteIp is locked for ${waitSec}s")
+            val authResult = JSONObject().apply {
+                put("type", "auth_result")
+                put("success", false)
+                put("message", "Çok fazla başarısız deneme. Lütfen ${waitSec} saniye bekleyin.")
+            }
+            conn.send(authResult.toString())
+            conn.close(1008, "Throttled")
+            return
+        }
+
         val token = json.optString("token", "")
         val expectedToken = RedmiGatewayApp.getPairingToken()
 
         if (token.equals(expectedToken, ignoreCase = true)) {
-            failedAuthAttempts.remove(conn)
+            ipAuthFailures.remove(remoteIp)
             authenticatedClients.add(conn)
-            CallManager.log("Client authenticated successfully: ${conn.remoteSocketAddress}")
+            CallManager.log("Client authenticated successfully from: $remoteIp")
 
             val authResult = JSONObject().apply {
                 put("type", "auth_result")
@@ -306,15 +333,25 @@ class GatewayWebSocketServer(
                 conn.send(callEvent.toString())
             }
         } else {
-            val failures = failedAuthAttempts.merge(conn, 1, Int::plus) ?: 1
-            CallManager.log("Client authentication failed")
+            val rec = ipAuthFailures.compute(remoteIp) { _, existing ->
+                val r = existing ?: AuthFailureRecord(0, 0L)
+                r.count += 1
+                if (r.count >= 5) {
+                    r.lockedUntil = System.currentTimeMillis() + 60_000L
+                }
+                r
+            }
+            val count = rec?.count ?: 1
+            val remaining = (5 - count).coerceAtLeast(0)
+            CallManager.log("Client authentication failed from IP $remoteIp (attempt $count/5)")
+            val isLocked = rec != null && rec.lockedUntil > now
             val authResult = JSONObject().apply {
                 put("type", "auth_result")
                 put("success", false)
-                put("message", "Invalid pairing token")
+                put("message", if (isLocked) "Çok fazla başarısız deneme. 60 saniye bekleyin." else "Geçersiz eşleştirme kodu ($remaining deneme kaldı)")
             }
             conn.send(authResult.toString())
-            if (failures >= 5) {
+            if (isLocked) {
                 conn.close(1008, "Too many authentication failures")
             }
         }
@@ -417,12 +454,12 @@ class GatewayWebSocketServer(
     fun stopServer() {
         try {
             CallManager.removeListener(this)
-            if (CallAudioRelay.listener === this) CallAudioRelay.listener = null
+            CallAudioRelay.removeListener(this)
             audioOwner = null
             CallAudioRelay.disarm("gateway stopped")
             SmsReceiver.webSocketServer = null
             authenticatedClients.clear()
-            failedAuthAttempts.clear()
+            ipAuthFailures.clear()
             stop(1000)
             serverListener?.onClientCountChanged(0)
             CallManager.log("WebSocket server stopped")

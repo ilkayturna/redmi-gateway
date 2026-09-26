@@ -6,7 +6,7 @@ public struct HelloMessage: Codable {
     public let type: String
     public let device: String
     public let protocolVersion: Int?
-    
+
     enum CodingKeys: String, CodingKey {
         case type, device
         case protocolVersion = "protocol"
@@ -170,3 +170,13 @@ public struct SendSmsPayload: Codable {
     }
 }
 
+public struct DtmfPayload: Codable {
+    public let type: String = "dtmf"
+    public let digit: String
+    public let callId: String?
+
+    public init(digit: String, callId: String? = nil) {
+        self.digit = digit
+        self.callId = callId
+    }
+}

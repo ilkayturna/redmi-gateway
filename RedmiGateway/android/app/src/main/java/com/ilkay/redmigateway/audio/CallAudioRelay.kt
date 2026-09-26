@@ -12,6 +12,8 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
 import android.os.SystemClock
+import android.os.Build
+import android.telecom.CallAudioState
 import android.util.Log
 import com.ilkay.redmigateway.service.GatewayService
 import com.ilkay.redmigateway.telecom.CallManager
@@ -20,6 +22,7 @@ import org.json.JSONObject
 import java.lang.reflect.InvocationTargetException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.SocketAddress
 import java.nio.ByteBuffer
@@ -65,7 +68,31 @@ object CallAudioRelay : CallManager.CallListener {
         fun onAudioRelayState(running: Boolean, detail: String)
     }
 
-    @Volatile var listener: Listener? = null
+    private val listeners = java.util.concurrent.CopyOnWriteArrayList<Listener>()
+
+    fun addListener(listener: Listener) {
+        if (!listeners.contains(listener)) {
+            listeners.add(listener)
+        }
+    }
+
+    fun removeListener(listener: Listener) {
+        listeners.remove(listener)
+    }
+
+    private fun notifyListeners(running: Boolean, detail: String) {
+        for (l in listeners) {
+            runCatching { l.onAudioRelayState(running, detail) }
+        }
+    }
+
+    @Deprecated("Use addListener/removeListener instead")
+    var listener: Listener?
+        get() = listeners.firstOrNull()
+        set(value) {
+            listeners.clear()
+            if (value != null) listeners.add(value)
+        }
 
     /** Mutes the Redmi's own microphone while the iPhone carries the conversation. */
     @Volatile var muteLocalMic = false
@@ -74,13 +101,21 @@ object CallAudioRelay : CallManager.CallListener {
     private val worker = HandlerThread("CallAudioRelay", Process.THREAD_PRIORITY_AUDIO).apply { start() }
     private val handler = Handler(worker.looper)
 
+    private const val WATCHDOG_TIMEOUT_MS = 5000L
+    private const val WATCHDOG_CHECK_INTERVAL_MS = 1000L
+
     private var appContext: Context? = null
     @Volatile private var session = 0
     @Volatile private var peer: SocketAddress? = null
+    @Volatile private var expectedClientAddress: InetAddress? = null
     @Volatile private var socket: DatagramSocket? = null
     @Volatile private var record: AudioRecord? = null
     @Volatile private var track: AudioTrack? = null
     @Volatile private var streaming = false
+    @Volatile private var iPhoneAudioConfirmed = false
+    @Volatile private var lastUplinkTimestamp = 0L
+    @Volatile private var streamingStartedAt = 0L
+    @Volatile private var watchdogFellBack = false
     private var receiveThread: Thread? = null
     private var sendThread: Thread? = null
     private var startAttempts = 0
@@ -96,24 +131,49 @@ object CallAudioRelay : CallManager.CallListener {
     }
     private val startAttempt = Runnable { tryStartStreaming() }
 
+    private val watchdogRunnable = object : Runnable {
+        override fun run() {
+            if (streaming) {
+                val latestPacketOrStart = maxOf(lastUplinkTimestamp, streamingStartedAt)
+                val elapsed = SystemClock.elapsedRealtime() - latestPacketOrStart
+                if (elapsed > WATCHDOG_TIMEOUT_MS && !watchdogFellBack) {
+                    watchdogFellBack = true
+                    iPhoneAudioConfirmed = false
+                    Log.w(TAG, "Watchdog triggered: no uplink packets for ${elapsed}ms (>5s). Fail-safe restoring local handset audio.")
+                    CallManager.log("Watchdog: iPhone audio silence >5s. Handset audio restored.")
+                    appContext?.let { ctx ->
+                        restoreRedmiHandset(ctx.getSystemService(AudioManager::class.java))
+                    }
+                    notifyListeners(false, "Packet timeout (>5s). Handset audio restored.")
+                }
+                handler.postDelayed(this, WATCHDOG_CHECK_INTERVAL_MS)
+            }
+        }
+    }
+
     val isStreaming: Boolean get() = streaming
+    val isIPhoneAudioConfirmed: Boolean get() = iPhoneAudioConfirmed
 
     /**
      * Opens a relay session for the paired iPhone and returns its id. Audio starts as soon as
      * the Redmi call reaches a live state; a session left without a call expires on its own.
      */
-    fun arm(context: Context): Int {
+    fun arm(context: Context, clientAddress: InetAddress? = null): Int {
         synchronized(this) {
             appContext = context.applicationContext
+            expectedClientAddress = clientAddress
             if (session == 0) {
                 var id = 0
                 while (id == 0) id = random.nextInt()
                 session = id
                 peer = null
+                lastUplinkTimestamp = 0L
+                iPhoneAudioConfirmed = false
                 try {
                     openSocket()
                 } catch (error: Exception) {
                     session = 0
+                    expectedClientAddress = null
                     throw error
                 }
             }
@@ -185,8 +245,10 @@ object CallAudioRelay : CallManager.CallListener {
 
         val downlink = openDownlink(audioManager)
         val uplink = openUplink(audioManager)
-        if (downlink == null && uplink == null) {
-            retryStart("call audio endpoints unavailable")
+        if (downlink == null || uplink == null) {
+            downlink?.release()
+            uplink?.release()
+            retryStart("both call audio endpoints are required")
             return
         }
 
@@ -195,6 +257,7 @@ object CallAudioRelay : CallManager.CallListener {
         packetsIn = 0
         packetsOut = 0
         streaming = true
+        streamingStartedAt = SystemClock.elapsedRealtime()
         handler.removeCallbacks(armTimeout)
 
         uplink?.play()
@@ -207,18 +270,33 @@ object CallAudioRelay : CallManager.CallListener {
         }
 
         GatewayService.setCallAudioForeground(true)
-        if (muteLocalMic && downlink != null && uplink != null) quietRedmiHandset(audioManager)
+        watchdogFellBack = false
+        handler.removeCallbacks(watchdogRunnable)
+        handler.postDelayed(watchdogRunnable, WATCHDOG_CHECK_INTERVAL_MS)
 
-        val detail = "downlink=${downlink != null}, uplink=${uplink != null}, localMicMuted=$muteLocalMic"
+        val detail = "downlink=true, uplink=true, waitingForIPhone=true"
         CallManager.log("Call audio relay streaming ($detail)")
-        listener?.onAudioRelayState(true, detail)
+        confirmIPhoneAudio()
+    }
+
+    /** Keep the Redmi usable until the paired iPhone actually reaches the UDP relay. */
+    private fun confirmIPhoneAudio() {
+        if (!streaming || session == 0 || peer == null || record == null || track == null) return
+        val lastPacket = lastUplinkTimestamp
+        if (lastPacket == 0L || SystemClock.elapsedRealtime() - lastPacket > WATCHDOG_TIMEOUT_MS) return
+        if (iPhoneAudioConfirmed) return
+        iPhoneAudioConfirmed = true
+        watchdogFellBack = false
+        appContext?.let { ctx -> quietRedmiHandset(ctx.getSystemService(AudioManager::class.java)) }
+        CallManager.log("iPhone audio peer confirmed; handset audio reduced")
+        notifyListeners(true, "iPhone audio connected")
     }
 
     private fun retryStart(reason: String) {
         startAttempts += 1
         if (startAttempts >= MAX_START_ATTEMPTS) {
             CallManager.log("Call audio relay could not start: $reason")
-            listener?.onAudioRelayState(false, reason)
+            notifyListeners(false, reason)
             return
         }
         handler.removeCallbacks(startAttempt)
@@ -228,6 +306,10 @@ object CallAudioRelay : CallManager.CallListener {
     private fun disarmOnWorker(reason: String) {
         handler.removeCallbacks(startAttempt)
         handler.removeCallbacks(armTimeout)
+        handler.removeCallbacks(watchdogRunnable)
+        watchdogFellBack = false
+        iPhoneAudioConfirmed = false
+        expectedClientAddress = null
         val wasActive = session != 0
         stopStreaming()
         synchronized(this) {
@@ -244,30 +326,39 @@ object CallAudioRelay : CallManager.CallListener {
         }
         if (wasActive) {
             CallManager.log("Call audio relay stopped: $reason")
-            listener?.onAudioRelayState(false, reason)
+            notifyListeners(false, reason)
         }
     }
 
     private fun stopStreaming() {
         if (!streaming) return
         streaming = false
-        val context = appContext
-        record?.let { recorder ->
-            runCatching { recorder.stop() }
+        handler.removeCallbacks(watchdogRunnable)
+        watchdogFellBack = false
+        lastUplinkTimestamp = 0L
+        streamingStartedAt = 0L
+        iPhoneAudioConfirmed = false
+        try {
+            record?.let { recorder ->
+                runCatching { recorder.stop() }
+            }
+            sendThread?.join(500)
+            sendThread = null
+            record?.release()
+            record = null
+            track?.let { player ->
+                runCatching { player.pause() }
+                runCatching { player.flush() }
+                player.release()
+            }
+            track = null
+            GatewayService.setCallAudioForeground(false)
+            CallManager.log("Call audio relay packets: in=$packetsIn out=$packetsOut")
+        } finally {
+            appContext?.let { ctx ->
+                restoreRedmiHandset(ctx.getSystemService(AudioManager::class.java))
+            }
         }
-        sendThread?.join(500)
-        sendThread = null
-        record?.release()
-        record = null
-        track?.let { player ->
-            runCatching { player.pause() }
-            runCatching { player.flush() }
-            player.release()
-        }
-        track = null
-        GatewayService.setCallAudioForeground(false)
-        if (context != null) restoreRedmiHandset(context.getSystemService(AudioManager::class.java))
-        CallManager.log("Call audio relay packets: in=$packetsIn out=$packetsOut")
     }
 
     private fun receiveLoop(datagram: DatagramSocket) {
@@ -287,7 +378,21 @@ object CallAudioRelay : CallManager.CallListener {
             val packetSession = header.int
             val expected = session
             if (expected == 0 || packetSession != expected) continue
+
+            val expectedAddr = expectedClientAddress
+            if (expectedAddr != null && packet.address != expectedAddr) {
+                Log.w(TAG, "Dropping packet from unauthorized peer address: ${packet.address} (expected: $expectedAddr)")
+                continue
+            }
+
+            if (buffer[6] != 0.toByte() && buffer[6] != PAYLOAD_PCM16) continue
+            // A valid packet from the paired IP confirms that the iPhone reached this session.
+            lastUplinkTimestamp = SystemClock.elapsedRealtime()
             peer = packet.socketAddress
+            if (!iPhoneAudioConfirmed) {
+                handler.post { if (session == expected) confirmIPhoneAudio() }
+            }
+
             if (buffer[6] != PAYLOAD_PCM16) continue
             val payload = packet.length - HEADER_BYTES
             if (payload <= 0 || payload % 2 != 0) continue
@@ -416,20 +521,25 @@ object CallAudioRelay : CallManager.CallListener {
         }
     }
 
-    private fun quietRedmiHandset(audioManager: AudioManager) {
+    fun quietRedmiHandset(audioManager: AudioManager) {
         GatewayInCallService.setGatewayMuted(true)
         didMuteLocalMic = true
+        GatewayInCallService.setAudioRoute(CallAudioState.ROUTE_EARPIECE)
         runCatching {
-            savedVoiceVolume = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
-            audioManager.setStreamVolume(
-                AudioManager.STREAM_VOICE_CALL,
-                audioManager.getStreamMinVolume(AudioManager.STREAM_VOICE_CALL),
-                0
-            )
+            if (savedVoiceVolume < 0) {
+                savedVoiceVolume = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
+            }
+            val minVol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                audioManager.getStreamMinVolume(AudioManager.STREAM_VOICE_CALL).coerceAtLeast(1)
+            } else {
+                1
+            }
+            audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, minVol, 0)
         }
     }
 
-    private fun restoreRedmiHandset(audioManager: AudioManager) {
+    fun restoreRedmiHandset(audioManager: AudioManager?) {
+        if (audioManager == null) return
         if (didMuteLocalMic) {
             GatewayInCallService.setGatewayMuted(false)
             didMuteLocalMic = false
@@ -437,6 +547,22 @@ object CallAudioRelay : CallManager.CallListener {
         if (savedVoiceVolume >= 0) {
             runCatching { audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, savedVoiceVolume, 0) }
             savedVoiceVolume = -1
+        }
+    }
+
+    fun transferAudioToRedmi() {
+        handler.post {
+            disarmOnWorker("Manual switch to Redmi")
+        }
+    }
+
+    fun transferAudioToIPhone() {
+        handler.post {
+            // The authenticated client requests a fresh session. Keep local audio until
+            // its first UDP packet arrives; do not mute on a mere button press.
+            if (isLiveCallState(CallManager.currentCallState)) {
+                notifyListeners(false, "request_iphone_audio")
+            }
         }
     }
 

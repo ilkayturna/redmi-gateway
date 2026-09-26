@@ -240,6 +240,7 @@ public class GatewayConnection: ObservableObject {
                     
                 case .failure(let error):
                     AudioEngine.shared.stop()
+                    CallKitManager.shared.reportCurrentCallFailedOnNetworkDrop()
                     self.webSocketTask = nil
                     self.state = .failed
                     self.log("WebSocket dropped: \(error.localizedDescription)")
@@ -302,6 +303,7 @@ public class GatewayConnection: ObservableObject {
                 if ack.action == "dial" {
                     if !ack.success {
                         self.lastCallError = "Arama Redmi'de başlatılamadı. Numarayı ve hattı kontrol et."
+                        CallKitManager.shared.handleDialFailed()
                     }
                 } else if ack.action == "answer" && !ack.success {
                     self.lastCallError = "Arama Redmi'de yanıtlanamadı."
@@ -315,8 +317,13 @@ public class GatewayConnection: ObservableObject {
 
         case "audio_state":
             if let audioState = try? JSONDecoder().decode(AudioStateMessage.self, from: data) {
-                self.audioStatus = audioState.running ? "Görüşme sesi bağlanıyor" : "Görüşme sesi Redmi'de"
+                self.audioStatus = audioState.running ? "Görüşme sesi iPhone'da" : "Görüşme sesi Redmi'de"
                 self.log("Audio relay: \(audioState.detail)")
+                if audioState.detail == "request_iphone_audio" {
+                    if self.currentCall?.state == .active { self.sendAudioStart() }
+                } else if !audioState.running {
+                    AudioEngine.shared.stop()
+                }
             }
             
         case "error":
@@ -460,6 +467,13 @@ public class GatewayConnection: ObservableObject {
     public func sendAudioStop() {
         guard state == .authenticated else { return }
         sendPayload(AudioStopPayload())
+    }
+
+    public func sendDtmf(digit: String, callId: String? = nil) {
+        guard state == .authenticated else { return }
+        log("Sending DTMF tone")
+        let payload = DtmfPayload(digit: digit, callId: callId)
+        sendPayload(payload)
     }
     
     public func sendSms(recipient: String, message: String) {

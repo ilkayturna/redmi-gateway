@@ -8,6 +8,7 @@ final class AudioEngine {
     static let shared = AudioEngine()
 
     var onStatus: ((String) -> Void)?
+    var isMuted: Bool = false
 
     private let sampleRate: Double = 16_000
     private let frameSamples = 320
@@ -53,11 +54,23 @@ final class AudioEngine {
     func prepareSession() {
         do {
             try AVAudioSession.sharedInstance().setCategory(
-                .playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .defaultToSpeaker]
+                .playAndRecord, mode: .voiceChat, options: [.allowBluetooth]
             )
             try AVAudioSession.sharedInstance().setPreferredIOBufferDuration(0.02)
         } catch {
             report("iPhone ses ayarı başarısız: \(error.localizedDescription)")
+        }
+    }
+
+    /// Enables or disables speakerphone route without altering Bluetooth availability.
+    @discardableResult
+    func setSpeakerEnabled(_ enabled: Bool) -> Bool {
+        do {
+            try AVAudioSession.sharedInstance().overrideOutputAudioPort(enabled ? .speaker : .none)
+            return true
+        } catch {
+            report("Hoparlör geçişi başarısız: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -171,6 +184,8 @@ final class AudioEngine {
     }
 
     func stop() {
+        isMuted = false
+        setSpeakerEnabled(false)
         if tapInstalled {
             engine.inputNode.removeTap(onBus: 0)
             tapInstalled = false
@@ -197,7 +212,7 @@ final class AudioEngine {
     }
 
     private func sendPcm(_ samples: [Int16]) {
-        guard sessionId != 0 else { return }
+        guard sessionId != 0, !isMuted else { return }
         var pcm = Data(capacity: samples.count * 2)
         for sample in samples {
             let bits = UInt16(bitPattern: sample)

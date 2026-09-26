@@ -72,6 +72,35 @@ class GatewayInCallService : InCallService() {
                 }
             }
         }
+
+        fun setAudioRoute(route: Int) {
+            val service = instance ?: return
+            service.mainExecutor.execute {
+                if (Build.VERSION.SDK_INT >= 34) {
+                    val targetType = when (route) {
+                        CallAudioState.ROUTE_SPEAKER -> CallEndpoint.TYPE_SPEAKER
+                        CallAudioState.ROUTE_EARPIECE -> CallEndpoint.TYPE_EARPIECE
+                        CallAudioState.ROUTE_BLUETOOTH -> CallEndpoint.TYPE_BLUETOOTH
+                        else -> CallEndpoint.TYPE_EARPIECE
+                    }
+                    val endpoint = service.endpoints.firstOrNull { it.endpointType == targetType }
+                    if (endpoint != null) {
+                        service.requestCallEndpointChange(
+                            endpoint, service.mainExecutor,
+                            object : OutcomeReceiver<Void?, CallEndpointException> {
+                                override fun onResult(result: Void?) = Unit
+                                override fun onError(error: CallEndpointException) {
+                                    Log.w(TAG, "Could not set audio route to $route", error)
+                                }
+                            }
+                        )
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    service.setAudioRoute(route)
+                }
+            }
+        }
     }
 
     override fun onCreate() {
