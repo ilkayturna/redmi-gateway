@@ -120,6 +120,7 @@ object CallAudioRelay : CallManager.CallListener {
     private var sendThread: Thread? = null
     private var startAttempts = 0
     private var savedVoiceVolume = -1
+    private var savedVoiceMuted: Boolean? = null
     private var didMuteLocalMic = false
     private var listeningToCalls = false
 
@@ -529,6 +530,7 @@ object CallAudioRelay : CallManager.CallListener {
         runCatching {
             if (savedVoiceVolume < 0) {
                 savedVoiceVolume = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
+                savedVoiceMuted = audioManager.isStreamMute(AudioManager.STREAM_VOICE_CALL)
             }
             val minVol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 audioManager.getStreamMinVolume(AudioManager.STREAM_VOICE_CALL).coerceAtLeast(0)
@@ -536,6 +538,10 @@ object CallAudioRelay : CallManager.CallListener {
                 0
             }
             audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, minVol, 0)
+            audioManager.adjustStreamVolume(
+                AudioManager.STREAM_VOICE_CALL, AudioManager.ADJUST_MUTE, 0
+            )
+            Log.i(TAG, "Redmi call output muted=${audioManager.isStreamMute(AudioManager.STREAM_VOICE_CALL)}")
         }
     }
 
@@ -546,8 +552,16 @@ object CallAudioRelay : CallManager.CallListener {
             didMuteLocalMic = false
         }
         if (savedVoiceVolume >= 0) {
-            runCatching { audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, savedVoiceVolume, 0) }
+            runCatching {
+                if (savedVoiceMuted == false) {
+                    audioManager.adjustStreamVolume(
+                        AudioManager.STREAM_VOICE_CALL, AudioManager.ADJUST_UNMUTE, 0
+                    )
+                }
+                audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, savedVoiceVolume, 0)
+            }
             savedVoiceVolume = -1
+            savedVoiceMuted = null
         }
     }
 
