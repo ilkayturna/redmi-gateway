@@ -27,11 +27,18 @@
     </dict>
     <key>NSMicrophoneUsageDescription</key>
     <string>Görüşme sesi aktarımı etkinleştirildiğinde mikrofon kullanılır.</string>
+    <key>NSContactsUsageDescription</key>
+    <string>Rehberindeki kişileri uygulama içinde göstermek, aramak ve SMS konuşmalarını adlarıyla eşleştirmek için kullanılır.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Redmi telefonuyla aynı Wi-Fi ağında arama ve SMS bilgilerini eşitlemek için yerel ağ erişimi gerekir.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_redmigateway._tcp</string>
+    </array>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>voip</string>
+        <string>audio</string>
     </array>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>

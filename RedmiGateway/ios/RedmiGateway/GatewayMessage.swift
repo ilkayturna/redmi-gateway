@@ -6,7 +6,7 @@ public struct HelloMessage: Codable {
     public let type: String
     public let device: String
     public let protocolVersion: Int?
-    
+
     enum CodingKeys: String, CodingKey {
         case type, device
         case protocolVersion = "protocol"
@@ -35,6 +35,18 @@ public struct AckMessage: Codable {
     public let type: String
     public let action: String
     public let success: Bool
+}
+
+public struct AudioReadyMessage: Codable {
+    public let type: String
+    public let session: UInt32
+    public let port: UInt16
+}
+
+public struct AudioStateMessage: Codable {
+    public let type: String
+    public let running: Bool
+    public let detail: String
 }
 
 public struct StateCallInfo: Codable {
@@ -139,6 +151,14 @@ public struct DialPayload: Codable {
     }
 }
 
+public struct AudioStartPayload: Codable {
+    public let type = "audio_start"
+}
+
+public struct AudioStopPayload: Codable {
+    public let type = "audio_stop"
+}
+
 public struct SendSmsPayload: Codable {
     public let type: String = "send_sms"
     public let recipient: String
@@ -150,3 +170,13 @@ public struct SendSmsPayload: Codable {
     }
 }
 
+public struct DtmfPayload: Codable {
+    public let type: String = "dtmf"
+    public let digit: String
+    public let callId: String?
+
+    public init(digit: String, callId: String? = nil) {
+        self.digit = digit
+        self.callId = callId
+    }
+}

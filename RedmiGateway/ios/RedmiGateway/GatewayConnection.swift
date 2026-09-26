@@ -36,6 +36,9 @@ public class GatewayConnection: ObservableObject {
     @Published public var currentCall: GSMCall? = nil
     @Published public var smsMessages: [SmsMessageItem] = []
     @Published public var logs: [String] = []
+    @Published public var audioStatus = "Görüşme sesi Redmi'de"
+    @Published public private(set) var isIPhoneAudioConfirmed = false
+    @Published public var lastCallError: String? = nil
     
     // Persistence keys
     private let kGatewayIp = "gateway_ip"
@@ -57,6 +60,7 @@ public class GatewayConnection: ObservableObject {
     private let discovery = GatewayDiscovery()
     
     public var onCallEvent: ((CallEventMessage) -> Void)?
+    public var connectedHost: String { currentHost }
     
     public init() {
         // Load persisted settings
@@ -174,6 +178,9 @@ public class GatewayConnection: ObservableObject {
     }
     
     private func disconnectInternal() {
+        AudioEngine.shared.stop()
+        isIPhoneAudioConfirmed = false
+        audioStatus = "Görüşme sesi Redmi'de"
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         pendingSms.removeAll()
@@ -235,6 +242,8 @@ public class GatewayConnection: ObservableObject {
                     self.listenForMessages()
                     
                 case .failure(let error):
+                    AudioEngine.shared.stop()
+                    CallKitManager.shared.reportCurrentCallFailedOnNetworkDrop()
                     self.webSocketTask = nil
                     self.state = .failed
                     self.log("WebSocket dropped: \(error.localizedDescription)")
@@ -294,6 +303,38 @@ public class GatewayConnection: ObservableObject {
         case "ack":
             if let ack = try? JSONDecoder().decode(AckMessage.self, from: data) {
                 self.log("ACK [\(ack.action)]: \(ack.success ? "SUCCESS" : "FAILED")")
+                if ack.action == "dial" {
+                    if !ack.success {
+                        self.lastCallError = "Arama Redmi'de başlatılamadı. Numarayı ve hattı kontrol et."
+                        CallKitManager.shared.handleDialFailed()
+                    }
+                } else if ack.action == "answer" && !ack.success {
+                    self.lastCallError = "Arama Redmi'de yanıtlanamadı."
+                }
+            }
+
+        case "audio_ready":
+            if let ready = try? JSONDecoder().decode(AudioReadyMessage.self, from: data) {
+                CallKitManager.shared.handleAudioReady(session: ready.session, port: ready.port)
+            }
+
+        case "audio_state":
+            if let audioState = try? JSONDecoder().decode(AudioStateMessage.self, from: data) {
+                self.log("Audio relay: \(audioState.detail)")
+                if audioState.detail == "request_iphone_audio" {
+                    self.audioStatus = "iPhone'a aktarılıyor"
+                    if self.currentCall?.state == .active { self.sendAudioStart() }
+                } else {
+                    self.isIPhoneAudioConfirmed = audioState.running
+                    self.audioStatus = audioState.running ? "Görüşme sesi iPhone'da" : "Görüşme sesi Redmi'de"
+                    if !audioState.running {
+                        if audioState.detail.hasPrefix("Packet timeout") {
+                            CallKitManager.shared.recoverCallAudio()
+                        } else {
+                            AudioEngine.shared.stop()
+                        }
+                    }
+                }
             }
             
         case "error":
@@ -353,6 +394,9 @@ public class GatewayConnection: ObservableObject {
         
         if callState == .idle || callState == .disconnected {
             self.currentCall = nil
+            self.lastCallError = nil
+            self.isIPhoneAudioConfirmed = false
+            self.audioStatus = "Görüşme sesi Redmi'de"
         } else {
             let existingId = self.currentCall?.id ?? UUID()
             self.currentCall = GSMCall(id: existingId, rawCallId: rawId, number: number, state: callState)
@@ -376,6 +420,8 @@ public class GatewayConnection: ObservableObject {
             self.onCallEvent?(event)
         } else {
             self.log("State Sync: No active calls on gateway")
+            self.isIPhoneAudioConfirmed = false
+            self.audioStatus = "Görüşme sesi Redmi'de"
             if self.currentCall != nil {
                 let prevId = self.currentCall?.rawCallId ?? ""
                 self.currentCall = nil
@@ -418,8 +464,30 @@ public class GatewayConnection: ObservableObject {
     }
     
     public func sendDial(number: String) {
+        guard state == .authenticated else {
+            lastCallError = "Redmi bağlantısı yok. Arama başlatılamadı."
+            return
+        }
+        lastCallError = nil
         log("Sending DIAL")
         let payload = DialPayload(number: number)
+        sendPayload(payload)
+    }
+
+    public func sendAudioStart() {
+        guard state == .authenticated else { return }
+        sendPayload(AudioStartPayload())
+    }
+
+    public func sendAudioStop() {
+        guard state == .authenticated else { return }
+        sendPayload(AudioStopPayload())
+    }
+
+    public func sendDtmf(digit: String, callId: String? = nil) {
+        guard state == .authenticated else { return }
+        log("Sending DTMF tone")
+        let payload = DtmfPayload(digit: digit, callId: callId)
         sendPayload(payload)
     }
     

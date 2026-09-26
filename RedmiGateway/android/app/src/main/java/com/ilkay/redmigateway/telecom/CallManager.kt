@@ -190,10 +190,42 @@ object CallManager {
         }
     }
 
+    fun playDtmf(digit: Char): Boolean {
+        val call = activeCall
+        if (call != null && (currentCallState == "active" || currentCallState == "dialing" || currentCallState == "connecting")) {
+            return try {
+                call.playDtmfTone(digit)
+                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                    runCatching { call.stopDtmfTone() }
+                }, 200L)
+                log("Played DTMF tone")
+                true
+            } catch (e: Exception) {
+                log("Error playing DTMF tone: ${e.message}")
+                false
+            }
+        } else {
+            log("Cannot play DTMF: no active call")
+            return false
+        }
+    }
+
+    fun maskPhoneNumber(number: String?): String {
+        if (number.isNullOrBlank()) return "Unknown"
+        val clean = number.trim()
+        if (clean.length <= 4) return "***"
+        val prefixLen = (clean.length / 3).coerceIn(1, 3)
+        val suffixLen = (clean.length / 3).coerceIn(1, 2)
+        val prefix = clean.substring(0, prefixLen)
+        val suffix = clean.substring(clean.length - suffixLen)
+        return "$prefix***$suffix"
+    }
+
     fun dial(context: Context, number: String): Boolean {
-        val cleanNumber = number.trim()
-        if (!cleanNumber.matches(Regex("^\\+?[0-9]{3,15}$"))) {
-            log("Cannot dial: invalid number")
+        // Contacts commonly format numbers with spaces, parentheses and hyphens.
+        val cleanNumber = number.trim().replace(Regex("[\\s().-]"), "")
+        if (!cleanNumber.matches(Regex("^[0-9*#+]{3,20}$"))) {
+            log("Cannot dial: invalid number format")
             return false
         }
         if (activeCall != null) {
@@ -211,7 +243,7 @@ object CallManager {
             return false
         }
 
-        log("Initiating outgoing GSM call")
+        log("Initiating outgoing GSM call for: ${maskPhoneNumber(cleanNumber)}")
         return try {
             val uri = Uri.fromParts("tel", cleanNumber, null)
             val extras = Bundle()
