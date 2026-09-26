@@ -300,7 +300,9 @@ public class GatewayConnection: ObservableObject {
             if let ack = try? JSONDecoder().decode(AckMessage.self, from: data) {
                 self.log("ACK [\(ack.action)]: \(ack.success ? "SUCCESS" : "FAILED")")
                 if ack.action == "dial" {
-                    self.lastCallError = ack.success ? nil : "Arama Redmi'de başlatılamadı. Numarayı ve hattı kontrol et."
+                    if !ack.success {
+                        self.lastCallError = "Arama Redmi'de başlatılamadı. Numarayı ve hattı kontrol et."
+                    }
                 } else if ack.action == "answer" && !ack.success {
                     self.lastCallError = "Arama Redmi'de yanıtlanamadı."
                 }
@@ -374,6 +376,7 @@ public class GatewayConnection: ObservableObject {
         
         if callState == .idle || callState == .disconnected {
             self.currentCall = nil
+            self.lastCallError = nil
         } else {
             let existingId = self.currentCall?.id ?? UUID()
             self.currentCall = GSMCall(id: existingId, rawCallId: rawId, number: number, state: callState)

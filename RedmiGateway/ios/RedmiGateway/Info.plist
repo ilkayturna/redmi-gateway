@@ -33,6 +33,10 @@
     <array>
         <string>_redmigateway._tcp</string>
     </array>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>voip</string>
+    </array>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
     <key>UILaunchScreen</key>

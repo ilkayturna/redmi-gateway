@@ -233,6 +233,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     }
     
     public func startOutgoingCall(phoneNumber: String) {
+        GatewayConnection.shared.lastCallError = nil
         let cleanNumber = phoneNumber.replacingOccurrences(
             of: "[\\s().-]", with: "", options: .regularExpression
         )
@@ -242,6 +243,10 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         }
         guard GatewayConnection.shared.state == .authenticated else {
             GatewayConnection.shared.lastCallError = "Redmi bağlantısı yok. Arama başlatılamadı."
+            return
+        }
+        guard pendingOutgoingUuid == nil, GatewayConnection.shared.currentCall == nil else {
+            GatewayConnection.shared.lastCallError = "Zaten bir arama sürüyor."
             return
         }
         AudioEngine.shared.prepareSession()
@@ -262,9 +267,17 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         callController.request(transaction) { [weak self] error in
             Task { @MainActor [weak self] in
                 if let error = error {
-                    GatewayConnection.shared.lastCallError = "iPhone arama ekranı açılamadı: \(error.localizedDescription)"
-                    GatewayConnection.shared.log("CallKit start call transaction failed: \(error.localizedDescription)")
+                    let nsError = error as NSError
+                    GatewayConnection.shared.log("CallKit start call transaction failed: domain=\(nsError.domain) code=\(nsError.code)")
                     self?.cleanupCall(uuid: uuid, rawId: tempRawId)
+                    // The user tapped Ara. Keep that action effective even if iOS
+                    // refuses its native call screen; the GSM call remains on Redmi.
+                    if GatewayConnection.shared.state == .authenticated {
+                        GatewayConnection.shared.sendDial(number: cleanNumber)
+                        GatewayConnection.shared.lastCallError = "iPhone arama ekranı açılamadı. Arama Redmi'de başlatılıyor; görüşmeyi Redmi'de yap."
+                    } else {
+                        GatewayConnection.shared.lastCallError = "Redmi bağlantısı koptu. Arama başlatılamadı."
+                    }
                 } else {
                     GatewayConnection.shared.log("CallKit start call accepted. Dialing on Redmi.")
                     GatewayConnection.shared.sendDial(number: cleanNumber)
