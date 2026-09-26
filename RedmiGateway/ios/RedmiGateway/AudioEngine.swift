@@ -212,10 +212,10 @@ final class AudioEngine {
     }
 
     private func sendPcm(_ samples: [Int16]) {
-        guard sessionId != 0, !isMuted else { return }
+        guard sessionId != 0 else { return }
         var pcm = Data(capacity: samples.count * 2)
         for sample in samples {
-            let bits = UInt16(bitPattern: sample)
+            let bits = UInt16(bitPattern: isMuted ? 0 : sample)
             pcm.append(UInt8(truncatingIfNeeded: bits))
             pcm.append(UInt8(truncatingIfNeeded: bits >> 8))
         }

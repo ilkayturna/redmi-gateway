@@ -386,17 +386,18 @@ object CallAudioRelay : CallManager.CallListener {
             }
 
             if (buffer[6] != 0.toByte() && buffer[6] != PAYLOAD_PCM16) continue
-            // A valid packet from the paired IP confirms that the iPhone reached this session.
-            lastUplinkTimestamp = SystemClock.elapsedRealtime()
+            // A keepalive establishes the return address. Only PCM proves that the
+            // iPhone microphone engine is producing frames for the cellular uplink.
             peer = packet.socketAddress
+            if (buffer[6] != PAYLOAD_PCM16) continue
+            val payload = packet.length - HEADER_BYTES
+            if (payload != FRAME_BYTES) continue
+            val written = track?.write(buffer, HEADER_BYTES, payload, AudioTrack.WRITE_NON_BLOCKING) ?: 0
+            if (written <= 0) continue
+            lastUplinkTimestamp = SystemClock.elapsedRealtime()
             if (!iPhoneAudioConfirmed) {
                 handler.post { if (session == expected) confirmIPhoneAudio() }
             }
-
-            if (buffer[6] != PAYLOAD_PCM16) continue
-            val payload = packet.length - HEADER_BYTES
-            if (payload <= 0 || payload % 2 != 0) continue
-            track?.write(buffer, HEADER_BYTES, payload, AudioTrack.WRITE_NON_BLOCKING)
             packetsIn += 1
         }
     }
