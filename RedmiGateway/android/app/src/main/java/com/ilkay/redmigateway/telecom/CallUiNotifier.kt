@@ -37,7 +37,7 @@ object CallUiNotifier : CallManager.CallListener {
         mainHandler.post {
             val context = appContext ?: return@post
             val manager = context.getSystemService(NotificationManager::class.java)
-            if (state == "idle" || state == "disconnected") {
+            if (state == "idle" || state == "disconnected" || state == "disconnecting") {
                 manager.cancel(NOTIFICATION_ID)
                 return@post
             }
@@ -67,11 +67,13 @@ object CallUiNotifier : CallManager.CallListener {
                     )
                 ).setFullScreenIntent(screen, true)
             } else {
-                builder.setStyle(
-                    NotificationCompat.CallStyle.forOngoingCall(
-                        person, action(context, "hangup", callId, 4)
+                builder.setContentTitle(caller)
+                    .setContentText("Görüşme sürüyor")
+                    .addAction(
+                        android.R.drawable.ic_menu_close_clear_cancel,
+                        "Sonlandır",
+                        action(context, "hangup", callId, 4)
                     )
-                )
             }
             runCatching { manager.notify(NOTIFICATION_ID, builder.build()) }
                 .onFailure { CallManager.log("Arama bildirimi gösterilemedi: ${it.message}") }
