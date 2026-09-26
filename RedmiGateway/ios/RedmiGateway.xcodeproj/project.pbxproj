@@ -18,6 +18,7 @@
 		1009 /* AudioEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2010 /* AudioEngine.swift */; };
 		1010 /* MessagesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2011 /* MessagesView.swift */; };
 		1011 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2012 /* Assets.xcassets */; };
+		1012 /* PhoneContactPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2013 /* PhoneContactPicker.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -34,6 +35,7 @@
 		2010 /* AudioEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioEngine.swift; sourceTree = "<group>"; };
 		2011 /* MessagesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagesView.swift; sourceTree = "<group>"; };
 		2012 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		2013 /* PhoneContactPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneContactPicker.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -70,6 +72,7 @@
 				2010 /* AudioEngine.swift */,
 				2011 /* MessagesView.swift */,
 				2012 /* Assets.xcassets */,
+				2013 /* PhoneContactPicker.swift */,
 				2009 /* Info.plist */,
 			);
 			path = RedmiGateway;
@@ -169,6 +172,7 @@
 				1006 /* GatewayMessage.swift in Sources */,
 				1009 /* AudioEngine.swift in Sources */,
 				1010 /* MessagesView.swift in Sources */,
+				1012 /* PhoneContactPicker.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -252,7 +256,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
 		};
@@ -274,7 +278,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};

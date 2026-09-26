@@ -6,6 +6,7 @@ struct ContentView: View {
     @AppStorage("gateway_port") private var gatewayPort = "8787"
     @AppStorage("pairing_token") private var pairingToken = ""
     @State private var showingSettings = false
+    @State private var showingContactPicker = false
     @State private var outgoingNumber = ""
 
     var body: some View {
@@ -59,6 +60,12 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showingSettings) {
                 settingsSheet
+            }
+            .sheet(isPresented: $showingContactPicker) {
+                PhoneContactPicker { number in
+                    outgoingNumber = number
+                    showingContactPicker = false
+                }
             }
             .onAppear {
                 // Register the CallKit observer before connecting and receiving call events.
@@ -125,6 +132,12 @@ struct ContentView: View {
                 TextField("Telefon numarası", text: $outgoingNumber)
                     .keyboardType(.phonePad)
                     .textFieldStyle(.roundedBorder)
+                Button {
+                    showingContactPicker = true
+                } label: {
+                    Image(systemName: "person.crop.circle")
+                }
+                .accessibilityLabel("Rehberden numara seç")
                 Button("Ara") {
                     let number = outgoingNumber.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !number.isEmpty else { return }

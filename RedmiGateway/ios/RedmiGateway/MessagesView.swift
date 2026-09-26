@@ -4,6 +4,7 @@ struct MessagesView: View {
     @ObservedObject var connection = GatewayConnection.shared
     @State private var recipient: String = ""
     @State private var messageText: String = ""
+    @State private var showingContactPicker = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -16,6 +17,12 @@ struct MessagesView: View {
                     TextField("+90 5xx xxx xx xx", text: $recipient)
                         .keyboardType(.phonePad)
                         .textFieldStyle(.roundedBorder)
+                    Button {
+                        showingContactPicker = true
+                    } label: {
+                        Image(systemName: "person.crop.circle")
+                    }
+                    .accessibilityLabel("Rehberden alıcı seç")
                 }
             }
             .padding()
@@ -110,6 +117,12 @@ struct MessagesView: View {
         }
         .navigationTitle("SMS")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showingContactPicker) {
+            PhoneContactPicker { number in
+                recipient = number
+                showingContactPicker = false
+            }
+        }
     }
     
     private var canSend: Bool {
