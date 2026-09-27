@@ -1,0 +1,102 @@
+# Call audio architecture
+
+This page explains how the conversation of a cellular call on the Redmi reaches the iPhone. It
+also records why it works this way. Every statement here was measured on the real device, with
+automated calls to the Turkcell 532 IVR (`scripts/lab`), before it was built.
+
+## The device, as it really is
+
+- Redmi Note 8 (ginkgo), Qualcomm SM6125, running an **Android 16 community ROM** (SDK 36), not
+  MIUI. `adb shell` is root, `/vendor` is writable, and SELinux is enforcing.
+- The gateway is a privileged system app (`/system/priv-app/RedmiGateway`) holding
+  `CALL_AUDIO_INTERCEPTION`, `CAPTURE_AUDIO_OUTPUT` and `MODIFY_PHONE_STATE`.
+- The SIM is in slot 2, so the HAL uses the `VoiceMMode2` session (vsid `0x11DC5000`). Calls are
+  usually VoWiFi.
+
+## The path that works
+
+```
+cell network ─▶ modem ─▶ [downlink tap: incall-rec-downlink] ─▶ AudioRecord ─▶ seal ─▶ UDP ─▶ iPhone speaker
+iPhone mic ─▶ UDP ─▶ open ─▶ AudioTrack (USAGE_MEDIA → TELEPHONY) ─▶ [INCALL_MUSIC uplink2] ─▶ modem ─▶ network
+```
+
+| Part | How | Why this and not something else |
+|---|---|---|
+| Downlink | `AudioManager.getCallDownlinkExtractionAudioRecord` at 16 kHz mono | The HAL serves it from `incall-rec-downlink`, which only returns real audio while the call stays on the handset path. |
+| Uplink | A 48 kHz stereo `AudioTrack` with `USAGE_MEDIA`/`CONTENT_TYPE_SPEECH` and `setPreferredDevice(TYPE_TELEPHONY)`, fed by a 3× polyphase upsampler (`Upsampler3x.kt`) | The track lands on the INCALL_MUSIC output (`incall_music_uplink2`), which mixes into the uplink without moving the call off the handset path. |
+| Vendor fix | `scripts/device/vendor_audio_fix.py` maps `USECASE_INCALL_MUSIC_UPLINK2` to PCM 27 and uses the `Incall_Music_2 Audio Mixer MultiMedia9` path | Without it, `pcm_prepare` fails and the uplink sounds like the old "helicopter" audio. It is reversible (`status`, `apply` and `revert`, backups in `/vendor/etc/phonebridge-backup`) and was applied with the owner's approval. Diagnostics show whether it is present. |
+| Isolation | `setParameters("device_mute=true;direction=tx")` and `direction=rx` | This mutes the Redmi's own microphone and earpiece while the iPhone owns the call, without touching the stream the iPhone feeds or reads. |
+| Pacing | Blocking writes with two frames primed. The queue holds at most 8 frames and is trimmed above 4. | Freshness beats completeness for live voice; see the `RELAY_HEALTH` logs. |
+
+## Measured failures (do not retry)
+
+| Approach | What happened |
+|---|---|
+| `getCallUplinkInjectionAudioTrack` (the "Telephony Tx" helper) | It routes to `afe-proxy-playback`. Any routing event then moves the call to `voicemmode2-call afe-proxy`, where the downlink tap reads zeros. |
+| `AudioManager.MODE_CALL_REDIRECT` | It maps to call-proxy paths that do not exist on this device, and the relay disarms. |
+| INCALL_MUSIC before the vendor fix | `pcm_prepare -1` produced broken, periodic uplink audio. |
+| Telecom route toggles while the iPhone owns the call | These are routing events: the call leaves the handset path and the downlink dies. |
+| Global microphone mute (`setMicrophoneMute`) | It also silences the in-call music mix, which kills the uplink. |
+| Guessing sample rates | Downlink and uplink rates are fixed and asserted: 16 kHz for extraction and the network, 48 kHz stereo for the track. |
+
+## Ownership: one authority, verified both ways
+
+The Redmi's `CallAudioRelay` is the only authority on who carries the conversation. It is a state
+machine: `REDMI → PREPARING_IPHONE → IPHONE`.
+
+1. **PREPARING_IPHONE**: `audio_start` arms a session. Media starts only once the call is live and
+   the iPhone sends at least 38 frames per second.
+2. **Verification**: the Redmi then waits for one full window of 1.2 s, and moves ownership only if
+   all of these hold:
+   - the uplink writes at least 38 frames/s;
+   - the downlink reads at least 38 frames/s;
+   - iPhone frames are fresh;
+   - for protocol 2, the iPhone's "hearing" flag says the downlink is arriving there.
+
+   Only then does it apply isolation and announce `owner=iphone`.
+3. **Fallback** (`owner=redmi`), which always clears isolation first so the Redmi's earpiece and
+   microphone come back, happens when:
+   - iPhone audio stops for 900 ms (`iphone_audio_lost`);
+   - the iPhone reports for 2 s that it is not receiving (`iphone_not_receiving`);
+   - the uplink or downlink rate stays low for **two** consecutive windows (one window is tolerated,
+     because call setup dips);
+   - the iPhone disconnects;
+   - the person chooses it on either phone (`manual_redmi`).
+4. The iPhone retries once, quietly, after a transient fallback. After that the person decides with
+   "iPhone'a al".
+
+Connection is not ownership: an authenticated iPhone owns nothing until the Redmi has verified
+audio in both directions.
+
+## Handoff flows
+
+- **Call made from the iPhone:** CallKit starts the call and the Redmi dials. Audio is requested at
+  `dialing`, so ringback, busy tones and operator announcements are heard on the iPhone. This was
+  physically verified.
+- **Call answered on the iPhone:** CallKit Answer sends `answer` then `audio_start` over the network,
+  or `answer` over Bluetooth while the network link is down; audio follows when it reconnects.
+- **Call answered on the Redmi:** the iPhone stops ringing (`answeredElsewhere`). "iPhone'a al" later
+  creates a CallKit call for it and moves the audio.
+- **Link lost mid-call:** the Redmi falls back at once. The iPhone keeps its CallKit call for 20 s
+  so a quick reconnect resumes audio there; after that it lets go, and the call continues on the
+  Redmi.
+
+## Incoming call on a locked iPhone
+
+1. The Redmi rings. Its Bluetooth state characteristic notifies a sealed `ringing` state.
+2. iOS wakes the suspended app. It is relaunched in the background by Bluetooth state restoration
+   if the system had ended it, but not after the person force-quit it. The app reports the call to
+   CallKit, so the lock screen rings.
+3. The app sends `ringing_ack` over Bluetooth, or over the network if connected. With "ring quietly"
+   on (the default), the Redmi silences its ringer. The Redmi rings normally if the iPhone never
+   shows the call.
+4. The app reconnects the network link in the background, ready for Answer.
+
+Platform limits: iOS does not wake a force-quit app for Bluetooth events. PushKit is not used,
+because it would need an Apple push server and a WAN relay, which this product excludes.
+
+## Security and privacy of audio
+
+- Audio is sealed with a per-connection key, and packets from any address other than the
+  authenticated client's are dropped.
+- Nothing is recorded, transcribed or stored on either phone. The logs contain only counters.

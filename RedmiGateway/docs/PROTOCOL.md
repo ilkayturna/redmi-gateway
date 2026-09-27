@@ -1,160 +1,184 @@
-# Redmi Gateway WebSocket Protocol (v1)
+# Phone Bridge protocol (version 2)
 
-## Overview
+The Redmi (Android gateway) and the iPhone talk only on the local network and over Bluetooth LE.
+There is no cloud relay, and call audio is never stored.
 
-The Redmi Gateway exposes a lightweight WebSocket server binding on `0.0.0.0:8787`.
-Communication occurs over a local Wi-Fi or Redmi Hotspot connection. No external internet or cloud server is required.
+| Channel | Transport | Carries |
+|---|---|---|
+| Control | WebSocket `ws://<redmi>:8787` | pairing, authentication, calls, SMS, journals, audio ownership |
+| Media | UDP `<redmi>:8791` | 20 ms frames of 16 kHz mono PCM16, both directions |
+| Wake-up | BLE GATT service `A67D0001-2056-427E-971D-3C9A6F4E8D10` | call state for a locked iPhone, answer/reject/hang up, current address |
+| Discovery | Bonjour `_redmigateway._tcp` | address; TXT `id`, `v=2`, `ble`, `audio=relay_udp_pcm` |
 
-All payloads are UTF-8 encoded JSON objects.
+The implementation is `server/GatewayWebSocketServer.kt`, `security/*`, `audio/CallAudioRelay.kt`
+and `ble/BleServerManager.kt` on Android, and `GatewayConnection.swift`, `BridgeCrypto.swift`,
+`AudioEngine.swift` and `BLECentralManager.swift` on iOS. `scripts/lab/bridge_client.py` is a
+third implementation used for tests.
 
----
+## Versions and compatibility
 
-## Authentication & Handshake
+`hello` announces `protocol` (the Redmi's version) and `minProtocol` (the oldest client it accepts).
 
-Upon opening the WebSocket connection, the Android Gateway sends a greeting banner:
+| Situation | Result on the iPhone |
+|---|---|
+| `minProtocol` > 2 | INCOMPATIBLE: "update the iPhone app" |
+| `protocol` < 2 | INCOMPATIBLE: "update the Redmi app" |
+| `protocol` = 2 | SUPPORTED |
+| `protocol` > 2 and `minProtocol` ≤ 2 | DEGRADED: works, suggests updating the iPhone app |
 
-### Gateway Greeting (`hello`)
-```json
-{
-  "type": "hello",
-  "device": "Redmi Note 8",
-  "protocol": 1
-}
+The Redmi accepts protocol 1 clients (the pairing code sent in clear text, iPhone builds up to
+1.0 (33)) **only until the first keyed pairing exists**. After that, a protocol 1 `auth` gets
+`{"type":"auth_result","success":false,"code":"update_required"}`. Protocol 1 clients never
+receive the `preparing_iphone` audio state, the journals or the `sms` push.
+
+## Cryptography
+
+All primitives are standard: HMAC-SHA256, AES-256-GCM (16-byte tag), PBKDF2-HMAC-SHA256.
+`derive(K, label) = HMAC(K, utf8(label))`. `|` means byte concatenation. Base64 is standard with
+padding.
+
+### Pairing (once per iPhone)
+
+The Redmi shows a 6-character code (alphabet `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`) under
+Settings › Advanced and diagnostics.
+
+1. Redmi → `hello` with a fresh 16-byte `nonce` (nS).
+2. iPhone → `{"type":"pair","clientId","clientName","nonce":nC,"proof"}` where
+   `proof = HMAC(utf8(code), "pair" | nS | nC)`.
+3. Redmi checks the proof in constant time. It creates a random 32-byte key K and stores it with
+   the client id. It replies `{"type":"pair_result","success":true,"key","gatewayId","gatewayProof"}`,
+   where `key = AES-GCM(PBKDF2(code, salt = nS | nC, 100 000 rounds), K, aad "pair")` in the form
+   nonce‖ciphertext‖tag, and `gatewayProof = HMAC(K, "gw" | nC | nS)`.
+4. The iPhone derives the wrapping key, opens K and checks `gatewayProof`. It stores K in the
+   Keychain with `AfterFirstUnlockThisDeviceOnly`.
+5. The Redmi rotates the code. A new pairing replaces the old one, and protocol 1 sessions are
+   closed.
+
+Failures: `wrong_code`, `malformed`, and `locked_out` (5 failures from one address → 60 s).
+
+The code is never sent in protocol 2, so seeing a pairing exchange on the network does not reveal
+K. Guessing the code online is bounded by the lockout.
+
+**Migration from build 33:** the old app stored the code as its token. The new app finds it and
+pairs with it automatically. If the Redmi's code has changed since, it asks the person once.
+
+### Authentication (every connection)
+
+1. Redmi → `hello` with a fresh nS.
+2. iPhone → `{"type":"auth","protocol":2,"clientId","nonce":nC,"proof":HMAC(K,"auth"|nS|nC)}`.
+3. Redmi → `{"type":"auth_result","success":true,"protocol":2,"gatewayProof":HMAC(K,"gw"|nC|nS)}`.
+   Both sides now hold `S = HMAC(K, "session" | nS | nC)`.
+4. The iPhone drops the connection if `gatewayProof` is wrong. A device that does not hold K
+   cannot impersonate the Redmi.
+
+Failures: `not_paired` or `bad_proof` (the iPhone forgets its pairing and asks for the code),
+`locked_out`, `malformed`.
+
+### Sealed WebSocket frames
+
+After step 3, every frame in both directions is `{"t":"s","c":<counter>,"d":"<base64>"}`:
+
+- `d = AES-GCM(derive(S,"ws"), json)`, with ciphertext and tag only.
+- The nonce is the direction tag (`"C2S\0"` iPhone→Redmi, `"S2C\0"` Redmi→iPhone) followed by the
+  counter as an 8-byte big-endian number.
+- AAD is `"phonebridge-ws-2"`.
+- Counters start at 1 and must strictly increase; a frame with a lower counter is dropped
+  (replay).
+- The Redmi seals and queues under one lock per connection, so frames leave in counter order.
+- Unsealed frames after authentication are ignored.
+
+### Sealed media (UDP 8791)
+
+```
+[0..3] session id   [4..7] counter (uint32 BE)   [8] type   [9] flags   [10..] ciphertext‖tag
 ```
 
-Clients must authenticate with the 6-character alphanumeric pairing token displayed on the Redmi Gateway screen before any call control commands will be processed.
+- The key is `derive(S, "media")`. The whole 10-byte header is the AAD.
+- The nonce is `"UPLK"` (iPhone→Redmi) or `"DNLK"` (Redmi→iPhone), then the counter, then the
+  session id.
+- Type 0 is a keepalive (empty payload); type 1 is PCM (640 bytes).
+- Flags from the iPhone: bit 0 means "I am receiving downlink frames" (a valid frame arrived
+  within the last 500 ms).
+- **Counters belong to the session, not to a media start.** Both sides keep counting when audio
+  restarts within the same session, so a nonce never repeats under one key. Receivers drop
+  anything at or below the last counter.
+- The Redmi also drops packets from any address other than the authenticated WebSocket client's.
 
-### Client Authentication (`auth`)
-```json
-{
-  "type": "auth",
-  "token": "AB93KD"
-}
-```
+Protocol 1 sessions use the old clear layout: `[0..3] session [4..5] seq [6] type [7] 0 [8..] PCM`.
 
-### Gateway Auth Response
-On success:
-```json
-{
-  "type": "auth_result",
-  "success": true,
-  "message": "Authenticated successfully"
-}
-```
-On failure:
-```json
-{
-  "type": "auth_result",
-  "success": false,
-  "message": "Invalid pairing token"
-}
-```
+### Bluetooth LE
 
----
+The Bluetooth key is `derive(K, "ble")`. Sealed values are `0x02 | nonce | ciphertext | tag`.
 
-## Call State Broadcasts (Android → Client)
+- **State characteristic** (`…0003`, read and notify): JSON
+  `{"s":state,"id":callId,"d":"i"|"o","q":seq,"t":epochMs,"n"?:number}`, AAD
+  `"phonebridge-ble-state"`.
+  - The iPhone accepts it only if `t` is within 120 s of its own clock and newer than the last one
+    accepted. Unsealed state is ignored.
+  - Continuation reads of a long value return the same bytes.
+- **Control characteristic** (`…0004`, write with response and notify): the iPhone writes the
+  sealed JSON `{"a":action,"id":callId,"q":seq,"t":epochMs}`, AAD `"phonebridge-ble-control"`.
+  - Actions: `answer`, `reject`, `hangup`, `ringing_ack`.
+  - The Redmi requires `q` above the last accepted value and `t` within 60 s. The iPhone uses
+    milliseconds for `q`, so it keeps increasing across restarts.
+  - The reply `{"ack","callId","seq","success","error"?}` is notified sealed the same way.
+- **Device info** (`…0002`, read): plain `{"id","ip","port","v":2,"ble"}`; no call data.
+- Bluetooth never carries audio.
 
-Whenever Android Telecom reports a state change for a call, the Gateway broadcasts a `call` event to all authenticated clients.
+## Messages after authentication
 
-### 1. Incoming Call (Ringing)
-```json
-{
-  "type": "call",
-  "state": "ringing",
-  "number": "+905xxxxxxxxx",
-  "callId": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-}
-```
+### Commands (iPhone → Redmi)
 
-### 2. Outgoing Call Initiated (Dialing / Connecting)
-```json
-{
-  "type": "call",
-  "state": "dialing",
-  "number": "+905xxxxxxxxx",
-  "callId": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-}
-```
+| type | fields | reply |
+|---|---|---|
+| `get_state` | — | `state` |
+| `dial` | `number` | `ack` |
+| `answer`, `reject`, `hangup` | `callId` | `ack` |
+| `dtmf` | `digit`, `callId`? | `ack` |
+| `ringing_ack` | `callId` | `ack`; the Redmi silences its ringer if the "ring quietly" setting is on |
+| `audio_start` | — | `audio_ready {session, port, sampleRate, frameSamples, sealed}` or `error {code: no_call \| audio_busy}` |
+| `audio_stop` | — | `ack` |
+| `audio_to_redmi` | — | `ack` |
+| `send_sms` | `recipient`, `message`, `requestId` | `sms_send_result {requestId, success, error?}` after the radio's result |
+| `sync` | `callsAfter`, `smsAfter` | `sync_calls` then `sync_sms` |
+| `diagnostics` | — | `diagnostics_result` (no numbers, message text or keys) |
+| `unpair` | — | `ack`, then the Redmi closes the connection |
 
-### 3. Call Answered & Connected (Active)
-```json
-{
-  "type": "call",
-  "state": "active",
-  "number": "+905xxxxxxxxx",
-  "callId": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-}
-```
+`audio_start` is accepted up to 10 s after this client's own `dial`, before Telecom has created the
+call.
 
-### 4. Call Put On Hold (Holding)
-```json
-{
-  "type": "call",
-  "state": "holding",
-  "number": "+905xxxxxxxxx",
-  "callId": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-}
-```
+### Events (Redmi → iPhone)
 
-### 5. Call Terminated (Disconnected)
-```json
-{
-  "type": "call",
-  "state": "disconnected",
-  "callId": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-}
-```
+- `call {state, callId?, number?, direction: incoming|outgoing}`. States: `ringing`, `dialing`,
+  `connecting`, `active`, `holding`, `disconnecting`, `disconnected`, `idle`.
+- `audio_state {owner: redmi|preparing_iphone|iphone, running, detail}`. The Redmi is the only
+  authority on who carries the conversation; see AUDIO_ARCHITECTURE.md for the reasons.
+- `call_log {item}` and `sms {item}` are live journal entries.
+- `sync_calls` / `sync_sms` `{items, hasMore, lastSeq}`.
 
----
+### Journals and replay
 
-## Call Control Commands (Client → Android)
+The Redmi mirrors its CallLog and SMS provider into two SQLite journals.
 
-Only authenticated clients may issue call control commands. The Gateway validates input and fails gracefully if a call is not found.
+- Every new row, or change such as `sending → sent` or read state, gets the next sequence number.
+- Call items: `{seq, id, number, type, date, duration, answeredOn: iphone|redmi|null}`.
+  `type` is one of `incoming`, `outgoing`, `missed`, `declined`, `blocked`, `voicemail`,
+  `answered_elsewhere`, `other`.
+- SMS items: `{seq, id, address, body, date, box: inbox|sent|sending|failed|other, read}`.
+  - An SMS that no SMS app stored is kept with a negative synthetic id.
 
-### 1. Answer Incoming Call
-```json
-{
-  "type": "answer",
-  "callId": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-}
-```
-*Action:* Calls `activeCall.answer(VideoProfile.STATE_AUDIO_ONLY)`.
+After every authentication the iPhone asks for `sync` with the last sequence numbers it stored,
+and repeats while `hasMore`. Nothing that happened while the iPhone was away is lost.
 
-### 2. Reject Incoming Call
-```json
-{
-  "type": "reject",
-  "callId": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-}
-```
-*Action:* Calls `activeCall.reject(false, null)`.
+- Live pushes only advance the stored position when they are contiguous; anything else is picked
+  up by the next sync and merged by id.
+- The first import on the Redmi keeps 30 days of history and is not announced as new.
 
-### 3. Hang Up Active Call
-```json
-{
-  "type": "hangup",
-  "callId": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-}
-```
-*Action:* Calls `activeCall.disconnect()`.
+## Error codes
 
-### 4. Place Outgoing Call
-```json
-{
-  "type": "dial",
-  "number": "+905xxxxxxxxx"
-}
-```
-*Action:* Calls `telecomManager.placeCall(Uri.parse("tel:" + number), Bundle())`.
+`unauthorized` (a command before authentication), `unknown_command`, `internal_error`,
+`no_call`, `audio_busy`, `lab_disabled`.
 
----
-
-## Error Handling
-If an error occurs, the server responds with:
-```json
-{
-  "type": "error",
-  "message": "Description of error"
-}
-```
-The server will never crash if a call has already ended or if the JSON payload is malformed.
+Lab measurement hooks (`lab`) only work after
+`adb shell am broadcast -a com.ilkay.redmigateway.LAB_MODE --ez enable true -n com.ilkay.redmigateway/.audio.LabModeReceiver`.
+That broadcast needs the adb shell's DUMP permission, and lab mode expires after 2 hours.

@@ -260,8 +260,8 @@ struct FavoritesView: View {
                 Button { showingPicker = true } label: { Image(systemName: "plus") }
                     .accessibilityLabel("Favori ekle")
             }
-            if !directory.favorites.isEmpty {
-                ToolbarItem(placement: .navigationBarLeading) { EditButton() }
+            ToolbarItem(placement: .navigationBarLeading) {
+                if !directory.favorites.isEmpty { EditButton() }
             }
             SettingsToolbarButton(action: openSettings)
         }
