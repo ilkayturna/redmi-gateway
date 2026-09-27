@@ -24,7 +24,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.card.MaterialCardView
-import com.google.android.material.materialswitch.MaterialSwitch
+import com.google.android.material.switchmaterial.SwitchMaterial
 import com.ilkay.redmigateway.R
 import com.ilkay.redmigateway.security.PairingStore
 import com.ilkay.redmigateway.server.DiagnosticsReport
@@ -97,7 +97,7 @@ class MainActivity : AppCompatActivity() {
 
         // Calls
         val calls = section("Aramalar")
-        calls.addView(MaterialSwitch(this).apply {
+        calls.addView(SwitchMaterial(this).apply {
             text = "iPhone çağrıyı gösterince Redmi sessiz çalsın"
             isChecked = IncomingCallPresenter.quietWhenIPhoneRings
             setOnCheckedChangeListener { _, checked -> IncomingCallPresenter.quietWhenIPhoneRings = checked }
@@ -195,7 +195,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun heading(text: String) = TextView(this).apply {
         this.text = text
-        setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_HeadlineSmall)
+        setTextAppearance(com.google.android.material.R.style.TextAppearance_MaterialComponents_Headline5)
         setTextColor(color(R.color.text_primary))
         setPadding(dp(4), 0, dp(4), dp(16))
     }
@@ -215,7 +215,7 @@ class MainActivity : AppCompatActivity() {
         }
         inner.addView(TextView(this).apply {
             text = title
-            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_TitleMedium)
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_MaterialComponents_Subtitle1)
             setTextColor(color(R.color.text_primary))
             setPadding(0, 0, 0, dp(8))
         })
@@ -226,7 +226,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun body(text: String) = TextView(this).apply {
         this.text = text
-        setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
+        setTextAppearance(com.google.android.material.R.style.TextAppearance_MaterialComponents_Body2)
         setTextColor(color(R.color.text_secondary))
         setPadding(0, dp(4), 0, dp(4))
     }
@@ -240,13 +240,13 @@ class MainActivity : AppCompatActivity() {
         }
         line.addView(TextView(this).apply {
             text = label
-            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyLarge)
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_MaterialComponents_Body1)
             setTextColor(color(R.color.text_primary))
         }, LinearLayout.LayoutParams(0, -2, 1f))
         line.addView(TextView(this).apply {
             text = value
             gravity = Gravity.END
-            setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_MaterialComponents_Body2)
             setTextColor(color(if (ok) R.color.text_secondary else R.color.status_attention))
         }, LinearLayout.LayoutParams(0, -2, 1f))
         statusList.addView(line)
