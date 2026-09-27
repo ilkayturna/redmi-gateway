@@ -24,6 +24,7 @@ import com.ilkay.redmigateway.audio.CallAudioRelay
 import com.ilkay.redmigateway.databinding.ActivityCallBinding
 import com.ilkay.redmigateway.telecom.CallManager
 import com.ilkay.redmigateway.telecom.GatewayInCallService
+import com.ilkay.redmigateway.telecom.IncomingCallPresenter
 
 /**
  * A polished in-call experience when this app is the Redmi's default dialer.
@@ -69,6 +70,9 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
         super.onStart()
         CallManager.addListener(this)
         CallAudioRelay.addListener(this)
+        IncomingCallPresenter.onChanged = {
+            runOnUiThread { onCallStateChanged(CallManager.currentCallId ?: "none", CallManager.currentCallState, CallManager.currentPhoneNumber) }
+        }
         updateSpeakerLabel()
         updateAudioCard(CallAudioRelay.owner)
         proximitySensor?.let { sensor ->
@@ -79,6 +83,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
     override fun onStop() {
         CallManager.removeListener(this)
         CallAudioRelay.removeListener(this)
+        IncomingCallPresenter.onChanged = null
         sensorManager?.unregisterListener(this)
         if (proximityWakeLock?.isHeld == true) {
             proximityWakeLock?.release()
@@ -265,7 +270,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
                     binding.audioStatusTitle.text = "Görüşme bu telefonda"
                     binding.audioStatusTitle.setTextColor(ContextCompat.getColor(this, R.color.status_good))
                     binding.audioStatusDetail.text = when (CallAudioRelay.lastReason) {
-                        "iphone_audio_lost", "uplink_stalled", "downlink_stalled" ->
+                        "iphone_audio_lost", "iphone_not_receiving", "uplink_stalled", "downlink_stalled" ->
                             "iPhone bağlantısı zayıfladı; ses bu telefona alındı."
                         "uplink_path_unavailable" ->
                             "Bu telefon iPhone sesini hatta aktaramadı; görüşme burada sürüyor."
@@ -320,9 +325,12 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
             updateAudioCard(CallAudioRelay.owner)
             updateSpeakerLabel()
 
-            binding.help.text = if (incoming)
-                "Redmi'de yanıtla veya iPhone'da aç. Bağlantı yoksa Redmi çalmaya devam eder."
-            else "Görüşmeyi bu telefondan da sonlandırabilirsiniz."
+            binding.help.text = when {
+                incoming && IncomingCallPresenter.presentedOnIPhoneCallId == callId ->
+                    "iPhone'da da çalıyor. Burada ya da iPhone'da yanıtlayabilirsin."
+                incoming -> "Burada yanıtla. iPhone bağlıysa arama orada da görünür."
+                else -> "Görüşmeyi bu telefondan da sonlandırabilirsin."
+            }
         }
     }
 

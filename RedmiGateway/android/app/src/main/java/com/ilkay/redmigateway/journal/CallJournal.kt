@@ -222,6 +222,16 @@ class CallJournal private constructor(context: Context) :
             CallLog.Calls.CONTENT_URI, arrayOf(CallLog.Calls._ID), null, null, "${CallLog.Calls._ID} DESC"
         )?.use { c -> if (c.moveToFirst()) c.getLong(0) else 0L } ?: 0L
 
+    /** CallLog id → "iphone" or "redmi" for calls whose carrier is known. */
+    @Synchronized
+    fun carriers(): Map<Long, String> {
+        val result = HashMap<Long, String>()
+        readableDatabase.rawQuery("SELECT log_id, answered_on FROM calls WHERE answered_on IS NOT NULL", null).use { c ->
+            while (c.moveToNext()) result[c.getLong(0)] = c.getString(1)
+        }
+        return result
+    }
+
     @Synchronized
     fun readAfter(afterSeq: Long, limit: Int = 200): Pair<List<Entry>, Boolean> {
         val safeLimit = limit.coerceIn(1, 500)

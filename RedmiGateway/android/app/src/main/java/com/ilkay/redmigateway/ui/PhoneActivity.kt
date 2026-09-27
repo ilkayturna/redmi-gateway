@@ -35,6 +35,7 @@ import androidx.core.content.ContextCompat
 import com.google.android.material.tabs.TabLayout
 import com.ilkay.redmigateway.R
 import com.ilkay.redmigateway.databinding.ActivityPhoneBinding
+import com.ilkay.redmigateway.journal.CallJournal
 import com.ilkay.redmigateway.service.GatewayService
 import com.ilkay.redmigateway.sms.SmsSender
 import com.ilkay.redmigateway.telecom.CallManager
@@ -43,7 +44,7 @@ import java.util.Date
 /** The Redmi's everyday phone shell. Gateway diagnostics live behind Settings. */
 class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
     private data class Person(val name: String, val number: String, val photo: String?)
-    private data class Recent(val number: String, val type: Int, val time: Long, val seconds: Long)
+    private data class Recent(val number: String, val type: Int, val time: Long, val seconds: Long, val carrier: String?)
     private data class Message(val address: String, val body: String, val time: Long, val sent: Boolean)
 
     private lateinit var binding: ActivityPhoneBinding
@@ -169,14 +170,16 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
     private fun readRecents(): List<Recent> {
         if (checkSelfPermission(Manifest.permission.READ_CALL_LOG) != PackageManager.PERMISSION_GRANTED) return emptyList()
         val rows = ArrayList<Recent>()
+        val carriers = runCatching { CallJournal.get(this).carriers() }.getOrDefault(emptyMap())
         runCatching {
             contentResolver.query(
                 CallLog.Calls.CONTENT_URI,
-                arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.TYPE, CallLog.Calls.DATE, CallLog.Calls.DURATION),
+                arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.TYPE, CallLog.Calls.DATE, CallLog.Calls.DURATION, CallLog.Calls._ID),
                 null, null, CallLog.Calls.DATE + " DESC"
             )?.use { cursor ->
                 while (cursor.moveToNext() && rows.size < 250) {
-                    rows.add(Recent(cursor.getString(0).orEmpty(), cursor.getInt(1), cursor.getLong(2), cursor.getLong(3)))
+                    rows.add(Recent(cursor.getString(0).orEmpty(), cursor.getInt(1), cursor.getLong(2), cursor.getLong(3),
+                        carriers[cursor.getLong(4)]))
                 }
             }
         }
@@ -267,21 +270,47 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
 
     private fun showRecents() {
         if (recents.isEmpty()) return showEmpty("Henüz arama yok veya arama izni verilmedi.")
-        val rows = recents.map { call ->
-            val direction = when (call.type) {
-                CallLog.Calls.INCOMING_TYPE -> "Gelen"
-                CallLog.Calls.OUTGOING_TYPE -> "Giden"
-                CallLog.Calls.MISSED_TYPE -> "Cevapsız"
-                CallLog.Calls.REJECTED_TYPE -> "Reddedilen"
-                else -> "Arama"
+        val list = ListView(this)
+        list.adapter = object : BaseAdapter() {
+            override fun getCount() = recents.size
+            override fun getItem(position: Int) = recents[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val call = recents[position]
+                val missed = call.type == CallLog.Calls.MISSED_TYPE || call.type == CallLog.Calls.REJECTED_TYPE
+                val direction = when (call.type) {
+                    CallLog.Calls.INCOMING_TYPE -> "Gelen"
+                    CallLog.Calls.OUTGOING_TYPE -> "Giden"
+                    CallLog.Calls.MISSED_TYPE -> "Cevapsız"
+                    CallLog.Calls.REJECTED_TYPE -> "Reddedilen"
+                    else -> "Arama"
+                }
+                val parts = mutableListOf(direction, DateFormat.format("d MMM HH:mm", Date(call.time)).toString())
+                if (call.seconds > 0) parts.add("${call.seconds / 60}:${(call.seconds % 60).toString().padStart(2, '0')}")
+                when (call.carrier) {
+                    "iphone" -> parts.add("iPhone'da")
+                    "redmi" -> parts.add("Redmi'de")
+                }
+                return LinearLayout(this@PhoneActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(8), dp(10), dp(8), dp(10))
+                    addView(TextView(this@PhoneActivity).apply {
+                        text = nameFor(call.number)
+                        textSize = 17f
+                        setTextColor(if (missed) ContextCompat.getColor(this@PhoneActivity, R.color.status_bad)
+                            else ContextCompat.getColor(this@PhoneActivity, R.color.text_primary))
+                    })
+                    addView(TextView(this@PhoneActivity).apply {
+                        text = parts.joinToString(" · ")
+                        textSize = 14f
+                        setTextColor(ContextCompat.getColor(this@PhoneActivity, R.color.text_secondary))
+                    })
+                    contentDescription = "${nameFor(call.number)}, ${parts.joinToString(", ")}"
+                }
             }
-            mapOf(
-                "title" to nameFor(call.number),
-                "detail" to "$direction · ${DateFormat.format("dd MMM HH:mm", Date(call.time))}" +
-                    if (call.seconds > 0) " · ${call.seconds / 60}:${(call.seconds % 60).toString().padStart(2, '0')}" else ""
-            )
         }
-        showTwoLineList(rows) { position -> callNumber(recents[position].number) }
+        list.setOnItemClickListener { _, _, position, _ -> callNumber(recents[position].number) }
+        binding.phoneContent.addView(list)
     }
 
     private fun showContacts() {

@@ -20,6 +20,8 @@ object IncomingCallPresenter {
     @Volatile var presentedOnIPhoneCallId: String? = null
         private set
     private var appContext: Context? = null
+    /** The call screen redraws when the iPhone starts or stops showing the call. */
+    @Volatile var onChanged: (() -> Unit)? = null
 
     fun init(context: Context) {
         appContext = context.applicationContext
@@ -38,6 +40,7 @@ object IncomingCallPresenter {
         if (CallManager.currentCallState != "ringing" || callId != CallManager.currentCallId) return
         presentedOnIPhoneCallId = callId
         CallManager.log("Incoming call is showing on the iPhone")
+        onChanged?.invoke()
         if (!quietWhenIPhoneRings) return
         val context = appContext ?: return
         runCatching {
@@ -47,5 +50,6 @@ object IncomingCallPresenter {
 
     fun onCallEnded() {
         presentedOnIPhoneCallId = null
+        onChanged?.invoke()
     }
 }
