@@ -43,6 +43,9 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
          * Adds the microphone and phone-call types to the foreground service while call audio
          * is relayed, so Android keeps delivering call audio with the screen off.
          */
+        /** True while at least one paired iPhone is connected and authenticated. */
+        fun hasAuthenticatedClient(): Boolean = (instance?.getAuthenticatedClientCount() ?: 0) > 0
+
         fun setCallAudioForeground(active: Boolean) {
             val service = instance ?: return
             service.handler.post { service.applyForegroundTypes(active) }

@@ -7,18 +7,13 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
-import android.media.MediaRecorder
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
 import android.os.SystemClock
-import android.os.Build
-import android.telecom.CallAudioState
 import android.util.Log
 import com.ilkay.redmigateway.service.GatewayService
 import com.ilkay.redmigateway.telecom.CallManager
-import com.ilkay.redmigateway.telecom.GatewayInCallService
-import org.json.JSONObject
 import java.lang.reflect.InvocationTargetException
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -28,19 +23,31 @@ import java.net.SocketAddress
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
-import kotlin.math.PI
-import kotlin.math.abs
-import kotlin.math.sin
-import kotlin.math.sqrt
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Carries the cellular call audio between the Redmi and the paired iPhone.
+ * Moves the Redmi's cellular call audio to the paired iPhone and back.
  *
- * The caller's voice is taken from the call downlink with
- * AudioManager#getCallDownlinkExtractionAudioRecord and the iPhone microphone is
- * injected into the call uplink with AudioManager#getCallUplinkInjectionAudioTrack.
- * Both are system APIs guarded by CALL_AUDIO_INTERCEPTION, so the gateway must be
- * installed as a privileged app.
+ * Why this exact audio path (measured on this Redmi Note 8, Android 16 community ROM,
+ * Qualcomm SM6125 HAL; see docs/AUDIO_ARCHITECTURE.md before changing anything here):
+ *
+ *  - Downlink (caller -> iPhone): AudioManager#getCallDownlinkExtractionAudioRecord. The HAL
+ *    serves it from the in-call record downlink tap, which only works while the call stays on
+ *    its normal handset path.
+ *  - Uplink (iPhone -> caller): a media AudioTrack explicitly routed to Telephony Tx during a
+ *    call. AudioPolicyManager gives it the INCALL_MUSIC output, which the HAL mixes into the
+ *    voice uplink without re-routing the call. The call-uplink-injection system API is NOT
+ *    used: it opens the afe-proxy output, and the next routing event moves the whole call onto
+ *    the proxy device, where the downlink tap reads only zeros.
+ *  - Redmi isolation: the Qualcomm "device_mute" parameters mute the handset microphone device
+ *    and the earpiece device. AudioManager#setMicrophoneMute is not used: it can mute the whole
+ *    uplink stream, including the iPhone audio.
+ *
+ * The iPhone becomes the audio owner only after its microphone frames arrive continuously, the
+ * uplink track drains in real time and the downlink capture delivers frames. Any later failure
+ * returns the call to the Redmi's own microphone and earpiece without ending it.
  *
  * UDP packets on port 8791 use the same layout in both directions:
  *   [0..3] session id (uint32 BE)  [4..5] sequence (uint16 BE)
@@ -52,112 +59,106 @@ object CallAudioRelay : CallManager.CallListener {
     const val SAMPLE_RATE = 16000
     const val FRAME_SAMPLES = 320
 
+    enum class Owner { REDMI, PREPARING_IPHONE, IPHONE }
+
+    interface Listener {
+        /** [reason] is a short machine-readable code; UI text is chosen by the listener. */
+        fun onAudioOwnerChanged(owner: Owner, reason: String)
+    }
+
     private const val TAG = "CallAudioRelay"
     private const val FRAME_BYTES = FRAME_SAMPLES * 2
     private const val HEADER_BYTES = 8
+    private const val PAYLOAD_KEEPALIVE: Byte = 0
     private const val PAYLOAD_PCM16: Byte = 1
-    private const val START_RETRY_MS = 400L
-    private const val MAX_START_ATTEMPTS = 25
+    private const val UPLINK_RATE = 48000
+    private const val UPLINK_FRAME_BYTES = FRAME_SAMPLES * 3 * 2 * 2 // 48 kHz stereo 16-bit
+
     private const val ARM_TIMEOUT_MS = 90_000L
-
-    // AudioManager.MODE_CALL_SCREENING / MODE_CALL_REDIRECT; not all compile SDKs expose them.
-    private const val MODE_CALL_SCREENING = 4
-    private const val MODE_CALL_REDIRECT = 5
-
-    interface Listener {
-        fun onAudioRelayState(running: Boolean, detail: String)
-    }
+    private const val PREPARE_TIMEOUT_MS = 8_000L
+    private const val VERIFY_WINDOW_MS = 1_200L
+    private const val VERIFY_TIMEOUT_MS = 3_000L
+    private const val MONITOR_INTERVAL_MS = 250L
+    private const val IPHONE_SILENCE_LIMIT_MS = 900L
+    private const val MIN_FRAMES_PER_SECOND = 38
+    private const val MAX_QUEUED_FRAMES = 8
+    private const val TRIM_ABOVE_FRAMES = 4
+    private const val TRIM_AFTER_MS = 500L
 
     private val listeners = java.util.concurrent.CopyOnWriteArrayList<Listener>()
+    private val random = SecureRandom()
+    private val worker = HandlerThread("CallAudioRelay", Process.THREAD_PRIORITY_AUDIO).apply { start() }
+    private val handler = Handler(worker.looper)
+
+    private var appContext: Context? = null
+    @Volatile var owner: Owner = Owner.REDMI
+        private set
+    @Volatile var lastReason: String = "idle"
+        private set
+    @Volatile private var session = 0
+    @Volatile private var expectedClientAddress: InetAddress? = null
+    @Volatile private var peer: SocketAddress? = null
+    @Volatile private var socket: DatagramSocket? = null
+    private var receiveThread: Thread? = null
+
+    // Media endpoints; only non-null between cutover and release.
+    @Volatile private var downlink: AudioRecord? = null
+    @Volatile private var uplink: AudioTrack? = null
+    @Volatile private var mediaRunning = false
+    private var writerThread: Thread? = null
+    private var senderThread: Thread? = null
+    private val uplinkQueue = ArrayBlockingQueue<ByteArray>(MAX_QUEUED_FRAMES + 2)
+    private val upsampler = Upsampler3x()
+    @Volatile private var isolationApplied = false
+    private var listeningToCalls = false
+    private var cutoverStartedAt = 0L
+    private var preparingSince = 0L
+
+    // Health counters (written by audio threads, read by the monitor).
+    @Volatile private var lastIPhonePcmAt = 0L
+    private val iphoneFrames = AtomicInteger()
+    private val uplinkWrites = AtomicInteger()
+    private val downlinkReads = AtomicInteger()
+    private val droppedFrames = AtomicInteger()
+    private val underruns = AtomicInteger()
+    private var lastHealthLogAt = 0L
+    @Volatile private var maxWriteMs = 0L
+    private var windowIPhone = 0
+    private var windowWrites = 0
+    private var windowReads = 0
+    private var windowStartedAt = 0L
+
+    val isIPhoneOwner: Boolean get() = owner == Owner.IPHONE
+    val isStreaming: Boolean get() = mediaRunning
 
     fun addListener(listener: Listener) {
-        if (!listeners.contains(listener)) {
-            listeners.add(listener)
-        }
+        if (!listeners.contains(listener)) listeners.add(listener)
     }
 
     fun removeListener(listener: Listener) {
         listeners.remove(listener)
     }
 
-    private fun notifyListeners(running: Boolean, detail: String) {
-        for (l in listeners) {
-            runCatching { l.onAudioRelayState(running, detail) }
-        }
-    }
-
-    @Deprecated("Use addListener/removeListener instead")
-    var listener: Listener?
-        get() = listeners.firstOrNull()
-        set(value) {
-            listeners.clear()
-            if (value != null) listeners.add(value)
-        }
-
-    /** Mutes the Redmi's own microphone while the iPhone carries the conversation. */
-    @Volatile var muteLocalMic = false
-
-    private val random = SecureRandom()
-    private val worker = HandlerThread("CallAudioRelay", Process.THREAD_PRIORITY_AUDIO).apply { start() }
-    private val handler = Handler(worker.looper)
-
-    private const val WATCHDOG_TIMEOUT_MS = 5000L
-    private const val WATCHDOG_CHECK_INTERVAL_MS = 1000L
-
-    private var appContext: Context? = null
-    @Volatile private var session = 0
-    @Volatile private var peer: SocketAddress? = null
-    @Volatile private var expectedClientAddress: InetAddress? = null
-    @Volatile private var socket: DatagramSocket? = null
-    @Volatile private var record: AudioRecord? = null
-    @Volatile private var track: AudioTrack? = null
-    @Volatile private var streaming = false
-    @Volatile private var iPhoneAudioConfirmed = false
-    @Volatile private var lastUplinkTimestamp = 0L
-    @Volatile private var streamingStartedAt = 0L
-    @Volatile private var watchdogFellBack = false
-    private var receiveThread: Thread? = null
-    private var sendThread: Thread? = null
-    private var startAttempts = 0
-    private var savedVoiceVolume = -1
-    private var listeningToCalls = false
-
-    @Volatile private var packetsIn = 0L
-    @Volatile private var packetsOut = 0L
-
-    private val armTimeout = Runnable {
-        if (session != 0 && !streaming) disarmOnWorker("no call audio within ${ARM_TIMEOUT_MS / 1000}s")
-    }
-    private val startAttempt = Runnable { tryStartStreaming() }
-
-    private val watchdogRunnable = object : Runnable {
-        override fun run() {
-            if (streaming) {
-                val latestPacketOrStart = maxOf(lastUplinkTimestamp, streamingStartedAt)
-                val elapsed = SystemClock.elapsedRealtime() - latestPacketOrStart
-                if (elapsed > WATCHDOG_TIMEOUT_MS && !watchdogFellBack) {
-                    watchdogFellBack = true
-                    iPhoneAudioConfirmed = false
-                    Log.w(TAG, "Watchdog triggered: no uplink packets for ${elapsed}ms (>5s). Fail-safe restoring local handset audio.")
-                    CallManager.log("Watchdog: iPhone audio silence >5s. Handset audio restored.")
-                    appContext?.let { ctx ->
-                        restoreRedmiHandset(ctx.getSystemService(AudioManager::class.java))
-                    }
-                    notifyListeners(false, "Packet timeout (>5s). Handset audio restored.")
-                }
-                handler.postDelayed(this, WATCHDOG_CHECK_INTERVAL_MS)
-            }
-        }
-    }
-
-    val isStreaming: Boolean get() = streaming
-    val isIPhoneAudioConfirmed: Boolean get() = iPhoneAudioConfirmed
+    /** Snapshot for Diagnostics; no audio content. */
+    fun diagnostics(): Map<String, Any> = mapOf(
+        "owner" to owner.name,
+        "reason" to lastReason,
+        "session" to (session != 0),
+        "mediaRunning" to mediaRunning,
+        "isolation" to isolationApplied,
+        "iphoneFramesPerSecond" to windowIPhone,
+        "uplinkFramesPerSecond" to windowWrites,
+        "downlinkFramesPerSecond" to windowReads,
+        "droppedFrames" to droppedFrames.get(),
+        "underruns" to underruns.get(),
+        "maxWriteMs" to maxWriteMs
+    )
 
     /**
-     * Opens a relay session for the paired iPhone and returns its id. Audio starts as soon as
-     * the Redmi call reaches a live state; a session left without a call expires on its own.
+     * Opens (or reuses) a relay session for the authenticated iPhone at [clientAddress] and
+     * returns its id. The Redmi keeps the call audio until the iPhone's frames prove it ready.
      */
-    fun arm(context: Context, clientAddress: InetAddress? = null): Int {
+    fun arm(context: Context, clientAddress: InetAddress?): Int {
         synchronized(this) {
             appContext = context.applicationContext
             expectedClientAddress = clientAddress
@@ -166,15 +167,8 @@ object CallAudioRelay : CallManager.CallListener {
                 while (id == 0) id = random.nextInt()
                 session = id
                 peer = null
-                lastUplinkTimestamp = 0L
-                iPhoneAudioConfirmed = false
-                try {
-                    openSocket()
-                } catch (error: Exception) {
-                    session = 0
-                    expectedClientAddress = null
-                    throw error
-                }
+                lastIPhonePcmAt = 0L
+                openSocket()
             }
         }
         handler.post {
@@ -184,22 +178,43 @@ object CallAudioRelay : CallManager.CallListener {
             }
             handler.removeCallbacks(armTimeout)
             handler.postDelayed(armTimeout, ARM_TIMEOUT_MS)
-            if (isLiveCallState(CallManager.currentCallState)) scheduleStart(0L)
+            if (owner == Owner.REDMI) {
+                preparingSince = SystemClock.elapsedRealtime()
+                setOwner(Owner.PREPARING_IPHONE, "waiting_for_iphone_audio")
+            }
+            scheduleMonitor()
         }
-        CallManager.log("Call audio relay armed")
+        CallManager.log("Call audio session armed")
         return session
     }
 
+    /** Ends the session and returns audio to the Redmi. Safe to call at any time. */
     fun disarm(reason: String) {
-        handler.post { disarmOnWorker(reason) }
+        handler.post { releaseAll(reason) }
+    }
+
+    /** The user chose to continue on the Redmi. The call itself is untouched. */
+    fun transferAudioToRedmi() {
+        handler.post { releaseAll("manual_redmi") }
+    }
+
+    /** Asks the iPhone to take the call audio; it answers with audio_start. */
+    fun requestIPhoneAudio() {
+        handler.post {
+            if (isLiveCallState(CallManager.currentCallState) && owner == Owner.REDMI) {
+                for (l in listeners) runCatching { l.onAudioOwnerChanged(Owner.REDMI, "request_iphone_audio") }
+            }
+        }
     }
 
     override fun onCallStateChanged(callId: String, state: String, number: String?) {
         handler.post {
             if (session == 0) return@post
-            when {
-                isLiveCallState(state) && !streaming -> scheduleStart(0L)
-                state == "disconnected" -> disarmOnWorker("call ended")
+            if (state == "disconnected" || state == "idle") {
+                releaseAll("call_ended")
+            } else if (owner == Owner.PREPARING_IPHONE && !mediaRunning && isLiveCallState(state)) {
+                // The readiness timeout counts from the moment there is call audio to move.
+                preparingSince = SystemClock.elapsedRealtime()
             }
         }
     }
@@ -209,10 +224,105 @@ object CallAudioRelay : CallManager.CallListener {
     private fun isLiveCallState(state: String) =
         state == "dialing" || state == "connecting" || state == "active"
 
-    private fun scheduleStart(delayMs: Long) {
-        handler.removeCallbacks(startAttempt)
-        if (delayMs == 0L) startAttempts = 0
-        handler.postDelayed(startAttempt, delayMs)
+    private val armTimeout = Runnable {
+        if (session != 0 && owner != Owner.IPHONE) releaseAll("no_call_audio_timeout")
+    }
+
+    private val monitor = object : Runnable {
+        override fun run() {
+            if (session == 0) return
+            tick()
+            if (session != 0) handler.postDelayed(this, MONITOR_INTERVAL_MS)
+        }
+    }
+
+    private fun scheduleMonitor() {
+        handler.removeCallbacks(monitor)
+        resetWindow()
+        handler.postDelayed(monitor, MONITOR_INTERVAL_MS)
+    }
+
+    private fun resetWindow() {
+        windowStartedAt = SystemClock.elapsedRealtime()
+        iphoneFrames.set(0); uplinkWrites.set(0); downlinkReads.set(0)
+    }
+
+    /** Runs on the worker thread every 250 ms while a session exists. */
+    private fun tick() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - windowStartedAt >= 1000L) {
+            windowIPhone = iphoneFrames.getAndSet(0)
+            windowWrites = uplinkWrites.getAndSet(0)
+            windowReads = downlinkReads.getAndSet(0)
+            windowStartedAt = now
+        }
+        if (mediaRunning && now - lastHealthLogAt >= 5000L) {
+            lastHealthLogAt = now
+            Log.i(TAG, "RELAY_HEALTH owner=$owner iphone=$windowIPhone/s uplink=$windowWrites/s " +
+                "downlink=$windowReads/s queued=${uplinkQueue.size} dropped=${droppedFrames.get()} " +
+                "underruns=${underruns.get()} maxWriteMs=$maxWriteMs")
+        }
+        val live = isLiveCallState(CallManager.currentCallState)
+        val iphoneFresh = lastIPhonePcmAt != 0L && now - lastIPhonePcmAt < IPHONE_SILENCE_LIMIT_MS
+        when (owner) {
+            Owner.REDMI -> Unit
+            Owner.PREPARING_IPHONE -> {
+                if (!mediaRunning) {
+                    if (live && iphoneFresh && windowIPhone >= MIN_FRAMES_PER_SECOND) {
+                        startMedia()
+                    } else if (now - preparingSince > PREPARE_TIMEOUT_MS && live) {
+                        releaseMediaAndKeepSession("iphone_audio_not_ready")
+                    }
+                    return
+                }
+                // Media running: wait for a full verification window, then decide.
+                val elapsed = now - cutoverStartedAt
+                if (elapsed >= VERIFY_WINDOW_MS && windowStartedAt >= cutoverStartedAt) {
+                    val healthy = windowWrites >= MIN_FRAMES_PER_SECOND &&
+                        windowReads >= MIN_FRAMES_PER_SECOND && iphoneFresh
+                    if (healthy) {
+                        if (applyIsolation()) {
+                            setOwner(Owner.IPHONE, "iphone_confirmed")
+                            CallManager.log("Call audio moved to iPhone (uplink=$windowWrites/s downlink=$windowReads/s)")
+                        } else {
+                            releaseMediaAndKeepSession("isolation_failed")
+                        }
+                    } else if (elapsed > VERIFY_TIMEOUT_MS) {
+                        val reason = when {
+                            windowWrites < MIN_FRAMES_PER_SECOND -> "uplink_path_unavailable"
+                            windowReads < MIN_FRAMES_PER_SECOND -> "downlink_unavailable"
+                            else -> "iphone_audio_lost"
+                        }
+                        Log.w(TAG, "Cutover verification failed: $reason writes=$windowWrites reads=$windowReads iphone=$windowIPhone")
+                        releaseMediaAndKeepSession(reason)
+                    }
+                }
+            }
+            Owner.IPHONE -> {
+                val reason = when {
+                    !live -> null
+                    !iphoneFresh -> "iphone_audio_lost"
+                    windowWrites in 0 until MIN_FRAMES_PER_SECOND && now - cutoverStartedAt > 2000 -> "uplink_stalled"
+                    windowReads in 0 until MIN_FRAMES_PER_SECOND && now - cutoverStartedAt > 2000 -> "downlink_stalled"
+                    else -> null
+                }
+                if (reason != null) {
+                    Log.w(TAG, "Returning call audio to Redmi: $reason (iphone=$windowIPhone writes=$windowWrites reads=$windowReads)")
+                    releaseMediaAndKeepSession(reason)
+                }
+            }
+        }
+    }
+
+    private fun setOwner(next: Owner, reason: String) {
+        val changed = owner != next || lastReason != reason
+        owner = next
+        lastReason = reason
+        GatewayService.setCallAudioForeground(next != Owner.REDMI)
+        if (changed) {
+            Log.i(TAG, "AUDIO_OWNER=$next reason=$reason")
+            for (l in listeners) runCatching { l.onAudioOwnerChanged(next, reason) }
+        }
     }
 
     private fun openSocket() {
@@ -224,142 +334,9 @@ object CallAudioRelay : CallManager.CallListener {
             bind(InetSocketAddress(PORT))
         }
         socket = datagram
-        receiveThread = Thread({ receiveLoop(datagram) }, "CallAudio-Uplink").apply {
+        receiveThread = Thread({ receiveLoop(datagram) }, "CallAudio-Receive").apply {
             priority = Thread.MAX_PRIORITY
             start()
-        }
-    }
-
-    private fun tryStartStreaming() {
-        if (session == 0 || streaming) return
-        val context = appContext ?: return
-        val audioManager = context.getSystemService(AudioManager::class.java)
-        val mode = audioManager.mode
-        val inCallMode = mode == AudioManager.MODE_IN_CALL ||
-            mode == MODE_CALL_SCREENING || mode == MODE_CALL_REDIRECT
-        if (!inCallMode) {
-            retryStart("audio mode $mode is not in-call yet")
-            return
-        }
-
-        val downlink = openDownlink(audioManager)
-        val uplink = openUplink(audioManager)
-        if (downlink == null || uplink == null) {
-            downlink?.release()
-            uplink?.release()
-            retryStart("both call audio endpoints are required")
-            return
-        }
-
-        record = downlink
-        track = uplink
-        packetsIn = 0
-        packetsOut = 0
-        streaming = true
-        streamingStartedAt = SystemClock.elapsedRealtime()
-        handler.removeCallbacks(armTimeout)
-
-        uplink?.play()
-        downlink?.let { recorder ->
-            recorder.startRecording()
-            sendThread = Thread({ sendLoop(recorder) }, "CallAudio-Downlink").apply {
-                priority = Thread.MAX_PRIORITY
-                start()
-            }
-        }
-
-        GatewayService.setCallAudioForeground(true)
-        watchdogFellBack = false
-        handler.removeCallbacks(watchdogRunnable)
-        handler.postDelayed(watchdogRunnable, WATCHDOG_CHECK_INTERVAL_MS)
-
-        val detail = "downlink=true, uplink=true, waitingForIPhone=true"
-        CallManager.log("Call audio relay streaming ($detail)")
-        confirmIPhoneAudio()
-    }
-
-    /** Keep the Redmi usable until the paired iPhone actually reaches the UDP relay. */
-    private fun confirmIPhoneAudio() {
-        if (!streaming || session == 0 || peer == null || record == null || track == null) return
-        val lastPacket = lastUplinkTimestamp
-        if (lastPacket == 0L || SystemClock.elapsedRealtime() - lastPacket > WATCHDOG_TIMEOUT_MS) return
-        if (iPhoneAudioConfirmed) return
-        iPhoneAudioConfirmed = true
-        watchdogFellBack = false
-        appContext?.let { ctx ->
-            val audioManager = ctx.getSystemService(AudioManager::class.java)
-            quietRedmiHandset(audioManager)
-        }
-        CallManager.log("iPhone audio peer confirmed; handset audio reduced")
-        notifyListeners(true, "iPhone audio connected")
-    }
-
-    private fun retryStart(reason: String) {
-        startAttempts += 1
-        if (startAttempts >= MAX_START_ATTEMPTS) {
-            CallManager.log("Call audio relay could not start: $reason")
-            notifyListeners(false, reason)
-            return
-        }
-        handler.removeCallbacks(startAttempt)
-        handler.postDelayed(startAttempt, START_RETRY_MS)
-    }
-
-    private fun disarmOnWorker(reason: String) {
-        handler.removeCallbacks(startAttempt)
-        handler.removeCallbacks(armTimeout)
-        handler.removeCallbacks(watchdogRunnable)
-        watchdogFellBack = false
-        iPhoneAudioConfirmed = false
-        expectedClientAddress = null
-        val wasActive = session != 0
-        stopStreaming()
-        synchronized(this) {
-            session = 0
-            peer = null
-            socket?.close()
-            socket = null
-        }
-        receiveThread?.join(500)
-        receiveThread = null
-        if (listeningToCalls) {
-            listeningToCalls = false
-            CallManager.removeListener(this)
-        }
-        if (wasActive) {
-            CallManager.log("Call audio relay stopped: $reason")
-            notifyListeners(false, reason)
-        }
-    }
-
-    private fun stopStreaming() {
-        if (!streaming) return
-        streaming = false
-        handler.removeCallbacks(watchdogRunnable)
-        watchdogFellBack = false
-        lastUplinkTimestamp = 0L
-        streamingStartedAt = 0L
-        iPhoneAudioConfirmed = false
-        try {
-            record?.let { recorder ->
-                runCatching { recorder.stop() }
-            }
-            sendThread?.join(500)
-            sendThread = null
-            record?.release()
-            record = null
-            track?.let { player ->
-                runCatching { player.pause() }
-                runCatching { player.flush() }
-                player.release()
-            }
-            track = null
-            GatewayService.setCallAudioForeground(false)
-            CallManager.log("Call audio relay packets: in=$packetsIn out=$packetsOut")
-        } finally {
-            appContext?.let { ctx ->
-                restoreRedmiHandset(ctx.getSystemService(AudioManager::class.java))
-            }
         }
     }
 
@@ -367,83 +344,122 @@ object CallAudioRelay : CallManager.CallListener {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val buffer = ByteArray(2048)
         val packet = DatagramPacket(buffer, buffer.size)
-        var levelFrames = 0
-        var sumSquares = 0.0
         while (!datagram.isClosed) {
             try {
                 packet.setLength(buffer.size)
                 datagram.receive(packet)
             } catch (error: Exception) {
-                if (!datagram.isClosed) Log.w(TAG, "Uplink receive failed", error)
+                if (!datagram.isClosed) Log.w(TAG, "Receive failed: ${error.javaClass.simpleName}")
                 continue
             }
             if (packet.length < HEADER_BYTES) continue
-            val header = ByteBuffer.wrap(buffer, 0, HEADER_BYTES).order(ByteOrder.BIG_ENDIAN)
-            val packetSession = header.int
             val expected = session
+            val packetSession = ByteBuffer.wrap(buffer, 0, 4).order(ByteOrder.BIG_ENDIAN).int
             if (expected == 0 || packetSession != expected) continue
-
-            val expectedAddr = expectedClientAddress
-            if (expectedAddr != null && packet.address != expectedAddr) {
-                Log.w(TAG, "Dropping packet from unauthorized peer address: ${packet.address} (expected: $expectedAddr)")
-                continue
-            }
-
-            if (buffer[6] != 0.toByte() && buffer[6] != PAYLOAD_PCM16) continue
-            // A keepalive establishes the return address. Only PCM proves that the
-            // iPhone microphone engine is producing frames for the cellular uplink.
+            val allowed = expectedClientAddress
+            if (allowed != null && packet.address != allowed) continue
+            val type = buffer[6]
+            if (type != PAYLOAD_KEEPALIVE && type != PAYLOAD_PCM16) continue
             peer = packet.socketAddress
-            lastUplinkTimestamp = SystemClock.elapsedRealtime()
-
-            if (buffer[6] != PAYLOAD_PCM16) continue
-            val payload = packet.length - HEADER_BYTES
-            if (payload != FRAME_BYTES) continue
-            val written = track?.write(buffer, HEADER_BYTES, payload, AudioTrack.WRITE_NON_BLOCKING) ?: 0
-            if (written <= 0) continue
-
-            packetsIn += 1
-            for (index in HEADER_BYTES until HEADER_BYTES + payload - 1 step 2) {
-                val sample = ((buffer[index + 1].toInt() shl 8) or (buffer[index].toInt() and 0xFF)).toShort().toDouble()
-                sumSquares += sample * sample
+            if (type != PAYLOAD_PCM16 || packet.length - HEADER_BYTES != FRAME_BYTES) continue
+            lastIPhonePcmAt = SystemClock.elapsedRealtime()
+            iphoneFrames.incrementAndGet()
+            if (!mediaRunning) continue
+            val frame = buffer.copyOfRange(HEADER_BYTES, HEADER_BYTES + FRAME_BYTES)
+            // Freshness beats completeness for live voice: drop the oldest when behind.
+            while (uplinkQueue.size >= MAX_QUEUED_FRAMES) {
+                if (uplinkQueue.poll() != null) droppedFrames.incrementAndGet()
             }
-            levelFrames += 1
-            if (levelFrames == 250) {
-                val rms = sqrt(sumSquares / (levelFrames * FRAME_SAMPLES))
-                Log.i(TAG, "Uplink level over 5s: rms=${"%.1f".format(rms)} in=$packetsIn out=$packetsOut")
-                levelFrames = 0
-                sumSquares = 0.0
-            }
-
-            if (!iPhoneAudioConfirmed) {
-                handler.post { if (session == expected) confirmIPhoneAudio() }
-            }
+            uplinkQueue.offer(frame)
         }
     }
 
-    private fun sendLoop(recorder: AudioRecord) {
+    private fun startMedia() {
+        val context = appContext ?: return
+        val audioManager = context.getSystemService(AudioManager::class.java)
+        val record = openDownlink(audioManager)
+        val track = openUplink(audioManager)
+        if (record == null || track == null) {
+            record?.release()
+            track?.release()
+            releaseMediaAndKeepSession(if (track == null) "uplink_path_unavailable" else "downlink_unavailable")
+            return
+        }
+        downlink = record
+        uplink = track
+        uplinkQueue.clear()
+        upsampler.reset()
+        maxWriteMs = 0
+        droppedFrames.set(0)
+        underruns.set(0)
+        mediaRunning = true
+        cutoverStartedAt = SystemClock.elapsedRealtime()
+        resetWindow()
+        track.play()
+        record.startRecording()
+        writerThread = Thread({ writeLoop(track) }, "CallAudio-Uplink").apply {
+            priority = Thread.MAX_PRIORITY
+            start()
+        }
+        senderThread = Thread({ sendLoop(record) }, "CallAudio-Downlink").apply {
+            priority = Thread.MAX_PRIORITY
+            start()
+        }
+        CallManager.log("Call audio media started; verifying before handing over")
+    }
+
+    private fun writeLoop(track: AudioTrack) {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+        val silence = ByteArray(FRAME_BYTES)
+        val out = ByteArray(UPLINK_FRAME_BYTES)
+        var primed = false
+        var highSince = 0L
+        while (mediaRunning && uplink === track) {
+            // Trim latency gently: drop one frame only if the queue stays deep for a while.
+            val now = SystemClock.elapsedRealtime()
+            if (uplinkQueue.size > TRIM_ABOVE_FRAMES) {
+                if (highSince == 0L) highSince = now
+                else if (now - highSince > TRIM_AFTER_MS) {
+                    if (uplinkQueue.poll() != null) droppedFrames.incrementAndGet()
+                    highSince = now
+                }
+            } else {
+                highSince = 0L
+            }
+            // The blocking track write paces this loop at real time; the queue only absorbs
+            // network jitter. A missing frame becomes 20 ms of silence rather than a stall,
+            // and after an underrun two frames are buffered again before speech resumes.
+            if (!primed && uplinkQueue.size >= 2) primed = true
+            val frame = if (primed) uplinkQueue.poll() else null
+            if (frame == null) {
+                if (primed) underruns.incrementAndGet()
+                primed = false
+            }
+            val bytes = upsampler.process(frame ?: silence, 0, FRAME_SAMPLES, out)
+            val started = SystemClock.elapsedRealtime()
+            val written = track.write(out, 0, bytes, AudioTrack.WRITE_BLOCKING)
+            val ms = SystemClock.elapsedRealtime() - started
+            if (written < 0) {
+                Log.w(TAG, "Uplink write failed: $written")
+                SystemClock.sleep(20)
+                continue
+            }
+            if (ms > maxWriteMs) maxWriteMs = ms
+            uplinkWrites.incrementAndGet()
+        }
+    }
+
+    private fun sendLoop(record: AudioRecord) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val frame = ByteArray(HEADER_BYTES + FRAME_BYTES)
         var sequence = 0
-        var levelFrames = 0
-        var sumSquares = 0.0
-        while (streaming) {
-            val read = recorder.read(frame, HEADER_BYTES, FRAME_BYTES)
+        while (mediaRunning && downlink === record) {
+            val read = record.read(frame, HEADER_BYTES, FRAME_BYTES)
             if (read <= 0) {
                 if (read < 0) SystemClock.sleep(10)
                 continue
             }
-            for (index in HEADER_BYTES until HEADER_BYTES + read - 1 step 2) {
-                val sample = ((frame[index + 1].toInt() shl 8) or (frame[index].toInt() and 0xFF)).toShort().toDouble()
-                sumSquares += sample * sample
-            }
-            levelFrames += 1
-            if (levelFrames == 250) {
-                val rms = sqrt(sumSquares / (levelFrames * FRAME_SAMPLES))
-                Log.i(TAG, "Downlink level over 5s: rms=${"%.1f".format(rms)} in=$packetsIn out=$packetsOut")
-                levelFrames = 0
-                sumSquares = 0.0
-            }
-
+            downlinkReads.incrementAndGet()
             val target = peer ?: continue
             val datagram = socket ?: break
             ByteBuffer.wrap(frame, 0, HEADER_BYTES).order(ByteOrder.BIG_ENDIAN)
@@ -454,214 +470,133 @@ object CallAudioRelay : CallManager.CallListener {
             sequence = (sequence + 1) and 0xFFFF
             try {
                 datagram.send(DatagramPacket(frame, HEADER_BYTES + read, target))
-                packetsOut += 1
             } catch (error: Exception) {
-                if (!datagram.isClosed) Log.w(TAG, "Downlink send failed", error)
+                if (!datagram.isClosed) Log.w(TAG, "Downlink send failed: ${error.javaClass.simpleName}")
             }
         }
     }
 
-    private fun pcmFormat(channelMask: Int) = AudioFormat.Builder()
+    private fun pcmFormat(rate: Int, channelMask: Int) = AudioFormat.Builder()
         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-        .setSampleRate(SAMPLE_RATE)
+        .setSampleRate(rate)
         .setChannelMask(channelMask)
         .build()
 
-    private fun openDownlink(audioManager: AudioManager): AudioRecord? {
-        try {
-            val method = AudioManager::class.java.getMethod(
-                "getCallDownlinkExtractionAudioRecord", AudioFormat::class.java
-            )
-            val recorder = method.invoke(audioManager, pcmFormat(AudioFormat.CHANNEL_IN_MONO)) as AudioRecord
-            if (recorder.state == AudioRecord.STATE_INITIALIZED) return recorder
+    private fun openDownlink(audioManager: AudioManager): AudioRecord? = try {
+        val recorder = AudioManager::class.java
+            .getMethod("getCallDownlinkExtractionAudioRecord", AudioFormat::class.java)
+            .invoke(audioManager, pcmFormat(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO)) as AudioRecord
+        if (recorder.state == AudioRecord.STATE_INITIALIZED) recorder else {
             recorder.release()
-        } catch (error: Exception) {
-            Log.w(TAG, "Downlink extraction unavailable: ${describe(error)}")
-        }
-
-        // Older path: capture the downlink directly with CAPTURE_AUDIO_OUTPUT.
-        return try {
-            val minBuffer = AudioRecord.getMinBufferSize(
-                SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-            )
-            val recorder = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_DOWNLINK, SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
-                maxOf(minBuffer, FRAME_BYTES * 8)
-            )
-            if (recorder.state == AudioRecord.STATE_INITIALIZED) {
-                recorder
-            } else {
-                recorder.release()
-                null
-            }
-        } catch (error: Exception) {
-            Log.w(TAG, "VOICE_DOWNLINK capture unavailable: ${describe(error)}")
             null
         }
+    } catch (error: Exception) {
+        Log.w(TAG, "Downlink extraction unavailable: ${describe(error)}")
+        null
     }
 
+    /** INCALL_MUSIC output: explicit Telephony Tx routing of a media track during a call. */
     private fun openUplink(audioManager: AudioManager): AudioTrack? {
-        try {
-            val method = AudioManager::class.java.getMethod(
-                "getCallUplinkInjectionAudioTrack", AudioFormat::class.java
-            )
-            val player = method.invoke(audioManager, pcmFormat(AudioFormat.CHANNEL_OUT_MONO)) as AudioTrack
-            if (player.state == AudioTrack.STATE_INITIALIZED) {
-                player.setVolume(1.0f)
-                return player
-            }
-            player.release()
-        } catch (error: Exception) {
-            Log.w(TAG, "Uplink injection unavailable: ${describe(error)}")
-        }
-
-        // Fallback: route a voice track explicitly to the telephony TX device.
         val telephonyTx = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             .firstOrNull { it.type == AudioDeviceInfo.TYPE_TELEPHONY }
-            ?: return null
+        if (telephonyTx == null) {
+            Log.w(TAG, "No Telephony Tx output device")
+            return null
+        }
         return try {
-            val player = AudioTrack.Builder()
+            val track = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
-                .setAudioFormat(pcmFormat(AudioFormat.CHANNEL_OUT_MONO))
+                .setAudioFormat(pcmFormat(UPLINK_RATE, AudioFormat.CHANNEL_OUT_STEREO))
                 .setTransferMode(AudioTrack.MODE_STREAM)
-                .setBufferSizeInBytes(FRAME_BYTES * 8)
+                .setBufferSizeInBytes(UPLINK_FRAME_BYTES * 4)
                 .build()
-            player.setPreferredDevice(telephonyTx)
-            if (player.state == AudioTrack.STATE_INITIALIZED) {
-                player.setVolume(1.0f)
-                player
-            } else {
-                player.release()
+            if (!track.setPreferredDevice(telephonyTx) || track.state != AudioTrack.STATE_INITIALIZED) {
+                track.release()
                 null
+            } else {
+                track.setVolume(1.0f)
+                track
             }
         } catch (error: Exception) {
-            Log.w(TAG, "Telephony TX track unavailable: ${describe(error)}")
+            Log.w(TAG, "Uplink track unavailable: ${describe(error)}")
             null
         }
     }
 
-    fun quietRedmiHandset(audioManager: AudioManager) {
-        GatewayInCallService.setAudioRoute(CallAudioState.ROUTE_EARPIECE)
-        runCatching {
-            if (savedVoiceVolume < 0) {
-                savedVoiceVolume = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
-            }
-            val minVol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                audioManager.getStreamMinVolume(AudioManager.STREAM_VOICE_CALL).coerceAtLeast(1)
-            } else {
-                1
-            }
-            audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, minVol, 0)
-            Log.i(TAG, "Redmi handset quieted: volume set to $minVol (saved: $savedVoiceVolume)")
-        }
-    }
-
-    fun restoreRedmiHandset(audioManager: AudioManager?) {
-        if (audioManager == null) return
-        runCatching {
-            val targetVolume = if (savedVoiceVolume >= 0) {
-                savedVoiceVolume
-            } else {
-                val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-                (maxVol * 0.6f).toInt().coerceAtLeast(1)
-            }
-            audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, targetVolume, 0)
-            Log.i(TAG, "Redmi handset restored: volume set to $targetVolume")
-        }
-        savedVoiceVolume = -1
-    }
-
-    fun transferAudioToRedmi() {
-        handler.post {
-            disarmOnWorker("Manual switch to Redmi")
-        }
-    }
-
-    fun transferAudioToIPhone() {
-        handler.post {
-            // The authenticated client requests a fresh session. Keep local audio until
-            // its first UDP packet arrives; do not mute on a mere button press.
-            if (isLiveCallState(CallManager.currentCallState)) {
-                notifyListeners(false, "request_iphone_audio")
-            }
-        }
-    }
-
-    /**
-     * Measures both call audio directions during a live call: the caller's voice level on the
-     * downlink and whether a 1 kHz tone can be written to the uplink. Nothing is stored.
-     */
-    fun selfTest(context: Context, muteMic: Boolean, seconds: Int = 5): JSONObject {
-        val result = JSONObject()
-        val audioManager = context.getSystemService(AudioManager::class.java)
-        result.put("callState", CallManager.currentCallState)
-        result.put("audioMode", audioManager.mode)
-        result.put("interceptable", runCatching {
-            AudioManager::class.java.getMethod("isPstnCallAudioInterceptable").invoke(audioManager) as Boolean
-        }.getOrElse { "error: ${describe(it)}" })
-        if (streaming) {
-            result.put("error", "relay is streaming; end the iPhone audio session first")
-            return result
-        }
-
-        val recorder = openDownlink(audioManager)
-        val player = openUplink(audioManager)
-        result.put("downlinkOpened", recorder != null)
-        result.put("uplinkOpened", player != null)
-        recorder?.let { result.put("downlinkSource", it.audioSource) }
-
-        val frames = seconds * 50
-        val input = ShortArray(FRAME_SAMPLES)
-        val tone = ShortArray(FRAME_SAMPLES)
-        var phase = 0.0
-        var sumSquares = 0.0
-        var peak = 0
-        var samplesRead = 0L
-        var samplesWritten = 0L
-        try {
-            recorder?.startRecording()
-            player?.play()
-            for (frame in 0 until frames) {
-                for (index in tone.indices) {
-                    tone[index] = (6000 * sin(phase)).toInt().toShort()
-                    phase += 2 * PI * 1000.0 / SAMPLE_RATE
-                    if (phase > 2 * PI) phase -= 2 * PI
-                }
-                player?.let { samplesWritten += maxOf(0, it.write(tone, 0, tone.size)) }
-                if (recorder != null) {
-                    val read = recorder.read(input, 0, input.size)
-                    for (index in 0 until maxOf(0, read)) {
-                        val sample = input[index].toInt()
-                        sumSquares += sample.toDouble() * sample
-                        peak = maxOf(peak, abs(sample))
-                    }
-                    samplesRead += maxOf(0, read)
-                } else {
-                    SystemClock.sleep(20)
-                }
-            }
+    /** Mutes the Redmi's own microphone and earpiece devices, not the call streams. */
+    private fun applyIsolation(): Boolean {
+        val audioManager = appContext?.getSystemService(AudioManager::class.java) ?: return false
+        return try {
+            audioManager.setParameters("device_mute=true;direction=tx")
+            audioManager.setParameters("device_mute=true;direction=rx")
+            isolationApplied = true
+            true
         } catch (error: Exception) {
-            result.put("error", describe(error))
-        } finally {
-            runCatching { recorder?.stop() }
-            recorder?.release()
-            runCatching { player?.stop() }
-            player?.release()
+            Log.w(TAG, "Could not isolate the Redmi handset: ${describe(error)}")
+            clearIsolation()
+            false
         }
+    }
 
-        result.put("downlinkSamples", samplesRead)
-        result.put("downlinkRms", if (samplesRead > 0) sqrt(sumSquares / samplesRead) else 0.0)
-        result.put("downlinkPeak", peak)
-        result.put("uplinkSamplesWritten", samplesWritten)
-        result.put("localMicMuted", muteMic)
-        CallManager.log("Call audio self-test: $result")
-        return result
+    private fun clearIsolation() {
+        val audioManager = appContext?.getSystemService(AudioManager::class.java) ?: return
+        runCatching { audioManager.setParameters("device_mute=false;direction=tx") }
+        runCatching { audioManager.setParameters("device_mute=false;direction=rx") }
+        isolationApplied = false
+    }
+
+    /** Hands the call back to the Redmi's microphone and earpiece; keeps the session for a retry. */
+    private fun releaseMediaAndKeepSession(reason: String) {
+        // Restore the Redmi first so the call is never silent on both devices.
+        clearIsolation()
+        stopMedia()
+        setOwner(Owner.REDMI, reason)
+    }
+
+    private fun stopMedia() {
+        if (!mediaRunning && downlink == null && uplink == null) return
+        mediaRunning = false
+        writerThread?.interrupt()
+        writerThread?.join(300)
+        writerThread = null
+        downlink?.let { runCatching { it.stop() } }
+        senderThread?.join(300)
+        senderThread = null
+        downlink?.release()
+        downlink = null
+        uplink?.let { track ->
+            runCatching { track.pause() }
+            runCatching { track.flush() }
+            track.release()
+        }
+        uplink = null
+        uplinkQueue.clear()
+    }
+
+    private fun releaseAll(reason: String) {
+        handler.removeCallbacks(armTimeout)
+        handler.removeCallbacks(monitor)
+        val hadSession = session != 0
+        releaseMediaAndKeepSession(reason)
+        synchronized(this) {
+            session = 0
+            peer = null
+            expectedClientAddress = null
+            socket?.close()
+            socket = null
+        }
+        receiveThread?.join(300)
+        receiveThread = null
+        if (listeningToCalls) {
+            listeningToCalls = false
+            CallManager.removeListener(this)
+        }
+        if (hadSession) CallManager.log("Call audio session closed: $reason")
     }
 
     private fun describe(error: Throwable): String {

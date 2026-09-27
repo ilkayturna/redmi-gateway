@@ -6,6 +6,7 @@ import android.util.Log
 import com.ilkay.redmigateway.RedmiGatewayApp
 import com.ilkay.redmigateway.telecom.CallManager
 import com.ilkay.redmigateway.audio.AudioProbeManager
+import com.ilkay.redmigateway.audio.CallAudioLab
 import com.ilkay.redmigateway.audio.CallAudioRelay
 import com.ilkay.redmigateway.sms.SmsReceiver
 import com.ilkay.redmigateway.sms.SmsManagerHelper
@@ -40,6 +41,7 @@ class GatewayWebSocketServer(
     private val authenticatedClients = ConcurrentHashMap.newKeySet<WebSocket>()
     private val ipAuthFailures = ConcurrentHashMap<String, AuthFailureRecord>()
     @Volatile private var audioOwner: WebSocket? = null
+    private val lastDialAt = ConcurrentHashMap<WebSocket, Long>()
 
     init {
         isReuseAddr = true
@@ -71,9 +73,10 @@ class GatewayWebSocketServer(
 
     override fun onClose(conn: WebSocket, code: Int, reason: String?, remote: Boolean) {
         val wasAuth = authenticatedClients.remove(conn)
+        lastDialAt.remove(conn)
         if (audioOwner === conn) {
             audioOwner = null
-            CallAudioRelay.disarm("iPhone connection lost")
+            CallAudioRelay.disarm("iphone_disconnected")
         }
         val remoteAddr = conn.remoteSocketAddress?.toString() ?: "unknown"
         Log.i(TAG, "Client disconnected: $remoteAddr (Auth: $wasAuth, Reason: $reason)")
@@ -140,6 +143,7 @@ class GatewayWebSocketServer(
                     val number = json.optString("number", "")
                     CallManager.log("WebSocket command: DIAL")
                     val success = CallManager.dial(context, number)
+                    if (success) lastDialAt[conn] = android.os.SystemClock.elapsedRealtime()
                     sendAck(conn, "dial", success)
                 }
                 "dtmf" -> {
@@ -160,7 +164,12 @@ class GatewayWebSocketServer(
                     handleGetSmsHistory(conn, json.optLong("afterId", 0L))
                 }
                 "audio_start" -> {
-                    if (CallManager.currentCallState !in setOf("ringing", "dialing", "connecting", "active")) {
+                    // Telecom creates an outgoing call asynchronously, so a request that follows
+                    // this client's own dial by a few seconds is accepted and waits for the call.
+                    val dialedRecently = (lastDialAt[conn] ?: 0L).let {
+                        it > 0 && android.os.SystemClock.elapsedRealtime() - it < 10_000L
+                    }
+                    if (CallManager.currentCallState !in setOf("ringing", "dialing", "connecting", "active") && !dialedRecently) {
                         sendError(conn, "No current cellular call")
                         return
                     }
@@ -185,17 +194,26 @@ class GatewayWebSocketServer(
                         return
                     }
                     audioOwner = null
-                    CallAudioRelay.disarm("iPhone ended the audio session")
+                    CallAudioRelay.disarm("iphone_stopped")
                     sendAck(conn, "audio_stop", true)
                 }
-                "audio_selftest" -> {
-                    val muteMic = json.optBoolean("muteLocalMic", false)
-                    val seconds = json.optInt("seconds", 5).coerceIn(1, 15)
-                    Thread {
-                        val result = CallAudioRelay.selfTest(context, muteMic, seconds)
-                        result.put("type", "audio_selftest_result")
-                        if (conn.isOpen) conn.send(result.toString())
-                    }.start()
+                "audio_to_redmi" -> {
+                    if (audioOwner !== conn) {
+                        sendError(conn, "This client does not own call audio")
+                        return
+                    }
+                    CallAudioRelay.transferAudioToRedmi()
+                    sendAck(conn, "audio_to_redmi", true)
+                }
+                "lab" -> {
+                    val op = json.optString("op", "status")
+                    val result = if (op == "stats") {
+                        JSONObject().put("op", op).put("status",
+                            CallAudioLab.snapshot(context.getSystemService(android.media.AudioManager::class.java)))
+                    } else {
+                        CallAudioLab.handle(context, op)
+                    }
+                    conn.send(result.put("type", "lab_result").toString())
                 }
                 "probe_audio" -> {
                     val source = json.optString("source", "ALL")
@@ -384,6 +402,9 @@ class GatewayWebSocketServer(
 
     // CallManager.CallListener implementation
     override fun onCallStateChanged(callId: String, state: String, number: String?) {
+        if ((state == "disconnected" || state == "idle") && CallAudioLab.isActive) {
+            CallAudioLab.handle(context, "close_all")
+        }
         broadcastCallState(callId, state, number)
     }
 
@@ -418,11 +439,15 @@ class GatewayWebSocketServer(
         }
     }
 
-    override fun onAudioRelayState(running: Boolean, detail: String) {
+    override fun onAudioOwnerChanged(owner: CallAudioRelay.Owner, reason: String) {
+        // iPhone builds up to 1.0 (33) stop their audio engine on any running=false that is not
+        // a retry request, so the transient preparing state is not announced as running=false.
+        if (owner == CallAudioRelay.Owner.PREPARING_IPHONE) return
         val payload = JSONObject().apply {
             put("type", "audio_state")
-            put("running", running)
-            put("detail", detail)
+            put("running", owner == CallAudioRelay.Owner.IPHONE)
+            put("owner", owner.name.lowercase())
+            put("detail", reason)
         }.toString()
         for (client in authenticatedClients) {
             runCatching { if (client.isOpen) client.send(payload) }
@@ -458,7 +483,7 @@ class GatewayWebSocketServer(
             CallManager.removeListener(this)
             CallAudioRelay.removeListener(this)
             audioOwner = null
-            CallAudioRelay.disarm("gateway stopped")
+            CallAudioRelay.disarm("gateway_stopped")
             SmsReceiver.webSocketServer = null
             authenticatedClients.clear()
             ipAuthFailures.clear()

@@ -22,3 +22,6 @@ Payload/
 *.ipa
 RedmiGateway/root/
 
+
+# Lab binaries built from scripts/lab sources
+RedmiGateway/scripts/lab/mixctl

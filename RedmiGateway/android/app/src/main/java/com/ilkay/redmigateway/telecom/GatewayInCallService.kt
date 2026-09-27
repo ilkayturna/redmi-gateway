@@ -73,6 +73,28 @@ class GatewayInCallService : InCallService() {
             }
         }
 
+        /** Asks Telecom to apply the endpoint it already uses; used to re-evaluate call routing. */
+        fun reapplyCurrentEndpoint(): Boolean {
+            val service = instance ?: return false
+            if (Build.VERSION.SDK_INT < 34) return false
+            val current = service.currentCallEndpoint ?: return false
+            service.mainExecutor.execute {
+                service.requestCallEndpointChange(
+                    current, service.mainExecutor,
+                    object : OutcomeReceiver<Void?, CallEndpointException> {
+                        override fun onResult(result: Void?) = Unit
+                        override fun onError(error: CallEndpointException) {
+                            Log.w(TAG, "Could not re-apply call endpoint", error)
+                        }
+                    }
+                )
+            }
+            return true
+        }
+
+        fun currentEndpointType(): Int? =
+            if (Build.VERSION.SDK_INT >= 34) instance?.currentCallEndpoint?.endpointType else null
+
         fun setAudioRoute(route: Int) {
             val service = instance ?: return
             service.mainExecutor.execute {
