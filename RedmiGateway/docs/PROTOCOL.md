@@ -123,6 +123,12 @@ The Bluetooth key is `derive(K, "ble")`. Sealed values are `0x02 | nonce | ciphe
     milliseconds for `q`, so it keeps increasing across restarts.
   - The reply `{"ack","callId","seq","success","error"?}` is notified sealed the same way.
 - **Device info** (`…0002`, read): plain `{"id","ip","port","v":2,"ble"}`; no call data.
+- **Call wake beacon:** while an incoming call rings and the iPhone has not sent `ringing_ack`, the
+  Redmi advertises a non-connectable iBeacon (Apple company id `0x004C`, UUID = first 16 bytes of
+  `derive(K, "beacon")`, major 1, minor 1). The iPhone monitors it with Core Location, so iOS
+  relaunches the app even after it was swiped away. The beacon carries no call data.
+- Call state notifications go to every connected central. A link can outlive a restart of the
+  Redmi app, and the iPhone keeps listening on the same handle.
 - Bluetooth never carries audio.
 
 ## Messages after authentication

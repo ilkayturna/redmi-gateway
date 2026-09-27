@@ -7,7 +7,7 @@
 | `main` | The last state before this delivery (build 33 era). Not changed by the delivery. |
 | `checkpoint/takeover-worktree-20260927` | The exact working tree found at takeover, committed as-is. |
 | `baseline/16khz-uplink-20260927-1231` | The Android build installed at 12:31 on 27 Sep 2026 (16 kHz uplink baseline). |
-| `delivery/phone-bridge` | This delivery. Merging to `main` is the owner's decision. |
+| `delivery/phone-bridge` | This delivery (Android 2.0.0 (200), iPhone TestFlight 2.0 (41)). Merging to `main` is the owner's decision. |
 
 ## Android (Redmi)
 
@@ -82,8 +82,11 @@ The owner approved automated IVR calls to Turkcell 532.
 
 ## Known limits (platform)
 
-- iOS does not wake an app the person force-quit. Incoming calls then ring only on the Redmi. With
-  the app merely in the background or suspended, Bluetooth wakes it.
+- iOS does not relaunch a swiped-away app for Bluetooth. The call wake iBeacon covers that case,
+  but it needs "Always" location permission. Without it, a swiped-away app misses the call, which
+  still rings on the Redmi. An app merely in the background is woken by Bluetooth.
+- The "Always" location permission exists only for the call wake beacon. Before a public App Store
+  release, expect App Review to ask about it; the purpose strings explain it.
 - iPhone and Redmi must share a local network for call audio. Bluetooth carries state and
   answer/reject/hang-up, never audio.
 - Emergency numbers dialled in the iPhone app open the iPhone's own dialer and are not placed

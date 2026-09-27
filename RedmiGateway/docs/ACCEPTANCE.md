@@ -9,21 +9,22 @@ Evidence labels:
 - **BLOCKED BY PLATFORM**: iOS or Android does not allow it.
 - **NOT VERIFIED**: not yet tested.
 
-Builds: Android 2.0.0 (200), `delivery/phone-bridge`. iPhone 2.0, TestFlight build 37.
+Builds: Android 2.0.0 (200), `delivery/phone-bridge`. iPhone 2.0, TestFlight build 41.
+Physical tests on 27 Sep 2026, by the owner with both phones.
 
 | # | Requirement | Status | Evidence |
 |---|---|---|---|
 | P0 | 16 kHz baseline restored and later work kept | RUNTIME LOG VERIFIED | `baseline/16khz-uplink-20260927-1231`; IVR runs at 50 frames/s both ways |
-| P1 | Full duplex, clear both ways | PHYSICALLY VERIFIED (protocol 1, test 2) · RUNTIME LOG VERIFIED (protocol 2, sealed) | Owner: "Hepsi doğru". Emulator: downlink 50/s, uplink 48–51/s |
+| P1 | Full duplex, clear both ways | PHYSICALLY VERIFIED (protocol 1 and protocol 2) · RUNTIME LOG VERIFIED | Owner: "Hepsi doğru" (protocol 1) and "her şey çok güzel" (protocol 2, 19:22: moved to iPhone at 49/48 frames/s, manual return, moved back). Emulator: 50 frames/s both ways |
 | P2 | One owner at a time; no Redmi speaker or microphone leak | PHYSICALLY VERIFIED (the far end did not hear music playing next to the Redmi) · RUNTIME LOG VERIFIED | `device_mute` tx/rx applied only after two-way verification |
 | P3a | Automatic handoff for calls made from the iPhone, ringback on the iPhone | PHYSICALLY VERIFIED (test 2) | Ringback and busy tones heard on the iPhone |
 | P3b | Fallback: iPhone microphone lost, iPhone not receiving, link lost | RUNTIME LOG VERIFIED | `iphone_audio_lost`, `iphone_not_receiving` (about 2 s), re-arm, `manual_redmi` |
-| P3c | Fallback when the iPhone's Wi-Fi turns off during a call | NOT VERIFIED | Physical test pending |
-| P4a | Incoming call rings on a locked iPhone (app in background) | CODE VERIFIED · BUILD VERIFIED | BLE wake, then CallKit, then `ringing_ack`; physical test pending |
-| P4b | Redmi rings quietly once the iPhone shows the call | CODE VERIFIED | `IncomingCallPresenter` silences the ringer; physical test pending |
-| P4c | Incoming call after the person force-quit the iPhone app | BLOCKED BY PLATFORM | iOS does not relaunch a force-quit app for Bluetooth; the Redmi still rings |
+| P3c | Fallback when the iPhone's Wi-Fi turns off during a call | NOT VERIFIED | Covered in the emulator (`iphone_audio_lost`, `iphone_not_receiving`); not done physically |
+| P4a | Incoming call rings on a locked iPhone (app in background) | PHYSICALLY VERIFIED · RUNTIME LOG VERIFIED | Owner: "ekrana düştü". Log 19:38:24: BLE state sent, iPhone's `ringing_ack` over BLE 0.1 s later |
+| P4b | Redmi rings quietly once the iPhone shows the call | RUNTIME LOG VERIFIED | "Incoming call is showing on the iPhone", after which the ringer is silenced |
+| P4c | Incoming call after the person swiped the iPhone app away | PHYSICALLY VERIFIED (build 41, "Always" location permission) | iOS will not relaunch a swiped-away app for Bluetooth; the call wake iBeacon relaunches it. Owner: "çalıyor … kapalı olsa bile". Without the permission, only the Redmi rings |
 | P5 | Redmi as a standalone phone: recents, contacts, keypad, messages, call screens, active call always reachable | BUILD VERIFIED | Call card and notification lead to the call screen; physical test pending |
-| P6 | iPhone: contacts with photos, favorites, keypad, full-screen call UI, SMS conversations with send status | BUILD VERIFIED | Physical test pending |
+| P6 | iPhone: contacts with photos, favorites, keypad, full-screen call UI, SMS conversations with send status | BUILD VERIFIED · partly PHYSICALLY VERIFIED | The keypad, call screen and transfer were used in the tests; SMS sending not done physically |
 | P7 | Missed calls and SMS survive iPhone absence (replay by sequence) | RUNTIME LOG VERIFIED | `sync` returns 60 calls and 4 SMS, then nothing after `lastSeq`; live `call_log` push with `answeredOn=iphone` |
 | P8 | Reconnect after network or service restart | RUNTIME LOG VERIFIED (service restart, reinstall) | Physical network-change test pending |
 | S1 | No unauthenticated LAN control or audio injection | RUNTIME LOG VERIFIED | 10/10 security checks (`iphone_emulator.py --scenario security`) |

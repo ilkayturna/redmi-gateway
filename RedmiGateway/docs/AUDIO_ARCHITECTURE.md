@@ -92,8 +92,18 @@ audio in both directions.
    shows the call.
 4. The app reconnects the network link in the background, ready for Answer.
 
-Platform limits: iOS does not wake a force-quit app for Bluetooth events. PushKit is not used,
-because it would need an Apple push server and a WAN relay, which this product excludes.
+**Swiped-away app:** iOS does not relaunch a swiped-away app for Bluetooth events, but it does for
+iBeacon region monitoring.
+
+- While the call rings unacknowledged, the Redmi also advertises an iBeacon. Its UUID is the first
+  16 bytes of `derive(K, "beacon")`, with major 1 and minor 1. It stops as soon as the iPhone
+  acknowledges.
+- The iPhone monitors that region (needs "Always" location permission; only proximity is used).
+- Entering the region relaunches the app, which connects and presents the call. Physically
+  verified with build 41.
+
+PushKit is not used: it would need an Apple push server and a WAN relay, which this product
+excludes.
 
 ## Security and privacy of audio
 
