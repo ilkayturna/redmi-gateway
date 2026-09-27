@@ -139,8 +139,11 @@ final class BLECentralManager: NSObject, ObservableObject {
 
     private func handleState(_ data: Data) {
         let bytes = [UInt8](data)
-        guard bytes.first == Self.sealedVersion, bytes.count > 1,
-              let key = GatewayConnection.shared.pairing?.bleKey,
+        guard bytes.first == Self.sealedVersion, bytes.count > 1 else {
+            GatewayConnection.shared.log("Ignored unsealed Bluetooth state")
+            return
+        }
+        guard let key = GatewayConnection.shared.pairing?.bleKey,
               let plain = BridgeCrypto.open(key, Data(bytes[1...]), aad: Self.stateAAD),
               let object = (try? JSONSerialization.jsonObject(with: plain)) as? [String: Any],
               let state = object["s"] as? String,
@@ -218,6 +221,7 @@ extension BLECentralManager: CBCentralManagerDelegate {
         Task { @MainActor in
             guard self.peripheral === peripheral else { return }
             self.isConnected = true
+            GatewayConnection.shared.log("Bluetooth connected to the Redmi")
             central.stopScan()
             UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: self.kPeripheral)
             peripheral.discoverServices([RedmiGatewayBLEConstants.serviceUUID])
@@ -231,6 +235,7 @@ extension BLECentralManager: CBCentralManagerDelegate {
             self.isConnected = false
             self.stateChar = nil
             self.controlChar = nil
+            GatewayConnection.shared.log("Bluetooth disconnected: \((error as NSError?)?.code ?? 0)")
             // A pending connection completes whenever the Redmi is back in range, even suspended.
             if self.gatewayId != nil { central.connect(peripheral, options: nil) } else { self.peripheral = nil }
             self.start()
@@ -279,6 +284,17 @@ extension BLECentralManager: CBPeripheralDelegate {
                 default:
                     break
                 }
+            }
+        }
+    }
+
+    nonisolated func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic,
+                                error: Error?) {
+        let uuid = characteristic.uuid
+        let notifying = characteristic.isNotifying
+        Task { @MainActor in
+            if uuid == RedmiGatewayBLEConstants.charStateUUID {
+                GatewayConnection.shared.log("Bluetooth call-state updates \(notifying ? "on" : "off")\(error == nil ? "" : " (error)")")
             }
         }
     }

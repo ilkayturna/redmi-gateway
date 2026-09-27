@@ -168,6 +168,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     var presentsCurrentCall: Bool { currentCallUuid != nil }
+    var hasCalls: Bool { !states.isEmpty }
 
     // MARK: - Audio
 

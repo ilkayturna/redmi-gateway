@@ -292,6 +292,8 @@ public final class GatewayConnection: ObservableObject {
 
     private func scheduleReconnect(delay custom: Double? = nil) {
         guard pairing != nil || pendingPairCode != nil else { return }
+        // In the background only a call justifies reconnecting; Bluetooth covers the rest.
+        guard UIApplication.shared.applicationState != .background || currentCall != nil else { return }
         cancelReconnect()
         let delay = custom ?? min(Double(1 << min(reconnectAttempt + 1, 5)), 30)
         reconnectTask = Task { @MainActor [weak self] in
@@ -635,9 +637,12 @@ public final class GatewayConnection: ObservableObject {
         }
     }
 
-    /// Call state from Bluetooth while the network link is down (for example a locked iPhone).
+    /// Call state from Bluetooth. In the foreground the network link is authoritative; in the
+    /// background (network link closed, see didEnterBackground) Bluetooth is how a locked iPhone
+    /// learns about calls.
     private func applyBluetoothCallState(_ update: BLECallState) {
-        guard state != .authenticated else { return }
+        log("Bluetooth call state: \(update.state)")
+        guard !(state == .authenticated && UIApplication.shared.applicationState == .active) else { return }
         if update.state == "idle" {
             // Notifications can coalesce; "idle" alone still means the call is over.
             if let previous = currentCall {
@@ -804,6 +809,11 @@ public final class GatewayConnection: ObservableObject {
 
     private func setupLifecycleObservers() {
         NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in GatewayConnection.shared.enterBackground() }
+        }
+        NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
         ) { _ in
             Task { @MainActor in
@@ -813,6 +823,19 @@ public final class GatewayConnection: ObservableObject {
                 connection.requestSync()
             }
         }
+    }
+
+    /// iOS suspends the app shortly after it leaves the screen, and a suspended socket looks
+    /// alive while nothing reads it. Without a call, close it deliberately: Bluetooth wakes the
+    /// app for calls, and the journals catch up when the app returns.
+    private func enterBackground() {
+        guard currentCall == nil, !CallKitManager.shared.hasCalls else { return }
+        cancelReconnect()
+        if webSocketTask != nil {
+            closeSocket()
+            log("Network link closed in the background; Bluetooth stays connected")
+        }
+        if pairing != nil { link = .searching }
     }
 
     /// Technical log for Advanced > Diagnostics. Never contains numbers, message text or keys.

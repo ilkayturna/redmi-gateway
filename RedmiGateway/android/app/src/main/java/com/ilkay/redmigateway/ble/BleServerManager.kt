@@ -334,6 +334,9 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
                 } else {
                     subs.remove(charUuid)
                 }
+                if (charUuid == BleConstants.CHAR_STATE_UUID) {
+                    Log.i(TAG, "BLE call-state updates ${if (enabled) "enabled" else "disabled"}")
+                }
 
                 if (responseNeeded) {
                     gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
@@ -662,6 +665,10 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     ) {
         if (!hasConnectPermission()) return
         characteristic.value = bytes
+        if (characteristic.uuid == BleConstants.CHAR_STATE_UUID) {
+            val targets = connectedDevices.count { subscribedDevices[it]?.contains(characteristic.uuid) == true }
+            Log.i(TAG, "BLE call state notified to $targets device(s), ${bytes.size} bytes")
+        }
         for (device in connectedDevices) {
             val subs = subscribedDevices[device]
             if (subs?.contains(characteristic.uuid) == true) {
