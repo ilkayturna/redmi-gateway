@@ -476,7 +476,11 @@ class GatewayWebSocketServer(
     private fun send(peer: Peer, json: JSONObject) {
         if (!peer.conn.isOpen) return
         val channel = peer.channel
-        runCatching { peer.conn.send(if (channel != null) channel.seal(json.toString()) else json.toString()) }
+        // Sealing and queueing happen together so frames leave in counter order; the iPhone
+        // drops any frame whose counter is not above the last one.
+        synchronized(peer) {
+            runCatching { peer.conn.send(if (channel != null) channel.seal(json.toString()) else json.toString()) }
+        }
     }
 
     private fun sendPlain(conn: WebSocket, json: JSONObject) {

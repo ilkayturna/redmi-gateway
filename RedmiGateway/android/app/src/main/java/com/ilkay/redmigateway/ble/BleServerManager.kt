@@ -67,6 +67,9 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     }
 
     private var lastControlSeq = 0L
+    private val mtuByDevice = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    // A long read continues at an offset; it must see the same sealed bytes as its first part.
+    @Volatile private var lastStateRead = ByteArray(0)
 
     private val bluetoothManager: BluetoothManager? =
         context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
@@ -142,10 +145,16 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
                 connectedDevices.add(device)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 Log.i(TAG, "BLE client disconnected: ${device.address}")
+                mtuByDevice.remove(device.address)
                 connectedDevices.remove(device)
                 subscribedDevices.remove(device)
                 preparedWrites.remove(device)
             }
+        }
+
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            mtuByDevice[device.address] = mtu
+            Log.i(TAG, "BLE MTU $mtu")
         }
 
         override fun onCharacteristicReadRequest(
@@ -161,7 +170,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
 
             val value = when (characteristic.uuid) {
                 BleConstants.CHAR_DEVICE_INFO_UUID -> buildDeviceInfoJson().toByteArray(Charsets.UTF_8)
-                BleConstants.CHAR_STATE_UUID -> buildStateBytes()
+                BleConstants.CHAR_STATE_UUID ->
+                    if (offset == 0) buildStateBytes().also { lastStateRead = it } else lastStateRead
                 BleConstants.CHAR_HEARTBEAT_UUID -> System.currentTimeMillis().toString().toByteArray(Charsets.UTF_8)
                 else -> null
             }
@@ -655,6 +665,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         for (device in connectedDevices) {
             val subs = subscribedDevices[device]
             if (subs?.contains(characteristic.uuid) == true) {
+                val mtu = mtuByDevice[device.address] ?: 23
+                if (bytes.size > mtu - 3) Log.w(TAG, "Notification of ${bytes.size} bytes exceeds MTU $mtu")
                 try {
                     gattServer?.notifyCharacteristicChanged(device, characteristic, false)
                 } catch (e: Exception) {

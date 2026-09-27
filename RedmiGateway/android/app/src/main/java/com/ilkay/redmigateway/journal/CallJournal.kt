@@ -125,7 +125,30 @@ class CallJournal private constructor(context: Context) :
     /** The relay reports who carried the audio so Recents can show it. */
     fun noteAnsweredOn(callStartMillis: Long, device: String) {
         answeredOnByStart[callStartMillis] = device
+        handler.post { applyAnsweredOn(callStartMillis, device) }
         scheduleImport(1500L)
+    }
+
+    /** The CallLog row may already be imported; update it and publish it again with a new seq. */
+    @Synchronized
+    private fun applyAnsweredOn(start: Long, device: String) {
+        val db = writableDatabase
+        val row = db.rawQuery(
+            "SELECT log_id, number, type, date, duration FROM calls WHERE answered_on IS NULL " +
+                "AND type IN ('incoming', 'outgoing') AND date BETWEEN ? AND ? ORDER BY seq DESC LIMIT 1",
+            arrayOf((start - 15_000).toString(), (start + 15_000).toString())
+        ).use { c -> if (c.moveToFirst()) Entry(0, c.getLong(0), c.getString(1), c.getString(2), c.getLong(3), c.getLong(4), device) else null }
+            ?: return
+        db.delete("calls", "log_id = ?", arrayOf(row.logId.toString()))
+        val values = ContentValues().apply {
+            put("log_id", row.logId); put("number", row.number); put("type", row.type)
+            put("date", row.date); put("duration", row.durationSeconds); put("answered_on", device)
+        }
+        val seq = db.insert("calls", null, values)
+        if (seq > 0) {
+            val entry = row.copy(seq = seq)
+            for (l in listeners) runCatching { l.onCallJournalEntry(entry) }
+        }
     }
 
     fun scheduleImport(delayMs: Long = 0L) {
@@ -146,6 +169,7 @@ class CallJournal private constructor(context: Context) :
     @Synchronized
     private fun importNow() {
         if (!hasPermission()) return
+        answeredOnByStart.keys.removeIf { System.currentTimeMillis() - it > 3_600_000L }
         val db = writableDatabase
         // The first run keeps 30 days of history; older rows (ids up to "floor") are never imported.
         val firstImport = meta(db, "initialized") == null

@@ -95,6 +95,10 @@ class Session:
                 self.events.append(msg)
             elif msg.get("type") == "call":
                 print(f"  <- call {msg.get('state')} direction={msg.get('direction')}")
+            elif msg.get("type") == "call_log":
+                item = msg.get("item", {})
+                print(f"  <- call_log seq={item.get('seq')} type={item.get('type')} answeredOn={item.get('answeredOn')}")
+                self.events.append(msg)
             await self.inbox.put(msg)
 
     async def wait_for(self, kind, timeout=15):
@@ -252,11 +256,11 @@ async def call_scenario(args):
         await client.send({"type": "audio_to_redmi"})
         await report("manual_redmi", 3)
     await client.send({"type": "hangup", "callId": call_id})
-    await asyncio.sleep(2)
+    await asyncio.sleep(5)  # the call log entry follows the hangup
     mtask.cancel()
     s.task.cancel()
     print(f"downlink rejected packets: {media.framing.rejected}")
-    print("owners:", [(e.get("owner"), e.get("detail")) for e in s.events])
+    print("owners:", [(e.get("owner"), e.get("detail")) for e in s.events if e.get("type") == "audio_state"])
     await client.ws.close()
 
 

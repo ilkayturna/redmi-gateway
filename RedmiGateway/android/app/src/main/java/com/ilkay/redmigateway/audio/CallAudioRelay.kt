@@ -374,7 +374,12 @@ object CallAudioRelay : CallManager.CallListener {
         releaseMediaAndKeepSession(reason)
     }
 
+    /** The call whose audio the iPhone carried at some point; read when the call ends. */
+    @Volatile var carriedCallId: String? = null
+        private set
+
     private fun setOwner(next: Owner, reason: String) {
+        if (next == Owner.IPHONE) carriedCallId = CallManager.currentCallId
         val changed = owner != next || lastReason != reason
         owner = next
         lastReason = reason

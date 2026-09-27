@@ -38,6 +38,9 @@ object CallManager {
     /** Wall-clock time the current call became active, or 0. */
     @Volatile var activeSinceMillis: Long = 0L
         private set
+    /** Wall-clock creation time of the current call; the CallLog entry carries the same time. */
+    @Volatile var addedAtMillis: Long = 0L
+        private set
     private var activeCallCallback: Call.Callback? = null
 
     fun addListener(listener: CallListener) {
@@ -77,6 +80,7 @@ object CallManager {
             (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
                 call.details?.callDirection == Call.Details.DIRECTION_INCOMING)) "incoming" else "outgoing"
         activeSinceMillis = if (stateStr == "active") System.currentTimeMillis() else 0L
+        addedAtMillis = call.details?.creationTimeMillis?.takeIf { it > 0 } ?: System.currentTimeMillis()
 
         log("Call Added: ID=$currentCallId, State=$stateStr")
         notifyStateChanged()
@@ -119,12 +123,19 @@ object CallManager {
             notifyStateChanged()
 
             IncomingCallPresenter.onCallEnded()
+            if (activeSinceMillis != 0L) {
+                // Recents on both phones show which one carried the conversation.
+                val device = if (com.ilkay.redmigateway.audio.CallAudioRelay.carriedCallId == finalId) "iphone" else "redmi"
+                com.ilkay.redmigateway.journal.CallJournal.get(com.ilkay.redmigateway.RedmiGatewayApp.instance)
+                    .noteAnsweredOn(addedAtMillis, device)
+            }
             // Reset after informing listeners
             activeCall = null
             currentCallState = "idle"
             currentCallId = null
             currentPhoneNumber = null
             activeSinceMillis = 0L
+            addedAtMillis = 0L
             notifyStateChanged()
         }
     }
