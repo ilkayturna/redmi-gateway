@@ -835,10 +835,8 @@ public final class NWGatewayDiscovery {
         var deviceId: String? = nil
 
         // Check Bonjour TXT record metadata
-        if let metadata = result.metadata {
-            if case let .bonjour(txtRecord) = metadata {
-                deviceId = txtRecord["id"]
-            }
+        if case let .bonjour(txtRecord) = result.metadata {
+            deviceId = txtRecord["id"]
         }
 
         // Also check service name fallback (e.g. RedmiGateway-a1b2c3d4)
