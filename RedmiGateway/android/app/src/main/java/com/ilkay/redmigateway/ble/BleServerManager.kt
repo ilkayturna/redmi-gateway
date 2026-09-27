@@ -51,6 +51,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         private const val TAG = "BleServerManager"
         private const val SEALED_VERSION: Byte = 2
         private const val MAX_CONTROL_AGE_MS = 60_000L
+        private const val SUBSCRIBE_GRACE_MS = 10_000L
         private val BLE_STATE_AAD = "phonebridge-ble-state".toByteArray(Charsets.UTF_8)
         private val BLE_CONTROL_AAD = "phonebridge-ble-control".toByteArray(Charsets.UTF_8)
         @Volatile private var current: BleServerManager? = null
@@ -143,6 +144,12 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 Log.i(TAG, "BLE client connected: ${device.address}")
                 connectedDevices.add(device)
+                mainHandler.postDelayed({
+                    val subscribed = subscribedDevices[device]?.contains(BleConstants.CHAR_STATE_UUID) == true
+                    if (connectedDevices.contains(device) && !subscribed) {
+                        Log.i(TAG, "BLE client kept its link across a gateway restart; call state still reaches it")
+                    }
+                }, SUBSCRIBE_GRACE_MS)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 Log.i(TAG, "BLE client disconnected: ${device.address}")
                 mtuByDevice.remove(device.address)
@@ -665,13 +672,14 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     ) {
         if (!hasConnectPermission()) return
         characteristic.value = bytes
-        if (characteristic.uuid == BleConstants.CHAR_STATE_UUID) {
-            val targets = connectedDevices.count { subscribedDevices[it]?.contains(characteristic.uuid) == true }
-            Log.i(TAG, "BLE call state notified to $targets device(s), ${bytes.size} bytes")
-        }
+        // Call state goes to every connected device. A link can outlive a restart of this app
+        // (the Bluetooth stack keeps it); the iPhone then still listens on the same handle,
+        // while this new server instance has no record of its subscription.
+        val toAll = characteristic.uuid == BleConstants.CHAR_STATE_UUID
+        if (toAll) Log.i(TAG, "BLE call state notified to ${connectedDevices.size} device(s), ${bytes.size} bytes")
         for (device in connectedDevices) {
             val subs = subscribedDevices[device]
-            if (subs?.contains(characteristic.uuid) == true) {
+            if (toAll || subs?.contains(characteristic.uuid) == true) {
                 val mtu = mtuByDevice[device.address] ?: 23
                 if (bytes.size > mtu - 3) Log.w(TAG, "Notification of ${bytes.size} bytes exceeds MTU $mtu")
                 try {
