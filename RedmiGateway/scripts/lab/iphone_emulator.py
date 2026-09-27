@@ -106,7 +106,11 @@ async def main():
                     print(f"  <- call {msg.get('state')}")
                 await inbox.put(msg)
 
+        stash = {}
+
         async def wait_for(kind, timeout=15):
+            if kind in stash:
+                return stash.pop(kind)
             end = time.time() + timeout
             while time.time() < end:
                 try:
@@ -115,6 +119,8 @@ async def main():
                     break
                 if msg.get("type") == kind:
                     return msg
+                if msg.get("type") == "audio_ready":
+                    stash["audio_ready"] = msg
             return None
 
         task = asyncio.create_task(reader())
@@ -125,6 +131,9 @@ async def main():
         print("authenticated")
         if args.dial:
             await ws.send(json.dumps({"type": "dial", "number": args.dial}))
+        if args.scenario == "race":
+            # iPhone build 33 requests audio before Telecom has created the call.
+            await ws.send(json.dumps({"type": "audio_start"}))
         while True:
             msg = await wait_for("call", 60)
             if msg is None:
@@ -132,7 +141,8 @@ async def main():
             if msg.get("state") in ("dialing", "active"):
                 call_id = msg.get("callId")
                 break
-        await ws.send(json.dumps({"type": "audio_start"}))
+        if args.scenario != "race":
+            await ws.send(json.dumps({"type": "audio_start"}))
         ready = await wait_for("audio_ready")
         media = Media(args.host, ready["port"], ready["session"])
         mtask = asyncio.create_task(media.run())
@@ -146,6 +156,8 @@ async def main():
 
         media.sending = True
         await report("handoff", 6)
+        if args.scenario == "race":
+            await report("race_hold", 20)
         if args.scenario == "soak":
             for i in range(12):
                 media.tone = (i % 2 == 0)

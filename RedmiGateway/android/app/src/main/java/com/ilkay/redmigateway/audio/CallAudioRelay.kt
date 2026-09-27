@@ -113,6 +113,10 @@ object CallAudioRelay : CallManager.CallListener {
     private var listeningToCalls = false
     private var cutoverStartedAt = 0L
     private var preparingSince = 0L
+    // A session armed right after dial exists before Telecom creates the call.
+    private var callSeenLive = false
+    private var badWindows = 0
+    private var windowFresh = false
 
     // Health counters (written by audio threads, read by the monitor).
     @Volatile private var lastIPhonePcmAt = 0L
@@ -178,6 +182,7 @@ object CallAudioRelay : CallManager.CallListener {
             }
             handler.removeCallbacks(armTimeout)
             handler.postDelayed(armTimeout, ARM_TIMEOUT_MS)
+            if (isLiveCallState(CallManager.currentCallState)) callSeenLive = true
             if (owner == Owner.REDMI) {
                 preparingSince = SystemClock.elapsedRealtime()
                 setOwner(Owner.PREPARING_IPHONE, "waiting_for_iphone_audio")
@@ -211,10 +216,15 @@ object CallAudioRelay : CallManager.CallListener {
         handler.post {
             if (session == 0) return@post
             if (state == "disconnected" || state == "idle") {
-                releaseAll("call_ended")
-            } else if (owner == Owner.PREPARING_IPHONE && !mediaRunning && isLiveCallState(state)) {
-                // The readiness timeout counts from the moment there is call audio to move.
-                preparingSince = SystemClock.elapsedRealtime()
+                // Listener registration reports the current state; before the armed call
+                // exists that is "idle" and must not close the session.
+                if (callSeenLive) releaseAll("call_ended")
+            } else if (isLiveCallState(state)) {
+                if (!callSeenLive) {
+                    callSeenLive = true
+                    // The readiness timeout counts from the moment there is call audio to move.
+                    if (owner == Owner.PREPARING_IPHONE && !mediaRunning) preparingSince = SystemClock.elapsedRealtime()
+                }
             }
         }
     }
@@ -250,11 +260,13 @@ object CallAudioRelay : CallManager.CallListener {
     /** Runs on the worker thread every 250 ms while a session exists. */
     private fun tick() {
         val now = SystemClock.elapsedRealtime()
+        windowFresh = false
         if (now - windowStartedAt >= 1000L) {
             windowIPhone = iphoneFrames.getAndSet(0)
             windowWrites = uplinkWrites.getAndSet(0)
             windowReads = downlinkReads.getAndSet(0)
             windowStartedAt = now
+            windowFresh = true
         }
         if (mediaRunning && now - lastHealthLogAt >= 5000L) {
             lastHealthLogAt = now
@@ -299,19 +311,28 @@ object CallAudioRelay : CallManager.CallListener {
                 }
             }
             Owner.IPHONE -> {
-                val reason = when {
-                    !live -> null
-                    !iphoneFresh -> "iphone_audio_lost"
-                    windowWrites in 0 until MIN_FRAMES_PER_SECOND && now - cutoverStartedAt > 2000 -> "uplink_stalled"
-                    windowReads in 0 until MIN_FRAMES_PER_SECOND && now - cutoverStartedAt > 2000 -> "downlink_stalled"
+                if (!live) return
+                // Losing the iPhone microphone is decided per tick; rate dips must persist for
+                // two consecutive 1 s windows, because call setup briefly slows both paths.
+                if (!iphoneFresh) {
+                    fallBack("iphone_audio_lost")
+                    return
+                }
+                if (!windowFresh || now - cutoverStartedAt < 2000) return
+                val slow = when {
+                    windowWrites < MIN_FRAMES_PER_SECOND -> "uplink_stalled"
+                    windowReads < MIN_FRAMES_PER_SECOND -> "downlink_stalled"
                     else -> null
                 }
-                if (reason != null) {
-                    Log.w(TAG, "Returning call audio to Redmi: $reason (iphone=$windowIPhone writes=$windowWrites reads=$windowReads)")
-                    releaseMediaAndKeepSession(reason)
-                }
+                badWindows = if (slow == null) 0 else badWindows + 1
+                if (slow != null && badWindows >= 2) fallBack(slow)
             }
         }
+    }
+
+    private fun fallBack(reason: String) {
+        Log.w(TAG, "Returning call audio to Redmi: $reason (iphone=$windowIPhone writes=$windowWrites reads=$windowReads)")
+        releaseMediaAndKeepSession(reason)
     }
 
     private fun setOwner(next: Owner, reason: String) {
@@ -394,6 +415,7 @@ object CallAudioRelay : CallManager.CallListener {
         underruns.set(0)
         mediaRunning = true
         cutoverStartedAt = SystemClock.elapsedRealtime()
+        badWindows = 0
         resetWindow()
         track.play()
         record.startRecording()
@@ -582,6 +604,7 @@ object CallAudioRelay : CallManager.CallListener {
         handler.removeCallbacks(armTimeout)
         handler.removeCallbacks(monitor)
         val hadSession = session != 0
+        callSeenLive = false
         releaseMediaAndKeepSession(reason)
         synchronized(this) {
             session = 0
