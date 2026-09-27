@@ -164,6 +164,7 @@ public final class GatewayConnection: ObservableObject {
         pendingPairCode = nil
         history.reset()
         BLECentralManager.shared.forgetGateway()
+        CallWakeMonitor.shared.refresh()
         cancelReconnect()
         closeSocket()
         link = .unpaired
@@ -496,6 +497,7 @@ public final class GatewayConnection: ObservableObject {
             self.pairingError = nil
             self.history.bind(gatewayId: gatewayId)
             BLECentralManager.shared.setGateway(id: gatewayId)
+            CallWakeMonitor.shared.refresh()
             self.log("Paired with the Redmi")
             self.link = .connecting
             if let socket, self.webSocketTask === socket, self.serverNonce == serverNonce {
@@ -558,6 +560,7 @@ public final class GatewayConnection: ObservableObject {
                 // The Redmi no longer has this iPhone's key (pairing removed there).
                 PairingKeychain.delete()
                 self.pairing = nil
+                CallWakeMonitor.shared.refresh()
                 history.reset()
                 closeSocket()
                 cancelReconnect()

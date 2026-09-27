@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ = BLECentralManager.shared
         _ = CallKitManager.shared
         GatewayConnection.shared.start()
+        // Also relaunched by iOS for the call wake beacon, even after the app was swiped away.
+        CallWakeMonitor.shared.refresh()
         return true
     }
 }

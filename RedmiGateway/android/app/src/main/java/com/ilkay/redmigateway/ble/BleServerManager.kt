@@ -386,6 +386,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         this.shouldBeRunning = false
         unregisterBluetoothReceiver()
         CallManager.removeListener(this)
+        stopCallBeacon()
         tearDownGattServerAndAdvertiser()
         Log.i(TAG, "BleServerManager stopped")
     }
@@ -562,6 +563,76 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         }
     }
 
+    // ---- Call wake beacon ----
+    //
+    // iOS relaunches an app for iBeacon region events even after the person swiped it away,
+    // which Bluetooth notifications cannot do. While an incoming call rings and the iPhone has
+    // not confirmed showing it, the Redmi advertises an iBeacon whose UUID is derived from the
+    // pairing key; the iPhone monitors that region and wakes up to present the call.
+
+    private var beaconCallback: AdvertiseCallback? = null
+    private val beaconCheck = object : Runnable {
+        override fun run() {
+            updateCallBeacon()
+            if (beaconCallback != null) mainHandler.postDelayed(this, 500)
+        }
+    }
+
+    private fun updateCallBeacon() {
+        val ringingHere = CallManager.currentCallState == "ringing" && CallManager.currentDirection == "incoming" &&
+            IncomingCallPresenter.presentedOnIPhoneCallId != CallManager.currentCallId
+        if (ringingHere && shouldBeRunning) startCallBeacon() else stopCallBeacon()
+    }
+
+    private fun startCallBeacon() {
+        if (beaconCallback != null || !hasAdvertisePermission()) return
+        val key = PairingStore.pairedClient()?.key ?: return
+        val advertiser = bluetoothAdapter?.bluetoothLeAdvertiser ?: return
+        val uuid = BridgeCrypto.derive(key, "beacon").copyOf(16)
+        // iBeacon layout after Apple's company id: type 0x02, length 0x15, UUID, major, minor, power.
+        val payload = java.nio.ByteBuffer.allocate(23)
+            .put(0x02.toByte()).put(0x15.toByte()).put(uuid)
+            .putShort(1).putShort(1).put((-59).toByte()).array()
+        val data = AdvertiseData.Builder()
+            .setIncludeDeviceName(false)
+            .setIncludeTxPowerLevel(false)
+            .addManufacturerData(0x004C, payload)
+            .build()
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+            .setConnectable(false)
+            .setTimeout(0)
+            .build()
+        val callback = object : AdvertiseCallback() {
+            override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+                Log.i(TAG, "Call wake beacon on")
+            }
+
+            override fun onStartFailure(errorCode: Int) {
+                Log.w(TAG, "Call wake beacon failed: $errorCode")
+                if (beaconCallback === this) beaconCallback = null
+            }
+        }
+        beaconCallback = callback
+        try {
+            advertiser.startAdvertising(settings, data, callback)
+            mainHandler.removeCallbacks(beaconCheck)
+            mainHandler.postDelayed(beaconCheck, 500)
+        } catch (e: Exception) {
+            beaconCallback = null
+            Log.w(TAG, "Call wake beacon failed: ${e.javaClass.simpleName}")
+        }
+    }
+
+    private fun stopCallBeacon() {
+        val callback = beaconCallback ?: return
+        beaconCallback = null
+        mainHandler.removeCallbacks(beaconCheck)
+        runCatching { if (hasAdvertisePermission()) bluetoothAdapter?.bluetoothLeAdvertiser?.stopAdvertising(callback) }
+        Log.i(TAG, "Call wake beacon off")
+    }
+
     private fun stopAdvertising() {
         if (isAdvertising) {
             try {
@@ -694,6 +765,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     // CallManager.CallListener implementation
     override fun onCallStateChanged(callId: String, state: String, number: String?) {
         charState?.let { notifyCharacteristicToSubscribers(it, buildStateBytes()) }
+        mainHandler.post { updateCallBeacon() }
     }
 
     override fun onLogMessage(message: String) {}

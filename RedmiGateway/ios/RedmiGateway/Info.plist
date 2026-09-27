@@ -29,6 +29,10 @@
     <string>Görüşme sesi aktarımı etkinleştirildiğinde mikrofon kullanılır.</string>
     <key>NSContactsUsageDescription</key>
     <string>Rehberindeki kişileri uygulama içinde göstermek, aramak ve SMS konuşmalarını adlarıyla eşleştirmek için kullanılır.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Uygulama kapalıyken de Redmi'ye gelen aramaları gösterebilmek için yalnızca Redmi'nin yakınlığını algılar. Konumun okunmaz, kaydedilmez, paylaşılmaz.</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>Uygulama kapalıyken de Redmi'ye gelen aramaları gösterebilmek için yalnızca Redmi'nin yakınlığını algılar. Konumun okunmaz, kaydedilmez, paylaşılmaz.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Redmi telefonuyla aynı Wi-Fi ağında arama ve SMS bilgilerini eşitlemek için yerel ağ erişimi gerekir.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>

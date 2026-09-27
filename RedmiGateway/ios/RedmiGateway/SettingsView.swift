@@ -94,6 +94,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var connection = GatewayConnection.shared
     @ObservedObject private var directory = PhoneContactDirectory.shared
+    @ObservedObject private var wake = CallWakeMonitor.shared
     @State private var confirmingUnpair = false
 
     var body: some View {
@@ -110,6 +111,14 @@ struct SettingsView: View {
                     }
                     if let pairing = connection.pairing {
                         LabeledRow(title: "Eşleşme", value: pairing.pairedAt.formatted(date: .abbreviated, time: .omitted))
+                    }
+                }
+                Section(header: Text("Aramalar"),
+                        footer: Text("Konum iznini \"Her Zaman\" yaparsan, uygulamayı kaydırıp kapatsan bile gelen aramalar iPhone'da çalar. Yalnızca Redmi'nin yakınlığı algılanır; konumun okunmaz ve kaydedilmez.")) {
+                    LabeledRow(title: "Uygulama kapalıyken aramalar", value: wake.isEnabled ? "Açık" : "Kapalı",
+                               valueColor: wake.isEnabled ? .green : .orange)
+                    if !wake.isEnabled {
+                        Button("Konum iznini \"Her Zaman\" yap") { wake.requestPermission() }
                     }
                 }
                 Section(header: Text("İzinler"), footer: Text("Mikrofon, görüşme iPhone'dayken konuşmanı Redmi'ye iletmek için; Kişiler, numaraları adlarla göstermek için kullanılır. Kişilerin iPhone'dan çıkmaz.")) {

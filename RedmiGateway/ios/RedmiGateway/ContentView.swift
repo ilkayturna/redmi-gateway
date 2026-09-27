@@ -11,6 +11,8 @@ struct ContentView: View {
     @State private var showingSettings = false
     @State private var callMinimized = false
     @State private var messageTarget: String?
+    @AppStorage("call_wake_prompted") private var callWakePrompted = false
+    @State private var showingWakePrompt = false
 
     private var selectedTab: Binding<Int> {
         Binding(get: { selectedTabRaw }, set: { selectedTabRaw = $0 })
@@ -28,6 +30,14 @@ struct ContentView: View {
             _ = CallKitManager.shared
             AudioEngine.shared.requestMicrophonePermission()
             connection.start()
+            offerCallWake()
+        }
+        .onChange(of: connection.isPaired) { _ in offerCallWake() }
+        .alert("Uygulama kapalıyken de aramalar", isPresented: $showingWakePrompt) {
+            Button("Şimdi değil", role: .cancel) {}
+            Button("İzin ver") { CallWakeMonitor.shared.requestPermission() }
+        } message: {
+            Text("Uygulamayı kaydırıp kapatsan bile gelen aramaların iPhone'da çalması için konum iznini \"Her Zaman\" olarak ver. Yalnızca Redmi'nin yakınlığı algılanır; konumun okunmaz ve kaydedilmez.")
         }
         .onChange(of: connection.currentCall?.rawCallId) { callId in
             callMinimized = false
@@ -82,6 +92,13 @@ struct ContentView: View {
 
     private func openSettings() {
         showingSettings = true
+    }
+
+    /// Asked once after pairing; Settings shows the state afterwards.
+    private func offerCallWake() {
+        guard connection.isPaired, !callWakePrompted, !CallWakeMonitor.shared.isEnabled else { return }
+        callWakePrompted = true
+        showingWakePrompt = true
     }
 
     private func openMessages(_ number: String) {
