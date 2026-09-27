@@ -496,22 +496,17 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         val opaqueId = RedmiGatewayApp.getOpaqueDeviceId()
         val idBytes = opaqueId.toByteArray(Charsets.UTF_8)
 
-        // 21-byte primary advertisement: 128-bit Service UUID (18 bytes) + Service Data (5 bytes)
+        // Primary advertisement (18 bytes): 128-bit Service UUID (fits within 31-byte legacy limit)
         val advertiseData = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .setIncludeTxPowerLevel(false)
             .addServiceUuid(ParcelUuid(BleConstants.SERVICE_UUID))
-            .addServiceData(ParcelUuid(BleConstants.SERVICE_UUID), idBytes)
             .build()
 
-        // 12-byte scan response: device name (e.g. "RG-a1b2c3d4")
-        val shortName = "RG-$opaqueId"
+        // Scan response (26 bytes): 128-bit Service Data containing opaque device ID (merged by CoreBluetooth)
         val scanResponse = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
-            .addServiceData(
-                ParcelUuid(BleConstants.CHAR_DEVICE_INFO_UUID),
-                shortName.toByteArray(Charsets.UTF_8)
-            )
+            .addServiceData(ParcelUuid(BleConstants.SERVICE_UUID), idBytes)
             .build()
 
         try {
