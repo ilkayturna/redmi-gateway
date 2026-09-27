@@ -486,11 +486,44 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         }
         column.addView(back, LinearLayout.LayoutParams(-1, -2))
         val history = messages.filter { numberKey(it.address) == numberKey(address) }.sortedBy(Message::time)
-        val list = ListView(this)
-        list.adapter = twoLineAdapter(history.map {
-            mapOf("title" to if (it.sent) "Ben" else nameFor(it.address),
-                "detail" to "${it.body}\n${DateFormat.format("dd MMM HH:mm", Date(it.time))}")
-        })
+        val list = ListView(this).apply {
+            divider = null
+            transcriptMode = ListView.TRANSCRIPT_MODE_ALWAYS_SCROLL
+        }
+        list.adapter = object : BaseAdapter() {
+            override fun getCount() = history.size
+            override fun getItem(position: Int) = history[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val message = history[position]
+                val bubble = TextView(this@PhoneActivity).apply {
+                    text = message.body
+                    textSize = 16f
+                    setTextIsSelectable(true)
+                    setPadding(dp(14), dp(9), dp(14), dp(9))
+                    setTextColor(if (message.sent) Color.WHITE else ContextCompat.getColor(this@PhoneActivity, R.color.text_primary))
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(18).toFloat()
+                        setColor(ContextCompat.getColor(this@PhoneActivity, if (message.sent) R.color.status_good else R.color.bg_card))
+                        if (!message.sent) setStroke(dp(1), ContextCompat.getColor(this@PhoneActivity, R.color.border_subtle))
+                    }
+                    maxWidth = (resources.displayMetrics.widthPixels * 0.78).toInt()
+                }
+                val time = TextView(this@PhoneActivity).apply {
+                    text = DateFormat.format("d MMM HH:mm", Date(message.time))
+                    textSize = 12f
+                    setTextColor(ContextCompat.getColor(this@PhoneActivity, R.color.text_secondary))
+                    setPadding(dp(6), dp(2), dp(6), 0)
+                }
+                return LinearLayout(this@PhoneActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    gravity = if (message.sent) Gravity.END else Gravity.START
+                    setPadding(0, dp(4), 0, dp(4))
+                    addView(bubble, LinearLayout.LayoutParams(-2, -2))
+                    addView(time, LinearLayout.LayoutParams(-2, -2))
+                }
+            }
+        }
         column.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
         list.setSelection(history.lastIndex.coerceAtLeast(0))
         val compose = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
