@@ -216,7 +216,9 @@ public final class GatewayConnection: ObservableObject {
         guard !ignoredHosts.contains(host) else { return }
         guard pairing != nil || pendingPairCode != nil else { return }
         guard state != .authenticated else { return }
-        if state == .connecting && host == currentHost && port == currentPort && webSocketTask != nil { return }
+        // Never interrupt a handshake in progress: Bonjour and Bluetooth often report the same
+        // Redmi within milliseconds, and a second pairing attempt would meet a rotated code.
+        if webSocketTask != nil && (state == .connecting || state == .connected) { return }
         log("Redmi found via \(source)")
         connect(host: host, port: port)
     }
@@ -463,6 +465,7 @@ public final class GatewayConnection: ObservableObject {
 
     private func handlePairResult(_ result: PairResultMessage) {
         guard let code = pendingPairCode, let serverNonce, let clientNonce else { return }
+        let socket = webSocketTask
         guard result.success,
               let sealedKey = result.key.flatMap({ Data(base64Encoded: $0) }),
               let gatewayProof = result.gatewayProof.flatMap({ Data(base64Encoded: $0) }),
@@ -492,12 +495,26 @@ public final class GatewayConnection: ObservableObject {
             self.history.bind(gatewayId: gatewayId)
             BLECentralManager.shared.setGateway(id: gatewayId)
             self.log("Paired with the Redmi")
-            // The same connection continues with keyed authentication.
-            self.authenticate(pairing: newPairing, serverNonce: serverNonce)
+            self.link = .connecting
+            if let socket, self.webSocketTask === socket, self.serverNonce == serverNonce {
+                // The same connection continues with keyed authentication.
+                self.authenticate(pairing: newPairing, serverNonce: serverNonce)
+            } else {
+                // The connection changed while the key was being unwrapped; start a fresh one.
+                self.reconnectNow(reason: "paired")
+            }
         }
     }
 
     private func pairingFailed(code: String?) {
+        if pairing != nil {
+            // An earlier attempt on another connection already paired; just connect with it.
+            pendingPairCode = nil
+            migratingLegacyCode = false
+            closeSocket()
+            reconnectNow(reason: "already paired")
+            return
+        }
         let wasMigration = migratingLegacyCode
         pendingPairCode = nil
         migratingLegacyCode = false
