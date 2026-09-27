@@ -2,14 +2,18 @@ import AVFoundation
 import Foundation
 import Network
 
-/// Local, two-way PCM audio for an active CallKit call.
-/// The Redmi sends 20 ms, 16 kHz mono frames over the authenticated relay session.
+/// Two-way call audio for a CallKit call whose conversation the Redmi hands to this iPhone.
+///
+/// 20 ms frames of 16 kHz mono PCM16 travel over UDP, sealed with the connection's media key
+/// (see MediaSealer). Every uplink packet tells the Redmi whether downlink audio is arriving
+/// here, so the Redmi only keeps the call on the iPhone while audio flows both ways.
 final class AudioEngine {
     static let shared = AudioEngine()
 
-    var onStatus: ((String) -> Void)?
+    /// Technical events for the diagnostics log; never shown as call UI.
+    var onLog: ((String) -> Void)?
     var onNeedsRestart: (() -> Void)?
-    var isMuted: Bool = false
+    var isMuted = false
     private(set) var isSpeakerEnabled = false
 
     private let sampleRate: Double = 16_000
@@ -17,78 +21,65 @@ final class AudioEngine {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let networkQueue = DispatchQueue(label: "com.ilkay.redmigateway.audio", qos: .userInteractive)
+
+    // networkQueue state
     private var connection: NWConnection?
     private var heartbeat: DispatchSourceTimer?
-    private var sessionId: UInt32 = 0
-    private var sequence: UInt16 = 0
+    private var sealer: MediaSealer?
+    private var lastSession: UInt32 = 0
+    private var lastKey = Data()
+    /// Packet counters live as long as the session: a GCM nonce must never repeat under one key.
+    private var txCounter: UInt32 = 0
+    private var rxLastCounter: UInt32 = 0
     private var playbackPrimed = false
     private var playbackQueue: [Data] = []
     private var queuedBuffers = 0
     private var lastDownlink: Date?
-    private var tapInstalled = false
-    private var running = false
     private var lastPcmSentAt: Date?
     private var recoveryRequested = false
+
+    // main queue state
+    private var tapInstalled = false
+    private var running = false
+    private var isInterrupted = false
     private var lastRecoveryRequest = Date.distantPast
     private(set) var isSessionPrepared = false
     var isRunning: Bool { running }
-    private var isInterrupted = false
-    private var pcmLevelFrames = 0
-    private var pcmSumSquares: Double = 0.0
 
     private init() {
         engine.attach(player)
-        NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: .main
-        ) { [weak self] _ in
-            self?.requestRecovery("Ses donanımı değişti")
+        let center = NotificationCenter.default
+        center.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+            self?.requestRecovery("audio hardware changed")
         }
-        NotificationCenter.default.addObserver(
-            forName: AVAudioSession.routeChangeNotification,
-            object: AVAudioSession.sharedInstance(),
-            queue: .main
-        ) { [weak self] notification in
-            guard let self else { return }
-            guard let userInfo = notification.userInfo,
-                  let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
-                  let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
-                return
-            }
+        center.addObserver(forName: AVAudioSession.routeChangeNotification,
+                           object: AVAudioSession.sharedInstance(), queue: .main) { [weak self] notification in
+            guard let self,
+                  let value = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  let reason = AVAudioSession.RouteChangeReason(rawValue: value) else { return }
             switch reason {
-            case .override, .categoryChange:
-                // User toggled speakerphone or audio category was set/updated; ignore to prevent tearing down the audio engine.
-                return
             case .oldDeviceUnavailable, .newDeviceAvailable, .routeConfigurationChange:
-                self.requestRecovery("Ses yolu değişti")
+                self.requestRecovery("audio route changed")
             default:
+                // Speaker toggles and category updates do not need a rebuilt graph.
                 break
             }
         }
-        NotificationCenter.default.addObserver(
-            forName: AVAudioSession.interruptionNotification,
-            object: AVAudioSession.sharedInstance(),
-            queue: .main
-        ) { [weak self] notification in
-            guard let self else { return }
-            guard let userInfo = notification.userInfo,
-                  let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
-                  let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
-                return
-            }
+        center.addObserver(forName: AVAudioSession.interruptionNotification,
+                           object: AVAudioSession.sharedInstance(), queue: .main) { [weak self] notification in
+            guard let self,
+                  let value = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: value) else { return }
             switch type {
             case .began:
                 self.isInterrupted = true
-                self.report("Ses kesintisi başladı")
                 if self.running {
                     self.player.pause()
                     self.engine.pause()
                 }
             case .ended:
                 self.isInterrupted = false
-                self.report("Ses kesintisi bitti")
-                self.requestRecovery("Ses kesintisi bitti")
+                self.requestRecovery("interruption ended")
             @unknown default:
                 break
             }
@@ -99,27 +90,19 @@ final class AudioEngine {
         isSessionPrepared = false
     }
 
-    /// Ask while the app is open so a first incoming call never has to show a
-    /// recording permission prompt over the locked CallKit screen.
+    /// Asked while the app is open, so a first call never needs a prompt over the lock screen.
     func requestMicrophonePermission() {
         let session = AVAudioSession.sharedInstance()
-        switch session.recordPermission {
-        case .undetermined:
-            session.requestRecordPermission { [weak self] granted in
-                if !granted {
-                    self?.report("iPhone mikrofon izni kapalı. Ayarlar'dan aç.")
-                }
-            }
-        case .denied:
-            report("iPhone mikrofon izni kapalı. Ayarlar'dan aç.")
-        case .granted:
-            break
-        @unknown default:
-            break
+        if session.recordPermission == .undetermined {
+            session.requestRecordPermission { _ in }
         }
     }
 
-    /// CallKit activates the audio session. Configure its policy before reporting a call.
+    var microphoneAllowed: Bool {
+        AVAudioSession.sharedInstance().recordPermission == .granted
+    }
+
+    /// CallKit activates the audio session; its policy is set before a call is reported.
     func prepareSession() {
         guard !running else { return }
         do {
@@ -129,76 +112,54 @@ final class AudioEngine {
             try AVAudioSession.sharedInstance().setPreferredIOBufferDuration(0.02)
             isSessionPrepared = true
         } catch {
-            report("iPhone ses ayarı başarısız: \(error.localizedDescription)")
+            log("Audio session setup failed: \(error.localizedDescription)")
         }
     }
 
-    /// Enables or disables speakerphone route without altering Bluetooth availability.
     @discardableResult
     func setSpeakerEnabled(_ enabled: Bool) -> Bool {
-        guard running else {
-            report("Önce görüşme sesi bağlansın")
-            return false
-        }
         do {
             try AVAudioSession.sharedInstance().overrideOutputAudioPort(enabled ? .speaker : .none)
             isSpeakerEnabled = enabled
             return true
         } catch {
-            report("Hoparlör geçişi başarısız: \(error.localizedDescription)")
+            log("Speaker switch failed: \(error.localizedDescription)")
             return false
         }
     }
 
-    /// Called only after CXProviderDelegate.didActivate and Redmi's audio_ready response.
-    func start(host: String, port: UInt16, session: UInt32) {
+    /// Called after CallKit activated the audio session and the Redmi answered audio_start.
+    func start(host: String, port: UInt16, session: UInt32, key: Data) {
         stop(preservingControls: true)
-        guard AVAudioSession.sharedInstance().recordPermission == .granted else {
-            report("iPhone mikrofon izni gerekli. Uygulamayı açıp izin ver.")
+        guard microphoneAllowed else {
+            log("Microphone permission missing")
             return
         }
-        guard !host.isEmpty, session != 0, let endpointPort = NWEndpoint.Port(rawValue: port) else {
-            report("Görüşme sesi: geçersiz bağlantı")
+        guard !host.isEmpty, session != 0, key.count == BridgeCrypto.keyBytes,
+              let endpointPort = NWEndpoint.Port(rawValue: port) else {
+            log("Invalid audio endpoint")
             return
         }
-
         do {
             let input = engine.inputNode
-            do {
-                try input.setVoiceProcessingEnabled(true)
-            } catch {
-                report("Voice processing açma başarısız: \(error.localizedDescription)")
-            }
+            try? input.setVoiceProcessingEnabled(true)
             let inputFormat = input.outputFormat(forBus: 0)
             guard inputFormat.sampleRate > 0,
-                  let convertedFormat = AVAudioFormat(
-                    commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
-                    channels: 1, interleaved: false
-                  ),
-                  let converter = AVAudioConverter(from: inputFormat, to: convertedFormat),
-                  let playbackFormat = AVAudioFormat(
-                    commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
-                    channels: 1, interleaved: false
-                  ) else {
-                report("Görüşme sesi: ses biçimi açılamadı")
+                  let monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
+                                                 channels: 1, interleaved: false),
+                  let converter = AVAudioConverter(from: inputFormat, to: monoFormat) else {
+                log("Audio format unavailable")
                 return
             }
+            if inputFormat.channelCount > 1 { converter.channelMap = [0 as NSNumber] }
+            engine.connect(player, to: engine.mainMixerNode, format: monoFormat)
 
-            if inputFormat.channelCount > 1 {
-                converter.channelMap = [0 as NSNumber]
-            }
-
-            engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
-            var pendingSamples: [Int16] = []
+            var pending: [Int16] = []
             let tapFrames = AVAudioFrameCount(max(256, Int(inputFormat.sampleRate / 50)))
             input.installTap(onBus: 0, bufferSize: tapFrames, format: inputFormat) { [weak self] buffer, _ in
                 guard let self else { return }
-                let capacity = AVAudioFrameCount(
-                    max(1, Int(ceil(Double(buffer.frameLength) * self.sampleRate / inputFormat.sampleRate)) + 32)
-                )
-                guard let converted = AVAudioPCMBuffer(pcmFormat: convertedFormat, frameCapacity: capacity) else {
-                    return
-                }
+                let capacity = AVAudioFrameCount(Int(ceil(Double(buffer.frameLength) * self.sampleRate / inputFormat.sampleRate)) + 32)
+                guard let converted = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: capacity) else { return }
                 var fed = false
                 var conversionError: NSError?
                 _ = converter.convert(to: converted, error: &conversionError) { _, status in
@@ -210,17 +171,14 @@ final class AudioEngine {
                     status.pointee = .haveData
                     return buffer
                 }
-                guard conversionError == nil,
-                      converted.frameLength > 0,
+                guard conversionError == nil, converted.frameLength > 0,
                       let channel = converted.floatChannelData?[0] else { return }
-
                 for index in 0..<Int(converted.frameLength) {
-                    let value = max(-1.0, min(1.0, channel[index]))
-                    pendingSamples.append(Int16(value * 32767.0))
+                    pending.append(Int16(max(-1, min(1, channel[index])) * 32767))
                 }
-                while pendingSamples.count >= self.frameSamples {
-                    let frame = Array(pendingSamples.prefix(self.frameSamples))
-                    pendingSamples.removeFirst(self.frameSamples)
+                while pending.count >= self.frameSamples {
+                    let frame = Array(pending.prefix(self.frameSamples))
+                    pending.removeFirst(self.frameSamples)
                     self.networkQueue.async { [weak self] in self?.sendPcm(frame) }
                 }
             }
@@ -229,61 +187,57 @@ final class AudioEngine {
             try engine.start()
             player.play()
             running = true
-            if isSpeakerEnabled {
-                try AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker)
-            }
-
-            networkQueue.async { [weak self] in
-                guard let self else { return }
-                self.sessionId = session
-                self.sequence = 0
-                self.playbackPrimed = false
-                self.playbackQueue.removeAll()
-                self.queuedBuffers = 0
-                self.lastDownlink = nil
-                self.lastPcmSentAt = Date()
-                self.recoveryRequested = false
-                self.pcmLevelFrames = 0
-                self.pcmSumSquares = 0.0
-
-                let socket = NWConnection(host: NWEndpoint.Host(host), port: endpointPort, using: .udp)
-                self.connection = socket
-                socket.stateUpdateHandler = { [weak self, weak socket] state in
-                    guard let self, let socket, self.connection === socket else { return }
-                    switch state {
-                    case .ready:
-                        self.report("iPhone görüşme sesi bağlanıyor")
-                        self.sendKeepalive()
-                        self.receive(on: socket)
-                    case .failed(let error):
-                        self.report("Görüşme ses bağlantısı koptu: \(error.localizedDescription)")
-                    default:
-                        break
-                    }
-                }
-                socket.start(queue: self.networkQueue)
-
-                let timer = DispatchSource.makeTimerSource(queue: self.networkQueue)
-                timer.schedule(deadline: .now() + 1, repeating: 1)
-                timer.setEventHandler { [weak self] in
-                    guard let self else { return }
-                    self.sendKeepalive()
-                    guard !self.isInterrupted else { return }
-                    if let last = self.lastPcmSentAt,
-                       Date().timeIntervalSince(last) > 3,
-                       !self.recoveryRequested {
-                        self.recoveryRequested = true
-                        DispatchQueue.main.async { [weak self] in
-                            self?.requestRecovery("iPhone mikrofon akışı durdu")
-                        }
-                    }
-                }
-                self.heartbeat = timer
-                timer.resume()
-            }
+            if isSpeakerEnabled { try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker) }
         } catch {
-            report("iPhone görüşme sesi açılamadı: \(error.localizedDescription)")
+            log("Audio engine start failed: \(error.localizedDescription)")
             stop()
+            return
+        }
+
+        networkQueue.async { [weak self] in
+            guard let self else { return }
+            if self.lastSession != session || self.lastKey != key {
+                self.txCounter = 0
+                self.rxLastCounter = 0
+            }
+            self.lastSession = session
+            self.lastKey = key
+            self.sealer = MediaSealer(key: key, session: session)
+            self.playbackPrimed = false
+            self.playbackQueue.removeAll()
+            self.queuedBuffers = 0
+            self.lastDownlink = nil
+            self.lastPcmSentAt = Date()
+            self.recoveryRequested = false
+
+            let socket = NWConnection(host: NWEndpoint.Host(host), port: endpointPort, using: .udp)
+            self.connection = socket
+            socket.stateUpdateHandler = { [weak self, weak socket] state in
+                guard let self, let socket, self.connection === socket else { return }
+                switch state {
+                case .ready:
+                    self.sendPacket(type: 0, pcm: Data())
+                    self.receive(on: socket)
+                case .failed(let error):
+                    self.log("Audio socket failed: \(error.localizedDescription)")
+                default:
+                    break
+                }
+            }
+            socket.start(queue: self.networkQueue)
+
+            let timer = DispatchSource.makeTimerSource(queue: self.networkQueue)
+            timer.schedule(deadline: .now() + 1, repeating: 1)
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                self.sendPacket(type: 0, pcm: Data())
+                if let last = self.lastPcmSentAt, Date().timeIntervalSince(last) > 3, !self.recoveryRequested {
+                    self.recoveryRequested = true
+                    DispatchQueue.main.async { [weak self] in self?.requestRecovery("microphone stream stopped") }
+                }
+            }
+            self.heartbeat = timer
+            timer.resume()
         }
     }
 
@@ -309,113 +263,88 @@ final class AudioEngine {
             self.heartbeat = nil
             self.connection?.cancel()
             self.connection = nil
-            self.sessionId = 0
+            self.sealer = nil
             self.playbackQueue.removeAll()
             self.playbackPrimed = false
             self.lastPcmSentAt = nil
-            self.recoveryRequested = false
-            self.pcmLevelFrames = 0
-            self.pcmSumSquares = 0.0
+            self.lastDownlink = nil
         }
     }
 
     /// A route switch can invalidate the input tap without ending the CallKit call.
-    /// Rebuild the graph on the main queue and keep the selected audio controls.
     private func requestRecovery(_ reason: String) {
         guard running, !isInterrupted else { return }
         let now = Date()
         guard now.timeIntervalSince(lastRecoveryRequest) > 1.5 else { return }
         lastRecoveryRequest = now
-        report("\(reason); ses yeniden bağlanıyor")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.onNeedsRestart?()
-        }
+        log("Rebuilding call audio: \(reason)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.onNeedsRestart?() }
     }
 
-    private func sendKeepalive() {
-        sendPacket(type: 0, pcm: Data())
-    }
+    // MARK: - networkQueue
 
     private func sendPcm(_ samples: [Int16]) {
-        guard sessionId != 0 else { return }
+        guard sealer != nil else { return }
         var pcm = Data(capacity: samples.count * 2)
+        let muted = isMuted
         for sample in samples {
-            let bits = UInt16(bitPattern: isMuted ? 0 : sample)
+            // Muted frames keep flowing as silence so the Redmi still sees a live iPhone.
+            let bits = UInt16(bitPattern: muted ? 0 : sample)
             pcm.append(UInt8(truncatingIfNeeded: bits))
             pcm.append(UInt8(truncatingIfNeeded: bits >> 8))
-            let s = Double(sample)
-            pcmSumSquares += s * s
-        }
-        pcmLevelFrames += 1
-        if pcmLevelFrames == 250 {
-            let rms = sqrt(pcmSumSquares / Double(pcmLevelFrames * frameSamples))
-            report("Microphone RMS over 5s: \(String(format: "%.1f", rms))")
-            pcmLevelFrames = 0
-            pcmSumSquares = 0.0
         }
         sendPacket(type: 1, pcm: pcm)
         lastPcmSentAt = Date()
     }
 
     private func sendPacket(type: UInt8, pcm: Data) {
-        guard sessionId != 0, let socket = connection else { return }
-        var packet = Data(capacity: 8 + pcm.count)
-        packet.append(UInt8(truncatingIfNeeded: sessionId >> 24))
-        packet.append(UInt8(truncatingIfNeeded: sessionId >> 16))
-        packet.append(UInt8(truncatingIfNeeded: sessionId >> 8))
-        packet.append(UInt8(truncatingIfNeeded: sessionId))
-        packet.append(UInt8(truncatingIfNeeded: sequence >> 8))
-        packet.append(UInt8(truncatingIfNeeded: sequence))
-        packet.append(type)
-        packet.append(0)
-        packet.append(pcm)
-        sequence &+= 1
+        guard let sealer, let socket = connection else { return }
+        txCounter &+= 1
+        let hearing = lastDownlink.map { Date().timeIntervalSince($0) < 0.5 } ?? false
+        guard let packet = sealer.seal(type: type, flags: hearing ? MediaSealer.flagHearing : 0,
+                                       counter: txCounter, payload: pcm) else { return }
         socket.send(content: packet, completion: .contentProcessed { _ in })
     }
 
     private func receive(on socket: NWConnection) {
         socket.receiveMessage { [weak self, weak socket] data, _, _, error in
             guard let self, let socket, self.connection === socket else { return }
-            if let data, data.count >= 8 {
-                let bytes = [UInt8](data)
-                let receivedSession = (UInt32(bytes[0]) << 24) | (UInt32(bytes[1]) << 16) |
-                    (UInt32(bytes[2]) << 8) | UInt32(bytes[3])
-                if receivedSession == self.sessionId && bytes[6] == 1 && (data.count - 8) % 2 == 0 {
-                    let now = Date()
-                    if let last = self.lastDownlink, now.timeIntervalSince(last) > 0.5 {
-                        self.playbackQueue.removeAll()
-                        self.playbackPrimed = false
-                    }
-                    self.lastDownlink = now
-                    self.playbackQueue.append(data.dropFirst(8))
-                    if !self.playbackPrimed && self.playbackQueue.count >= 3 {
-                        self.playbackPrimed = true
-                        self.report("Görüşme sesi iPhone'a ulaşıyor")
-                    }
-                    if self.playbackPrimed {
-                        while !self.playbackQueue.isEmpty {
-                            self.schedulePlayback(self.playbackQueue.removeFirst())
-                        }
-                    }
+            if let data, let sealer = self.sealer, let opened = sealer.open(data), opened.counter > self.rxLastCounter {
+                self.rxLastCounter = opened.counter
+                if opened.type == 1, !opened.payload.isEmpty, opened.payload.count % 2 == 0 {
+                    self.enqueuePlayback(opened.payload)
                 }
             }
             if error == nil { self.receive(on: socket) }
         }
     }
 
+    private func enqueuePlayback(_ pcm: Data) {
+        let now = Date()
+        if let last = lastDownlink, now.timeIntervalSince(last) > 0.5 {
+            playbackQueue.removeAll()
+            playbackPrimed = false
+        }
+        lastDownlink = now
+        playbackQueue.append(pcm)
+        if !playbackPrimed && playbackQueue.count >= 3 { playbackPrimed = true }
+        if playbackPrimed {
+            while !playbackQueue.isEmpty { schedulePlayback(playbackQueue.removeFirst()) }
+        }
+    }
+
     private func schedulePlayback(_ pcm: Data) {
         guard queuedBuffers < 12,
-              let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                         sampleRate: sampleRate, channels: 1, interleaved: false),
-              let buffer = AVAudioPCMBuffer(pcmFormat: format,
-                                            frameCapacity: AVAudioFrameCount(pcm.count / 2)),
+              let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
+                                         channels: 1, interleaved: false),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(pcm.count / 2)),
               let channel = buffer.floatChannelData?[0] else { return }
         let bytes = [UInt8](pcm)
         let count = bytes.count / 2
         buffer.frameLength = AVAudioFrameCount(count)
         for index in 0..<count {
             let bits = UInt16(bytes[index * 2]) | (UInt16(bytes[index * 2 + 1]) << 8)
-            channel[index] = Float(Int16(bitPattern: bits)) / 32768.0
+            channel[index] = Float(Int16(bitPattern: bits)) / 32768
         }
         queuedBuffers += 1
         player.scheduleBuffer(buffer) { [weak self] in
@@ -426,7 +355,7 @@ final class AudioEngine {
         }
     }
 
-    private func report(_ message: String) {
-        DispatchQueue.main.async { [weak self] in self?.onStatus?(message) }
+    private func log(_ message: String) {
+        DispatchQueue.main.async { [weak self] in self?.onLog?(message) }
     }
 }

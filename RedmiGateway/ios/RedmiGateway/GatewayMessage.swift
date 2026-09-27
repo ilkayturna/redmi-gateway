@@ -1,22 +1,48 @@
 import Foundation
 
-// MARK: - Incoming Messages (From Redmi Android Gateway)
+// Messages from the Redmi (protocol 2, docs/PROTOCOL.md). Outgoing commands are small
+// dictionaries built in GatewayConnection.
 
-public struct HelloMessage: Codable {
-    public let type: String
-    public let device: String
-    public let protocolVersion: Int?
+/// This iPhone build speaks protocol 2 and nothing older.
+enum BridgeProtocol {
+    static let version = 2
+}
+
+enum ProtocolCompatibility: Equatable {
+    case supported
+    /// The Redmi is newer but still accepts this iPhone build.
+    case degraded
+    case incompatible(String)
+}
+
+struct HelloMessage: Decodable {
+    let device: String?
+    let protocolVersion: Int?
+    let minProtocol: Int?
+    let gatewayId: String?
+    let nonce: String?
+    let paired: Bool?
+    let appVersion: String?
 
     enum CodingKeys: String, CodingKey {
-        case type, device
+        case device, minProtocol, gatewayId, nonce, paired, appVersion
         case protocolVersion = "protocol"
     }
 }
 
-public struct AuthResultMessage: Codable {
-    public let type: String
-    public let success: Bool
-    public let message: String?
+struct PairResultMessage: Decodable {
+    let success: Bool
+    let code: String?
+    let key: String?
+    let gatewayId: String?
+    let gatewayProof: String?
+}
+
+struct AuthResultMessage: Decodable {
+    let success: Bool
+    let code: String?
+    let message: String?
+    let gatewayProof: String?
 }
 
 public struct CallEventMessage: Codable {
@@ -24,159 +50,95 @@ public struct CallEventMessage: Codable {
     public let state: String
     public let number: String?
     public let callId: String?
-}
+    public let direction: String?
 
-public struct ErrorMessage: Codable {
-    public let type: String
-    public let message: String
-}
-
-public struct AckMessage: Codable {
-    public let type: String
-    public let action: String
-    public let success: Bool
-}
-
-public struct AudioReadyMessage: Codable {
-    public let type: String
-    public let session: UInt32
-    public let port: UInt16
-}
-
-public struct AudioStateMessage: Codable {
-    public let type: String
-    public let running: Bool
-    public let detail: String
-}
-
-public struct StateCallInfo: Codable {
-    public let callId: String?
-    public let number: String?
-    public let state: String
-}
-
-public struct StateResponseMessage: Codable {
-    public let type: String
-    public let call: StateCallInfo?
-}
-
-public struct SmsReceivedMessage: Codable {
-    public let type: String
-    public let id: Int64?
-    public let sender: String
-    public let message: String
-    public let timestamp: Int64
-}
-
-public struct SmsHistoryItem: Codable {
-    public let id: Int64
-    public let sender: String
-    public let message: String
-    public let timestamp: Int64
-}
-
-public struct SmsHistoryResponse: Codable {
-    public let type: String
-    public let messages: [SmsHistoryItem]
-    public let hasMore: Bool
-    public let lastId: Int64
-}
-
-public struct SmsSendResultMessage: Codable {
-    public let type: String
-    public let recipient: String
-    public let success: Bool
-    public let error: String?
-}
-
-// MARK: - Outgoing Messages (From iPhone Client to Redmi Gateway)
-
-public struct AuthPayload: Codable {
-    public let type: String = "auth"
-    public let token: String
-    
-    public init(token: String) {
-        self.token = token
-    }
-}
-
-public struct GetStatePayload: Codable {
-    public let type: String = "get_state"
-    
-    public init() {}
-}
-
-public struct GetSmsHistoryPayload: Codable {
-    public let type: String = "get_sms_history"
-    public let afterId: Int64
-
-    public init(afterId: Int64) {
-        self.afterId = afterId
-    }
-}
-
-public struct AnswerPayload: Codable {
-    public let type: String = "answer"
-    public let callId: String
-    
-    public init(callId: String) {
-        self.callId = callId
-    }
-}
-
-public struct RejectPayload: Codable {
-    public let type: String = "reject"
-    public let callId: String
-    
-    public init(callId: String) {
-        self.callId = callId
-    }
-}
-
-public struct HangupPayload: Codable {
-    public let type: String = "hangup"
-    public let callId: String
-    
-    public init(callId: String) {
-        self.callId = callId
-    }
-}
-
-public struct DialPayload: Codable {
-    public let type: String = "dial"
-    public let number: String
-    
-    public init(number: String) {
+    public init(type: String = "call", state: String, number: String?, callId: String?, direction: String? = nil) {
+        self.type = type
+        self.state = state
         self.number = number
-    }
-}
-
-public struct AudioStartPayload: Codable {
-    public let type = "audio_start"
-}
-
-public struct AudioStopPayload: Codable {
-    public let type = "audio_stop"
-}
-
-public struct SendSmsPayload: Codable {
-    public let type: String = "send_sms"
-    public let recipient: String
-    public let message: String
-    
-    public init(recipient: String, message: String) {
-        self.recipient = recipient
-        self.message = message
-    }
-}
-
-public struct DtmfPayload: Codable {
-    public let type: String = "dtmf"
-    public let digit: String
-    public let callId: String?
-
-    public init(digit: String, callId: String? = nil) {
-        self.digit = digit
         self.callId = callId
+        self.direction = direction
     }
+}
+
+struct ErrorMessage: Decodable {
+    let code: String?
+    let message: String?
+}
+
+struct AckMessage: Decodable {
+    let action: String
+    let success: Bool
+}
+
+struct AudioReadyMessage: Decodable {
+    let session: UInt32
+    let port: UInt16
+    let sealed: Bool?
+}
+
+struct AudioStateMessage: Decodable {
+    let running: Bool
+    let owner: String?
+    let detail: String
+}
+
+struct StateCallInfo: Decodable {
+    let callId: String?
+    let number: String?
+    let state: String
+    let direction: String?
+}
+
+struct StateResponseMessage: Decodable {
+    let call: StateCallInfo?
+}
+
+/// One row of the Redmi's call journal (a mirror of its CallLog).
+struct CallLogEntry: Decodable {
+    let seq: Int64
+    let id: Int64
+    let number: String
+    let type: String
+    let date: Int64
+    let duration: Int64
+    let answeredOn: String?
+}
+
+/// One row of the Redmi's SMS journal; a message changing box or read state arrives again.
+struct SmsEntry: Decodable {
+    let seq: Int64
+    let id: Int64
+    let address: String
+    let body: String
+    let date: Int64
+    let box: String
+    let read: Bool
+}
+
+struct SyncCallsMessage: Decodable {
+    let items: [CallLogEntry]
+    let hasMore: Bool
+    let lastSeq: Int64
+}
+
+struct SyncSmsMessage: Decodable {
+    let items: [SmsEntry]
+    let hasMore: Bool
+    let lastSeq: Int64
+}
+
+struct CallLogPush: Decodable {
+    let item: CallLogEntry
+}
+
+struct SmsPush: Decodable {
+    let item: SmsEntry
+}
+
+struct SmsSendResultMessage: Decodable {
+    let recipient: String?
+    let success: Bool
+    let requestId: String?
+    let error: String?
 }

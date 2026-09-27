@@ -21,6 +21,10 @@
 		1012 /* PhoneContactPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2013 /* PhoneContactPicker.swift */; };
 		1013 /* RedmiGatewayBLEConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2014 /* RedmiGatewayBLEConstants.swift */; };
 		1014 /* BLECentralManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2015 /* BLECentralManager.swift */; };
+		1015 /* BridgeCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2016 /* BridgeCrypto.swift */; };
+		1016 /* HistoryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2017 /* HistoryStore.swift */; };
+		1017 /* CallScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2018 /* CallScreen.swift */; };
+		1018 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2019 /* SettingsView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -40,6 +44,10 @@
 		2013 /* PhoneContactPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneContactPicker.swift; sourceTree = "<group>"; };
 		2014 /* RedmiGatewayBLEConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RedmiGatewayBLEConstants.swift; sourceTree = "<group>"; };
 		2015 /* BLECentralManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLECentralManager.swift; sourceTree = "<group>"; };
+		2016 /* BridgeCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeCrypto.swift; sourceTree = "<group>"; };
+		2017 /* HistoryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryStore.swift; sourceTree = "<group>"; };
+		2018 /* CallScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallScreen.swift; sourceTree = "<group>"; };
+		2019 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -79,6 +87,10 @@
 				2013 /* PhoneContactPicker.swift */,
 				2014 /* RedmiGatewayBLEConstants.swift */,
 				2015 /* BLECentralManager.swift */,
+				2016 /* BridgeCrypto.swift */,
+				2017 /* HistoryStore.swift */,
+				2018 /* CallScreen.swift */,
+				2019 /* SettingsView.swift */,
 				2009 /* Info.plist */,
 			);
 			path = RedmiGateway;
@@ -181,6 +193,10 @@
 				1012 /* PhoneContactPicker.swift in Sources */,
 				1013 /* RedmiGatewayBLEConstants.swift in Sources */,
 				1014 /* BLECentralManager.swift in Sources */,
+				1015 /* BridgeCrypto.swift in Sources */,
+				1016 /* HistoryStore.swift in Sources */,
+				1017 /* CallScreen.swift in Sources */,
+				1018 /* SettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -259,7 +275,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ilkay.redmigateway.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -281,7 +297,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.ilkay.redmigateway.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

@@ -15,7 +15,7 @@
     <key>CFBundlePackageType</key>
     <string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>2.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSRequiresIPhoneOS</key>
@@ -32,7 +32,7 @@
     <key>NSLocalNetworkUsageDescription</key>
     <string>Redmi telefonuyla aynı Wi-Fi ağında arama ve SMS bilgilerini eşitlemek için yerel ağ erişimi gerekir.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>Redmi telefonuyla yakınlık algılama ve acil durum çağrı kontrolü için Bluetooth kullanılır.</string>
+    <string>Redmi hattına gelen aramaları iPhone kilitliyken de göstermek ve Redmi'yi hızlı bulmak için Bluetooth kullanılır.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_redmigateway._tcp</string>

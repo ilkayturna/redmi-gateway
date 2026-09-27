@@ -13,37 +13,11 @@ enum RedmiGatewayBLEConstants {
     static let invariantNote = "BLE is strictly presence/bootstrap/control side-channel. NEVER audio media."
 }
 
+/// Plain device-info characteristic: identity and current address only, no call data.
 struct BLEDeviceInfoPayload: Codable {
     let id: String
     let ip: String?
     let port: Int?
     let v: Int?
     let ble: Int?
-}
-
-struct BLEGatewayStatePayload: Codable {
-    let state: String
-    let callId: String?
-    let number: String?
-    let seq: Int64?
-    let ts: Int64?
-}
-
-struct BLECallControlPayload: Codable {
-    let action: String
-    let callId: String
-    let seq: Int64
-}
-
-struct BLECallControlAckPayload: Codable {
-    let ack: String?
-    let callId: String?
-    let seq: Int64?
-    let success: Bool
-    let error: String?
-    let duplicate: Bool?
-}
-
-struct BLEHeartbeatPayload: Codable {
-    let timestamp: Int64
 }
