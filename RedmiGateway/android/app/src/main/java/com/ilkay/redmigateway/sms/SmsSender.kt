@@ -79,7 +79,7 @@ object SmsSender {
             for (index in parts.indices) {
                 val intent = Intent(ACTION_SENT).setPackage(context.packageName).putExtra("requestId", requestId)
                 intents.add(PendingIntent.getBroadcast(
-                    context, requestId * 16 + index, intent,
+                    context, requestId * 64 + index, intent,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 ))
             }

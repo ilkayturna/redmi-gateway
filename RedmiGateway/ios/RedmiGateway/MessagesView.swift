@@ -150,6 +150,8 @@ struct ConversationView: View {
     private static let maxLength = 1600
 
     private var key: String { PhoneIdentity.key(address) }
+    /// Operator and service senders ("TURKCELL") have no number to answer.
+    private var canReply: Bool { address.filter { $0.isNumber }.count >= 3 }
 
     private var messages: [SmsRecord] {
         history.messages.filter { PhoneIdentity.key($0.address) == key }
@@ -181,7 +183,15 @@ struct ConversationView: View {
                 }
             }
             Divider()
-            composer
+            if canReply {
+                composer
+            } else {
+                Text("Bu gönderene yanıt verilemez.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(12)
+            }
         }
         .navigationTitle(directory.displayName(for: address))
         .navigationBarTitleDisplayMode(.inline)
