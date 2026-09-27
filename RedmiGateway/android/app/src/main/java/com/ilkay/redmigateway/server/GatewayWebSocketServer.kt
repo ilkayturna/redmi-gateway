@@ -30,6 +30,7 @@ class GatewayWebSocketServer(
     }
 
     interface ServerListener {
+        fun onServerStarted(port: Int)
         fun onClientCountChanged(authenticatedCount: Int)
         fun onServerError(error: String)
     }
@@ -51,6 +52,7 @@ class GatewayWebSocketServer(
         CallAudioRelay.addListener(this)
         SmsReceiver.webSocketServer = this
         CallManager.log("WebSocket server listening on 0.0.0.0:$port")
+        serverListener?.onServerStarted(port)
     }
 
     override fun onOpen(conn: WebSocket, handshake: ClientHandshake?) {

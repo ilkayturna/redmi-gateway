@@ -35,7 +35,9 @@ object CallManager {
     private var activeCallCallback: Call.Callback? = null
 
     fun addListener(listener: CallListener) {
-        listeners.add(listener)
+        if (!listeners.contains(listener)) {
+            listeners.add(listener)
+        }
         // Immediately notify current state
         listener.onCallStateChanged(currentCallId ?: "none", currentCallState, currentPhoneNumber)
     }
@@ -172,11 +174,14 @@ object CallManager {
 
     fun hangup(expectedCallId: String? = null): Boolean {
         val call = activeCall
+        val matchesCallId = expectedCallId == null ||
+            expectedCallId == currentCallId ||
+            (expectedCallId.startsWith("outgoing_") && call != null)
         if (call != null &&
-            (expectedCallId == null || expectedCallId == currentCallId) &&
+            matchesCallId &&
             call.state != Call.STATE_DISCONNECTED &&
             call.state != Call.STATE_DISCONNECTING) {
-            log("Executing HANGUP / DISCONNECT on call: $currentCallId")
+            log("Executing HANGUP / DISCONNECT on call: $currentCallId (expected: $expectedCallId)")
             return try {
                 call.disconnect()
                 true

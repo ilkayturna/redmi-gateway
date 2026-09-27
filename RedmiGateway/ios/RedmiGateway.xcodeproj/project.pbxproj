@@ -19,6 +19,8 @@
 		1010 /* MessagesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2011 /* MessagesView.swift */; };
 		1011 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2012 /* Assets.xcassets */; };
 		1012 /* PhoneContactPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2013 /* PhoneContactPicker.swift */; };
+		1013 /* RedmiGatewayBLEConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2014 /* RedmiGatewayBLEConstants.swift */; };
+		1014 /* BLECentralManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2015 /* BLECentralManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -36,6 +38,8 @@
 		2011 /* MessagesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagesView.swift; sourceTree = "<group>"; };
 		2012 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2013 /* PhoneContactPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneContactPicker.swift; sourceTree = "<group>"; };
+		2014 /* RedmiGatewayBLEConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RedmiGatewayBLEConstants.swift; sourceTree = "<group>"; };
+		2015 /* BLECentralManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLECentralManager.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -73,6 +77,8 @@
 				2011 /* MessagesView.swift */,
 				2012 /* Assets.xcassets */,
 				2013 /* PhoneContactPicker.swift */,
+				2014 /* RedmiGatewayBLEConstants.swift */,
+				2015 /* BLECentralManager.swift */,
 				2009 /* Info.plist */,
 			);
 			path = RedmiGateway;
@@ -173,6 +179,8 @@
 				1009 /* AudioEngine.swift in Sources */,
 				1010 /* MessagesView.swift in Sources */,
 				1012 /* PhoneContactPicker.swift in Sources */,
+				1013 /* RedmiGatewayBLEConstants.swift in Sources */,
+				1014 /* BLECentralManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

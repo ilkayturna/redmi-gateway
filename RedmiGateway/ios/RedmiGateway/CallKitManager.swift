@@ -108,8 +108,11 @@ public class CallKitManager: NSObject, CXProviderDelegate {
             cleanupCall(uuid: uuid, rawId: rawId)
             
         case "dialing", "connecting":
-            if outgoingUuids.contains(uuid) && previousState != "dialing" && previousState != "connecting" {
-                provider.reportOutgoingCall(with: uuid, startedConnectingAt: Date())
+            if outgoingUuids.contains(uuid) {
+                if previousState != "dialing" && previousState != "connecting" {
+                    provider.reportOutgoingCall(with: uuid, startedConnectingAt: Date())
+                }
+                maybeStartAudio(for: uuid)
             }
             
         default:
@@ -157,8 +160,17 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         if audioCallUuid == uuid { stopAudio() }
     }
 
+    private func isAudioEligible(for uuid: UUID) -> Bool {
+        let state = callStates[uuid]
+        if state == "active" { return true }
+        if outgoingUuids.contains(uuid) && (state == "dialing" || state == "connecting") {
+            return true
+        }
+        return false
+    }
+
     private func maybeStartAudio(for uuid: UUID) {
-        guard callStates[uuid] == "active",
+        guard isAudioEligible(for: uuid),
               GatewayConnection.shared.state == .authenticated else { return }
         audioCallUuid = uuid
         if !audioStartRequested {
@@ -175,7 +187,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         let endpoint = (session: session, port: port)
         pendingAudioEndpoint = endpoint
         GatewayConnection.shared.log("Audio endpoint ready: session=\(session), port=\(port)")
-        if callKitAudioActivated, let uuid = audioCallUuid, callStates[uuid] == "active" {
+        if callKitAudioActivated, let uuid = audioCallUuid, isAudioEligible(for: uuid) {
             startAudioEngine(endpoint: endpoint)
         }
     }
@@ -183,7 +195,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     public func recoverCallAudio() {
         guard callKitAudioActivated,
               let uuid = audioCallUuid,
-              callStates[uuid] == "active",
+              isAudioEligible(for: uuid),
               let endpoint = pendingAudioEndpoint,
               GatewayConnection.shared.state == .authenticated else { return }
         GatewayConnection.shared.log("Rebuilding iPhone call audio after route or microphone interruption")
@@ -356,6 +368,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         GatewayConnection.shared.log("CallKit provider reset")
         stopAudio()
         callKitAudioActivated = false
+        AudioEngine.shared.resetSessionPrepared()
         callIdToUuidMap.removeAll()
         uuidToCallIdMap.removeAll()
         callStates.removeAll()
@@ -369,7 +382,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     public func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         let uuid = action.callUUID
         let rawId = uuidToCallIdMap[uuid] ?? ""
-        guard GatewayConnection.shared.state == .authenticated,
+        guard (GatewayConnection.shared.state == .authenticated || BLECentralManager.shared.isConnected),
               !rawId.isEmpty,
               callStates[uuid] == "ringing" else {
             GatewayConnection.shared.lastCallError = "Redmi bağlantısı yok; arama Redmi'de çalmaya devam ediyor."
@@ -395,7 +408,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         
         GatewayConnection.shared.log("CallKit user ENDED call (state=\(currentState), uuid=\(uuid.uuidString.prefix(8)), callId=\(rawId))")
         
-        if GatewayConnection.shared.state == .authenticated && !rawId.isEmpty {
+        if (GatewayConnection.shared.state == .authenticated || BLECentralManager.shared.isConnected) && !rawId.isEmpty {
             if currentState == "ringing" {
                 // Reject incoming call
                 GatewayConnection.shared.sendReject(callId: rawId)
@@ -436,12 +449,14 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     
     public func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
         callKitAudioActivated = true
-        AudioEngine.shared.prepareSession()
+        if !AudioEngine.shared.isSessionPrepared && !AudioEngine.shared.isRunning {
+            AudioEngine.shared.prepareSession()
+        }
         GatewayConnection.shared.log("CallKit audio session activated")
         for uuid in answeredOnIPhone.union(outgoingUuids) {
             maybeStartAudio(for: uuid)
         }
-        if let endpoint = pendingAudioEndpoint, let uuid = audioCallUuid, callStates[uuid] == "active" {
+        if let endpoint = pendingAudioEndpoint, let uuid = audioCallUuid, isAudioEligible(for: uuid) {
             startAudioEngine(endpoint: endpoint)
         }
     }

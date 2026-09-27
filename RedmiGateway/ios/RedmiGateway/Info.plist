@@ -31,6 +31,8 @@
     <string>Rehberindeki kişileri uygulama içinde göstermek, aramak ve SMS konuşmalarını adlarıyla eşleştirmek için kullanılır.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Redmi telefonuyla aynı Wi-Fi ağında arama ve SMS bilgilerini eşitlemek için yerel ağ erişimi gerekir.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Redmi telefonuyla yakınlık algılama ve acil durum çağrı kontrolü için Bluetooth kullanılır.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_redmigateway._tcp</string>
@@ -39,6 +41,7 @@
     <array>
         <string>voip</string>
         <string>audio</string>
+        <string>bluetooth-central</string>
     </array>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>

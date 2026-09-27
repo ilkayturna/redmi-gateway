@@ -25,6 +25,20 @@ class RedmiGatewayApp : Application() {
             return token
         }
 
+        private const val KEY_DEVICE_ID = "opaque_device_id"
+
+        fun getOpaqueDeviceId(): String {
+            val prefs = instance.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            var deviceId = prefs.getString(KEY_DEVICE_ID, null)
+            if (deviceId.isNullOrBlank()) {
+                val bytes = ByteArray(4)
+                secureRandom.nextBytes(bytes)
+                deviceId = bytes.joinToString("") { "%02X".format(it) }
+                prefs.edit().putString(KEY_DEVICE_ID, deviceId).apply()
+            }
+            return deviceId
+        }
+
         private fun generateRandomToken(): String {
             val chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // Exclude confusing chars like 0/O, 1/I
             return (1..6)
@@ -36,7 +50,8 @@ class RedmiGatewayApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        // Ensure pairing token is initialized
+        // Ensure pairing token and device ID are initialized
         getPairingToken()
+        getOpaqueDeviceId()
     }
 }

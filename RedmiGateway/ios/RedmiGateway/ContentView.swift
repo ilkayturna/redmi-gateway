@@ -18,6 +18,8 @@ struct ContentView: View {
     @State private var isMuted = false
     @State private var isSpeaker = false
     @State private var showingDtmfSheet = false
+    @StateObject private var bleManager = BLECentralManager.shared
+    @State private var showingDiagnostics = false
 
     // Recents and Favorites simple persistence
     @AppStorage("favorite_numbers") private var favoritesData: String = "[]"
@@ -25,61 +27,65 @@ struct ContentView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            TabView(selection: $selectedTab) {
-                // Tab 0: Favoriler
-                NavigationView {
-                    favoritesView
-                        .navigationTitle("Favoriler")
-                        .toolbar { settingsToolbarItem }
-                }
-                .tabItem {
-                    Label("Favoriler", systemImage: "star.fill")
-                }
-                .tag(0)
+            VStack(spacing: 0) {
+                gatewayStatusBar
 
-                // Tab 1: Son Aramalar
-                NavigationView {
-                    recentsView
-                        .navigationTitle("Son Aramalar")
-                        .toolbar { settingsToolbarItem }
-                }
-                .tabItem {
-                    Label("Son Aramalar", systemImage: "clock.fill")
-                }
-                .tag(1)
+                TabView(selection: $selectedTab) {
+                    // Tab 0: Favoriler
+                    NavigationView {
+                        favoritesView
+                            .navigationTitle("Favoriler")
+                            .toolbar { settingsToolbarItem }
+                    }
+                    .tabItem {
+                        Label("Favoriler", systemImage: "star.fill")
+                    }
+                    .tag(0)
 
-                // Tab 2: Kişiler
-                NavigationView {
-                    contactsView
-                        .navigationTitle("Kişiler")
-                        .toolbar { settingsToolbarItem }
-                }
-                .tabItem {
-                    Label("Kişiler", systemImage: "person.crop.circle.fill")
-                }
-                .tag(2)
+                    // Tab 1: Son Aramalar
+                    NavigationView {
+                        recentsView
+                            .navigationTitle("Son Aramalar")
+                            .toolbar { settingsToolbarItem }
+                    }
+                    .tabItem {
+                        Label("Son Aramalar", systemImage: "clock.fill")
+                    }
+                    .tag(1)
 
-                // Tab 3: Klavye (Keypad)
-                NavigationView {
-                    keypadView
-                        .navigationTitle("Telefon")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar { settingsToolbarItem }
-                }
-                .tabItem {
-                    Label("Klavye", systemImage: "circle.grid.3x3.fill")
-                }
-                .tag(3)
+                    // Tab 2: Kişiler
+                    NavigationView {
+                        contactsView
+                            .navigationTitle("Kişiler")
+                            .toolbar { settingsToolbarItem }
+                    }
+                    .tabItem {
+                        Label("Kişiler", systemImage: "person.crop.circle.fill")
+                    }
+                    .tag(2)
 
-                // Tab 4: Mesajlar
-                NavigationView {
-                    MessagesView(prefilledRecipient: $messageRecipient)
-                        .toolbar { settingsToolbarItem }
+                    // Tab 3: Klavye (Keypad)
+                    NavigationView {
+                        keypadView
+                            .navigationTitle("Telefon")
+                            .navigationBarTitleDisplayMode(.inline)
+                            .toolbar { settingsToolbarItem }
+                    }
+                    .tabItem {
+                        Label("Klavye", systemImage: "circle.grid.3x3.fill")
+                    }
+                    .tag(3)
+
+                    // Tab 4: Mesajlar
+                    NavigationView {
+                        MessagesView(prefilledRecipient: $messageRecipient)
+                            .toolbar { settingsToolbarItem }
+                    }
+                    .tabItem {
+                        Label("Mesajlar", systemImage: "message.fill")
+                    }
+                    .tag(4)
                 }
-                .tabItem {
-                    Label("Mesajlar", systemImage: "message.fill")
-                }
-                .tag(4)
             }
 
             // In-Call HUD Overlay if a call is present
@@ -694,13 +700,29 @@ struct ContentView: View {
     private var settingsSheet: some View {
         NavigationView {
             Form {
-                Section(header: Text("Redmi Bağlantı Bilgisi")) {
+                Section(header: Text("Eşleştirme"),
+                        footer: Text("Redmi ekranındaki eşleştirme kodunu girin. IP adresi girmeye gerek yoktur; Redmi yerel ağda (mDNS) ve Bluetooth ile otomatik olarak bulunur.")) {
+                    TextField("Eşleştirme Kodu", text: $pairingToken)
+                        .autocapitalization(.allCharacters)
+                        .disableAutocorrection(true)
+                }
+
+                Section(header: Text("Bağlantı Durumu")) {
                     HStack {
                         Text("Durum")
                         Spacer()
                         Text(connectionStatus)
                             .foregroundColor(connection.state == .authenticated ? .green : .secondary)
                             .fontWeight(.medium)
+                    }
+                    if !connection.connectedHost.isEmpty {
+                        HStack {
+                            Text("Redmi Adresi")
+                            Spacer()
+                            Text(connection.connectedHost)
+                                .font(.footnote.monospacedDigit())
+                                .foregroundColor(.secondary)
+                        }
                     }
                     HStack {
                         Text("Ses Yönü")
@@ -709,23 +731,17 @@ struct ContentView: View {
                             .font(.footnote)
                             .foregroundColor(.secondary)
                     }
-                }
-
-                Section(header: Text("Ağ ve Eşleştirme"),
-                        footer: Text("Redmi yerel ağda otomatik bulunur. Gerekirse Redmi'nin IP adresini manuel girebilirsiniz.")) {
-                    TextField("Redmi IP Adresi (isteğe bağlı)", text: $gatewayIp)
-                        .keyboardType(.numbersAndPunctuation)
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
-                    TextField("Port", text: $gatewayPort)
-                        .keyboardType(.numberPad)
-                    TextField("Eşleştirme Kodu", text: $pairingToken)
-                        .autocapitalization(.allCharacters)
-                        .disableAutocorrection(true)
+                    HStack {
+                        Text("Bluetooth Eşlikçi")
+                        Spacer()
+                        Text(bleStatusText)
+                            .font(.footnote)
+                            .foregroundColor(bleManager.isConnected ? .blue : .secondary)
+                    }
                 }
 
                 Section {
-                    Button("Kaydet ve Yeniden Bağlan") {
+                    Button(connection.state == .authenticated ? "Yeniden Bağlan" : "Bağlan / Otomatik Bul") {
                         connectGateway()
                         showingSettings = false
                     }
@@ -738,16 +754,19 @@ struct ContentView: View {
                     }
                 }
 
-                if !connection.logs.isEmpty {
-                    Section {
-                        DisclosureGroup("Tanılama") {
-                            ForEach(connection.logs.suffix(8), id: \.self) { log in
-                                Text(log)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                            }
+                Section(header: Text("Gelişmiş")) {
+                    Button {
+                        showingDiagnostics = true
+                    } label: {
+                        HStack {
+                            Label("Tanılama ve Manuel Ayarlar", systemImage: "wrench.and.screwdriver")
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         }
                     }
+                    .foregroundColor(.primary)
                 }
             }
             .navigationTitle("Bağlantı Ayarları")
@@ -757,6 +776,92 @@ struct ContentView: View {
                     Button("Bitti") { showingSettings = false }
                 }
             }
+            .sheet(isPresented: $showingDiagnostics) {
+                DiagnosticsView(
+                    gatewayIp: $gatewayIp,
+                    gatewayPort: $gatewayPort,
+                    pairingToken: $pairingToken
+                )
+            }
+        }
+    }
+
+    private var gatewayStatusBar: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(statusBarColor)
+                .frame(width: 8, height: 8)
+
+            Text(statusBarText)
+                .font(.caption.weight(.medium))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+
+            Spacer()
+
+            if bleManager.isConnected {
+                HStack(spacing: 3) {
+                    Image(systemName: "bolt.horizontal.fill")
+                        .font(.system(size: 8))
+                    Text("BLE")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .foregroundColor(.blue)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.blue.opacity(0.12))
+                .clipShape(Capsule())
+            }
+
+            Button {
+                showingSettings = true
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 6)
+        .background(Color(UIColor.secondarySystemBackground))
+    }
+
+    private var statusBarColor: Color {
+        switch connection.uiStatus {
+        case .connected:
+            return .green
+        case .connecting, .discovered:
+            return .orange
+        case .searching:
+            return .blue
+        case .disconnected:
+            return .gray
+        case .error:
+            return .red
+        }
+    }
+
+    private var statusBarText: String {
+        if connection.state == .authenticated {
+            if let call = connection.currentCall, call.state == .active {
+                return connection.audioStatus
+            }
+            return "Redmi Bağlı"
+        }
+        return connection.uiStatus.displayText
+    }
+
+    private var bleStatusText: String {
+        if bleManager.isConnected {
+            if let devId = bleManager.discoveredDeviceId {
+                return "Bağlı (\(devId))"
+            }
+            return "Bağlı"
+        } else if bleManager.isBluetoothPoweredOn {
+            return "Taranıyor..."
+        } else {
+            return "Kapalı"
         }
     }
 
@@ -838,3 +943,170 @@ struct ContentView: View {
         }
     }
 }
+
+struct DiagnosticsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var connection = GatewayConnection.shared
+    @ObservedObject private var bleManager = BLECentralManager.shared
+
+    @Binding var gatewayIp: String
+    @Binding var gatewayPort: String
+    @Binding var pairingToken: String
+
+    @State private var showingCopiedAlert = false
+
+    var body: some View {
+        NavigationView {
+            List {
+                // 1. Diagnostics Failures & Warnings
+                if let failure = connection.lastDiagnosticFailure {
+                    Section(header: Label("Aktif Uyarı", systemImage: "exclamationmark.triangle.fill").foregroundColor(.red)) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(failure.title)
+                                .font(.headline)
+                                .foregroundColor(.red)
+                            Text(failure.suggestion)
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 4)
+
+                        Button("Uyarıyı Temizle") {
+                            connection.clearDiagnosticFailure()
+                        }
+                        .font(.footnote)
+                    }
+                }
+
+                // 2. Network & Discovery Health Checks
+                Section(header: Text("Sistem Sağlık Kontrolleri")) {
+                    HStack {
+                        Label("Wi-Fi Ağı", systemImage: "wifi")
+                        Spacer()
+                        Text(connection.isWiFiConnected ? "Bağlı" : "Bağlı Değil")
+                            .foregroundColor(connection.isWiFiConnected ? .green : .red)
+                            .font(.footnote.weight(.medium))
+                    }
+
+                    HStack {
+                        Label("mDNS Keşfi", systemImage: "antenna.radiowaves.left.and.right")
+                        Spacer()
+                        Text(connection.discovery.isSearching ? "Aktif Taranıyor" : "Beklemede")
+                            .foregroundColor(connection.discovery.isSearching ? .blue : .secondary)
+                            .font(.footnote)
+                    }
+
+                    HStack {
+                        Label("Bluetooth Donanımı", systemImage: "bolt.horizontal.fill")
+                        Spacer()
+                        Text(bleManager.isBluetoothPoweredOn ? "Açık" : "Kapalı")
+                            .foregroundColor(bleManager.isBluetoothPoweredOn ? .green : .orange)
+                            .font(.footnote)
+                    }
+
+                    HStack {
+                        Label("BLE Eşlikçi Bağlantısı", systemImage: "point.3.filled.connected.trianglepath.dotted")
+                        Spacer()
+                        Text(bleManager.isConnected ? "Bağlı" : "Bağlı Değil")
+                            .foregroundColor(bleManager.isConnected ? .green : .secondary)
+                            .font(.footnote)
+                    }
+
+                    if let devId = bleManager.discoveredDeviceId {
+                        HStack {
+                            Text("Cihaz ID (BLE)")
+                            Spacer()
+                            Text(devId)
+                                .font(.footnote.monospaced())
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    if let rssi = bleManager.lastRssi {
+                        HStack {
+                            Text("BLE Sinyal Gücü (RSSI)")
+                            Spacer()
+                            Text("\(rssi) dBm")
+                                .font(.footnote.monospacedDigit())
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    if let date = bleManager.lastSeenDate {
+                        HStack {
+                            Text("Son BLE Görülme")
+                            Spacer()
+                            Text(date, style: .time)
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    Button("BLE Eşleştirmesini Sıfırla") {
+                        BLECentralManager.shared.clearPairing()
+                        connection.log("BLE eşleştirmesi sıfırlandı.")
+                    }
+                    .foregroundColor(.red)
+                    .font(.footnote)
+                }
+
+                // 3. Manual IP Override
+                Section(header: Text("Manuel IP Geçersiz Kılma"),
+                        footer: Text("Sıfır yapılandırmalı keşif çalışmıyorsa veya statik IP kullanmak istiyorsanız manuel IP ve port belirtebilirsiniz.")) {
+                    TextField("Redmi IP Adresi", text: $gatewayIp)
+                        .keyboardType(.numbersAndPunctuation)
+                        .autocapitalization(.none)
+                        .disableAutocorrection(true)
+                    TextField("Port", text: $gatewayPort)
+                        .keyboardType(.numberPad)
+
+                    Button("Manuel Adresle Bağlan") {
+                        connection.connect(
+                            host: gatewayIp.trimmingCharacters(in: .whitespacesAndNewlines),
+                            port: Int(gatewayPort) ?? 8787,
+                            token: pairingToken.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+                        )
+                        dismiss()
+                    }
+                    .disabled(gatewayIp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pairingToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
+                // 4. Live Diagnostic Logs
+                Section(header: HStack {
+                    Text("Canlı Günlükler (\(connection.logs.count))")
+                    Spacer()
+                    Button("Kopyala") {
+                        UIPasteboard.general.string = connection.logs.joined(separator: "\n")
+                        showingCopiedAlert = true
+                    }
+                    .font(.caption)
+                }) {
+                    if connection.logs.isEmpty {
+                        Text("Henüz günlük kaydı yok.")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                    } else {
+                        ForEach(connection.logs.suffix(25).reversed(), id: \.self) { log in
+                            Text(log)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Tanılama & Manuel Ayarlar")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Kapat") { dismiss() }
+                }
+            }
+            .alert("Kopyalandı", isPresented: $showingCopiedAlert) {
+                Button("Tamam", role: .cancel) {}
+            } message: {
+                Text("Günlük kayıtları panoya kopyalandı.")
+            }
+        }
+    }
+}
+

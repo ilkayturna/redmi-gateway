@@ -30,6 +30,11 @@ final class AudioEngine {
     private var lastPcmSentAt: Date?
     private var recoveryRequested = false
     private var lastRecoveryRequest = Date.distantPast
+    private(set) var isSessionPrepared = false
+    var isRunning: Bool { running }
+    private var isInterrupted = false
+    private var pcmLevelFrames = 0
+    private var pcmSumSquares: Double = 0.0
 
     private init() {
         engine.attach(player)
@@ -44,9 +49,54 @@ final class AudioEngine {
             forName: AVAudioSession.routeChangeNotification,
             object: AVAudioSession.sharedInstance(),
             queue: .main
-        ) { [weak self] _ in
-            self?.requestRecovery("Ses yolu değişti")
+        ) { [weak self] notification in
+            guard let self else { return }
+            guard let userInfo = notification.userInfo,
+                  let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
+                return
+            }
+            switch reason {
+            case .override, .categoryChange:
+                // User toggled speakerphone or audio category was set/updated; ignore to prevent tearing down the audio engine.
+                return
+            case .oldDeviceUnavailable, .newDeviceAvailable, .routeConfigurationChange:
+                self.requestRecovery("Ses yolu değişti")
+            default:
+                break
+            }
         }
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] notification in
+            guard let self else { return }
+            guard let userInfo = notification.userInfo,
+                  let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
+                return
+            }
+            switch type {
+            case .began:
+                self.isInterrupted = true
+                self.report("Ses kesintisi başladı")
+                if self.running {
+                    self.player.pause()
+                    self.engine.pause()
+                }
+            case .ended:
+                self.isInterrupted = false
+                self.report("Ses kesintisi bitti")
+                self.requestRecovery("Ses kesintisi bitti")
+            @unknown default:
+                break
+            }
+        }
+    }
+
+    func resetSessionPrepared() {
+        isSessionPrepared = false
     }
 
     /// Ask while the app is open so a first incoming call never has to show a
@@ -71,11 +121,13 @@ final class AudioEngine {
 
     /// CallKit activates the audio session. Configure its policy before reporting a call.
     func prepareSession() {
+        guard !running else { return }
         do {
             try AVAudioSession.sharedInstance().setCategory(
-                .playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP]
+                .playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .allowBluetoothHFP, .allowBluetoothA2DP]
             )
             try AVAudioSession.sharedInstance().setPreferredIOBufferDuration(0.02)
+            isSessionPrepared = true
         } catch {
             report("iPhone ses ayarı başarısız: \(error.localizedDescription)")
         }
@@ -112,6 +164,11 @@ final class AudioEngine {
 
         do {
             let input = engine.inputNode
+            do {
+                try input.setVoiceProcessingEnabled(true)
+            } catch {
+                report("Voice processing açma başarısız: \(error.localizedDescription)")
+            }
             let inputFormat = input.outputFormat(forBus: 0)
             guard inputFormat.sampleRate > 0,
                   let convertedFormat = AVAudioFormat(
@@ -125,6 +182,10 @@ final class AudioEngine {
                   ) else {
                 report("Görüşme sesi: ses biçimi açılamadı")
                 return
+            }
+
+            if inputFormat.channelCount > 1 {
+                converter.channelMap = [0 as NSNumber]
             }
 
             engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
@@ -182,6 +243,8 @@ final class AudioEngine {
                 self.lastDownlink = nil
                 self.lastPcmSentAt = Date()
                 self.recoveryRequested = false
+                self.pcmLevelFrames = 0
+                self.pcmSumSquares = 0.0
 
                 let socket = NWConnection(host: NWEndpoint.Host(host), port: endpointPort, using: .udp)
                 self.connection = socket
@@ -205,6 +268,7 @@ final class AudioEngine {
                 timer.setEventHandler { [weak self] in
                     guard let self else { return }
                     self.sendKeepalive()
+                    guard !self.isInterrupted else { return }
                     if let last = self.lastPcmSentAt,
                        Date().timeIntervalSince(last) > 3,
                        !self.recoveryRequested {
@@ -229,6 +293,7 @@ final class AudioEngine {
             isSpeakerEnabled = false
             try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.none)
         }
+        isInterrupted = false
         if tapInstalled {
             engine.inputNode.removeTap(onBus: 0)
             tapInstalled = false
@@ -249,13 +314,15 @@ final class AudioEngine {
             self.playbackPrimed = false
             self.lastPcmSentAt = nil
             self.recoveryRequested = false
+            self.pcmLevelFrames = 0
+            self.pcmSumSquares = 0.0
         }
     }
 
     /// A route switch can invalidate the input tap without ending the CallKit call.
     /// Rebuild the graph on the main queue and keep the selected audio controls.
     private func requestRecovery(_ reason: String) {
-        guard running else { return }
+        guard running, !isInterrupted else { return }
         let now = Date()
         guard now.timeIntervalSince(lastRecoveryRequest) > 1.5 else { return }
         lastRecoveryRequest = now
@@ -276,6 +343,15 @@ final class AudioEngine {
             let bits = UInt16(bitPattern: isMuted ? 0 : sample)
             pcm.append(UInt8(truncatingIfNeeded: bits))
             pcm.append(UInt8(truncatingIfNeeded: bits >> 8))
+            let s = Double(sample)
+            pcmSumSquares += s * s
+        }
+        pcmLevelFrames += 1
+        if pcmLevelFrames == 250 {
+            let rms = sqrt(pcmSumSquares / Double(pcmLevelFrames * frameSamples))
+            report("Microphone RMS over 5s: \(String(format: "%.1f", rms))")
+            pcmLevelFrames = 0
+            pcmSumSquares = 0.0
         }
         sendPacket(type: 1, pcm: pcm)
         lastPcmSentAt = Date()
