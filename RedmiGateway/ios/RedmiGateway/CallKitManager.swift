@@ -32,6 +32,7 @@ public class CallKitManager: NSObject, CXProviderDelegate {
     private var audioStartRequested = false
     private var audioCallUuid: UUID?
     private var pendingAudioEndpoint: (session: UInt32, port: UInt16)?
+    private var runningAudioEndpoint: (host: String, session: UInt32, port: UInt16)?
     
     // Set of call UUIDs that have already been reported as incoming to CallKit
     private var reportedIncomingUuids: Set<UUID> = []
@@ -199,19 +200,29 @@ public class CallKitManager: NSObject, CXProviderDelegate {
               let endpoint = pendingAudioEndpoint,
               GatewayConnection.shared.state == .authenticated else { return }
         GatewayConnection.shared.log("Rebuilding iPhone call audio after route or microphone interruption")
-        startAudioEngine(endpoint: endpoint)
+        startAudioEngine(endpoint: endpoint, force: true)
     }
 
-    private func startAudioEngine(endpoint: (session: UInt32, port: UInt16)) {
+    private func startAudioEngine(endpoint: (session: UInt32, port: UInt16), force: Bool = false) {
+        let host = GatewayConnection.shared.connectedHost
+        if !force, AudioEngine.shared.isRunning,
+           let running = runningAudioEndpoint,
+           running.host == host, running.session == endpoint.session,
+           running.port == endpoint.port {
+            return
+        }
         AudioEngine.shared.start(
-            host: GatewayConnection.shared.connectedHost,
+            host: host,
             port: endpoint.port,
             session: endpoint.session
         )
+        runningAudioEndpoint = AudioEngine.shared.isRunning
+            ? (host: host, session: endpoint.session, port: endpoint.port) : nil
     }
 
     private func stopAudio() {
         AudioEngine.shared.stop()
+        runningAudioEndpoint = nil
         pendingAudioEndpoint = nil
         if audioStartRequested { GatewayConnection.shared.sendAudioStop() }
         audioStartRequested = false
@@ -331,7 +342,9 @@ public class CallKitManager: NSObject, CXProviderDelegate {
         let tempRawId = "outgoing_\(uuid.uuidString.prefix(8))"
         callIdToUuidMap[tempRawId] = uuid
         uuidToCallIdMap[uuid] = tempRawId
-        callStates[uuid] = "dialing"
+        // Wait for Redmi's dialing event before requesting its audio endpoint. CallKit can
+        // activate the iPhone session before the cellular dial command reaches Redmi.
+        callStates[uuid] = "pending"
         outgoingUuids.insert(uuid)
         pendingOutgoingUuid = uuid
         

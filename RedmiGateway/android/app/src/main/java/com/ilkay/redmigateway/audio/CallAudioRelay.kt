@@ -28,6 +28,9 @@ import java.net.SocketAddress
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
+import java.util.ArrayDeque
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.TimeUnit
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.sin
@@ -51,9 +54,13 @@ object CallAudioRelay : CallManager.CallListener {
     const val PORT = 8791
     const val SAMPLE_RATE = 16000
     const val FRAME_SAMPLES = 320
+    // The Redmi's Telephony Tx sink advertises 8/16 kHz, not 48 kHz.
+    private const val UPLINK_SAMPLE_RATE = SAMPLE_RATE
+    private const val UPLINK_REPEAT = UPLINK_SAMPLE_RATE / SAMPLE_RATE
 
     private const val TAG = "CallAudioRelay"
     private const val FRAME_BYTES = FRAME_SAMPLES * 2
+    private const val UPLINK_FRAME_BYTES = FRAME_BYTES * 2 * UPLINK_REPEAT
     private const val HEADER_BYTES = 8
     private const val PAYLOAD_PCM16: Byte = 1
     private const val START_RETRY_MS = 400L
@@ -117,13 +124,29 @@ object CallAudioRelay : CallManager.CallListener {
     @Volatile private var streamingStartedAt = 0L
     @Volatile private var watchdogFellBack = false
     private var receiveThread: Thread? = null
+    private var uplinkWriterThread: Thread? = null
     private var sendThread: Thread? = null
+    private val uplinkQueue = ArrayBlockingQueue<ByteArray>(20)
     private var startAttempts = 0
     private var savedVoiceVolume = -1
+    private var savedVoiceMuted: Boolean? = null
+    private var savedMediaVolume = -1
+    private var savedMicrophoneMuted: Boolean? = null
+    @Volatile private var uplinkRouteChecked = false
+    @Volatile private var uplinkRouteIsTelephonyTx = false
+    @Volatile private var uplinkUsesPlatformRedirection = false
+    private var platformProbeLogged = false
     private var listeningToCalls = false
 
     @Volatile private var packetsIn = 0L
     @Volatile private var packetsOut = 0L
+    @Volatile private var uplinkPacketsReceived = 0L
+    @Volatile private var uplinkWriteTimeMs = 0L
+    @Volatile private var uplinkWriteMaxMs = 0L
+    @Volatile private var uplinkSequenceGaps = 0L
+    @Volatile private var uplinkPacketsDropped = 0L
+    private var watchdogLastWritten = 0L
+    private var watchdogSlowWindows = 0
 
     private val armTimeout = Runnable {
         if (session != 0 && !streaming) disarmOnWorker("no call audio within ${ARM_TIMEOUT_MS / 1000}s")
@@ -133,17 +156,24 @@ object CallAudioRelay : CallManager.CallListener {
     private val watchdogRunnable = object : Runnable {
         override fun run() {
             if (streaming) {
+                val writtenThisSecond = packetsIn - watchdogLastWritten
+                watchdogLastWritten = packetsIn
+                if (iPhoneAudioConfirmed) {
+                    watchdogSlowWindows = if (writtenThisSecond < 20) watchdogSlowWindows + 1 else 0
+                } else {
+                    watchdogSlowWindows = 0
+                }
                 val latestPacketOrStart = maxOf(lastUplinkTimestamp, streamingStartedAt)
                 val elapsed = SystemClock.elapsedRealtime() - latestPacketOrStart
-                if (elapsed > WATCHDOG_TIMEOUT_MS && !watchdogFellBack) {
+                if ((elapsed > WATCHDOG_TIMEOUT_MS || watchdogSlowWindows >= 2) && !watchdogFellBack) {
                     watchdogFellBack = true
                     iPhoneAudioConfirmed = false
-                    Log.w(TAG, "Watchdog triggered: no uplink packets for ${elapsed}ms (>5s). Fail-safe restoring local handset audio.")
-                    CallManager.log("Watchdog: iPhone audio silence >5s. Handset audio restored.")
+                    Log.w(TAG, "Watchdog triggered: uplink gap=${elapsed}ms, writtenThisSecond=$writtenThisSecond. Restoring Redmi handset audio.")
+                    CallManager.log("Watchdog: iPhone uplink too slow. Handset audio restored.")
                     appContext?.let { ctx ->
                         restoreRedmiHandset(ctx.getSystemService(AudioManager::class.java))
                     }
-                    notifyListeners(false, "Packet timeout (>5s). Handset audio restored.")
+                    notifyListeners(false, "iPhone uplink too slow. Handset audio restored.")
                 }
                 handler.postDelayed(this, WATCHDOG_CHECK_INTERVAL_MS)
             }
@@ -152,6 +182,7 @@ object CallAudioRelay : CallManager.CallListener {
 
     val isStreaming: Boolean get() = streaming
     val isIPhoneAudioConfirmed: Boolean get() = iPhoneAudioConfirmed
+    val isAudioTransferUnavailable: Boolean get() = uplinkUsesPlatformRedirection && !iPhoneAudioConfirmed
 
     /**
      * Opens a relay session for the paired iPhone and returns its id. Audio starts as soon as
@@ -255,11 +286,26 @@ object CallAudioRelay : CallManager.CallListener {
         track = uplink
         packetsIn = 0
         packetsOut = 0
+        uplinkPacketsReceived = 0
+        uplinkWriteTimeMs = 0
+        uplinkWriteMaxMs = 0
+        uplinkSequenceGaps = 0
+        uplinkPacketsDropped = 0
+        uplinkQueue.clear()
+        watchdogLastWritten = 0
+        watchdogSlowWindows = 0
+        uplinkRouteChecked = false
+        uplinkRouteIsTelephonyTx = false
+        platformProbeLogged = false
         streaming = true
         streamingStartedAt = SystemClock.elapsedRealtime()
         handler.removeCallbacks(armTimeout)
 
         uplink?.play()
+        uplinkWriterThread = Thread({ uplinkWriteLoop(uplink) }, "CallAudio-TelephonyTx").apply {
+            priority = Thread.MAX_PRIORITY
+            start()
+        }
         downlink?.let { recorder ->
             recorder.startRecording()
             sendThread = Thread({ sendLoop(recorder) }, "CallAudio-Downlink").apply {
@@ -281,15 +327,29 @@ object CallAudioRelay : CallManager.CallListener {
     /** Keep the Redmi usable until the paired iPhone actually reaches the UDP relay. */
     private fun confirmIPhoneAudio() {
         if (!streaming || session == 0 || peer == null || record == null || track == null) return
+        if (!uplinkRouteIsTelephonyTx) return
+        if (packetsIn < 30) return
         val lastPacket = lastUplinkTimestamp
         if (lastPacket == 0L || SystemClock.elapsedRealtime() - lastPacket > WATCHDOG_TIMEOUT_MS) return
         if (iPhoneAudioConfirmed) return
-        iPhoneAudioConfirmed = true
-        watchdogFellBack = false
-        appContext?.let { ctx ->
+        if (uplinkUsesPlatformRedirection) {
+            if (!platformProbeLogged) {
+                platformProbeLogged = true
+                Log.w(TAG, "Physical microphone isolation is unavailable on this Telephony Tx route; Redmi handset stays active")
+            }
+            return
+        }
+        val handsetQuieted = appContext?.let { ctx ->
             val audioManager = ctx.getSystemService(AudioManager::class.java)
             quietRedmiHandset(audioManager)
+        } == true
+        if (!handsetQuieted) {
+            appContext?.let { ctx -> restoreRedmiHandset(ctx.getSystemService(AudioManager::class.java)) }
+            notifyListeners(false, "Redmi audio could not be isolated")
+            return
         }
+        iPhoneAudioConfirmed = true
+        watchdogFellBack = false
         CallManager.log("iPhone audio peer confirmed; handset audio reduced")
         notifyListeners(true, "iPhone audio connected")
     }
@@ -311,6 +371,8 @@ object CallAudioRelay : CallManager.CallListener {
         handler.removeCallbacks(watchdogRunnable)
         watchdogFellBack = false
         iPhoneAudioConfirmed = false
+        uplinkRouteChecked = false
+        uplinkRouteIsTelephonyTx = false
         expectedClientAddress = null
         val wasActive = session != 0
         stopStreaming()
@@ -335,6 +397,10 @@ object CallAudioRelay : CallManager.CallListener {
     private fun stopStreaming() {
         if (!streaming) return
         streaming = false
+        uplinkWriterThread?.interrupt()
+        uplinkWriterThread?.join(500)
+        uplinkWriterThread = null
+        uplinkQueue.clear()
         handler.removeCallbacks(watchdogRunnable)
         watchdogFellBack = false
         lastUplinkTimestamp = 0L
@@ -367,8 +433,8 @@ object CallAudioRelay : CallManager.CallListener {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val buffer = ByteArray(2048)
         val packet = DatagramPacket(buffer, buffer.size)
-        var levelFrames = 0
-        var sumSquares = 0.0
+        val stereoBuffer = ByteArray(UPLINK_FRAME_BYTES)
+        var lastPcmSequence = -1
         while (!datagram.isClosed) {
             try {
                 packet.setLength(buffer.size)
@@ -393,28 +459,107 @@ object CallAudioRelay : CallManager.CallListener {
             // A keepalive establishes the return address. Only PCM proves that the
             // iPhone microphone engine is producing frames for the cellular uplink.
             peer = packet.socketAddress
-            lastUplinkTimestamp = SystemClock.elapsedRealtime()
 
             if (buffer[6] != PAYLOAD_PCM16) continue
             val payload = packet.length - HEADER_BYTES
             if (payload != FRAME_BYTES) continue
-            val written = track?.write(buffer, HEADER_BYTES, payload, AudioTrack.WRITE_NON_BLOCKING) ?: 0
-            if (written <= 0) continue
+            if (!streaming) continue
+            uplinkPacketsReceived += 1
+            val sequence = ((buffer[4].toInt() and 0xFF) shl 8) or (buffer[5].toInt() and 0xFF)
+            if (lastPcmSequence >= 0) {
+                val gap = (sequence - lastPcmSequence - 1) and 0xFFFF
+                if (gap in 1..1000) uplinkSequenceGaps += gap
+            }
+            lastPcmSequence = sequence
 
+            // Keep the iPhone's 16 kHz samples at the Telephony Tx sink's supported rate;
+            // duplicate mono into stereo without changing the 20 ms packet duration.
+            var outIdx = 0
+            for (inIdx in HEADER_BYTES until HEADER_BYTES + payload step 2) {
+                val low = buffer[inIdx]
+                val high = buffer[inIdx + 1]
+                repeat(UPLINK_REPEAT) {
+                    stereoBuffer[outIdx++] = low
+                    stereoBuffer[outIdx++] = high
+                    stereoBuffer[outIdx++] = low
+                    stereoBuffer[outIdx++] = high
+                }
+            }
+
+            if (!uplinkQueue.offer(stereoBuffer.copyOf())) {
+                uplinkQueue.poll()
+                uplinkPacketsDropped += 1
+                uplinkQueue.offer(stereoBuffer.copyOf())
+            }
+        }
+    }
+
+    private fun uplinkWriteLoop(player: AudioTrack) {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+        val recentWrites = ArrayDeque<Long>()
+        var levelFrames = 0
+        var sumSquares = 0.0
+        while (streaming && !Thread.currentThread().isInterrupted) {
+            while (uplinkQueue.size > 8) {
+                uplinkQueue.poll() ?: break
+                uplinkPacketsDropped += 1
+            }
+            val frame = try {
+                uplinkQueue.poll(100, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                break
+            } ?: continue
+            val writeStartedAt = SystemClock.elapsedRealtime()
+            var offset = 0
+            while (streaming && offset < frame.size &&
+                SystemClock.elapsedRealtime() - writeStartedAt < 250) {
+                val written = player.write(frame, offset, frame.size - offset, AudioTrack.WRITE_NON_BLOCKING)
+                if (written < 0) {
+                    Log.w(TAG, "Telephony Tx write failed: $written")
+                    break
+                }
+                if (written == 0) SystemClock.sleep(2) else offset += written
+            }
+            val writeMs = SystemClock.elapsedRealtime() - writeStartedAt
+            uplinkWriteTimeMs += writeMs
+            if (writeMs > uplinkWriteMaxMs) uplinkWriteMaxMs = writeMs
+            if (offset != frame.size) {
+                uplinkPacketsDropped += 1
+                continue
+            }
+            if (!uplinkRouteChecked) {
+                val routed = player.routedDevice
+                if (routed != null) {
+                    uplinkRouteIsTelephonyTx = routed.type == AudioDeviceInfo.TYPE_TELEPHONY
+                    uplinkRouteChecked = true
+                    Log.i(TAG, "CURRENT_TELEPHONY_ROUTE type=${routed.type} id=${routed.id} telephonyTx=$uplinkRouteIsTelephonyTx")
+                    if (!uplinkRouteIsTelephonyTx) {
+                        handler.post { disarmOnWorker("uplink is not routed to Telephony Tx") }
+                        continue
+                    }
+                }
+            }
+            if (!uplinkRouteIsTelephonyTx) continue
+            val now = SystemClock.elapsedRealtime()
+            lastUplinkTimestamp = now
             packetsIn += 1
-            for (index in HEADER_BYTES until HEADER_BYTES + payload - 1 step 2) {
-                val sample = ((buffer[index + 1].toInt() shl 8) or (buffer[index].toInt() and 0xFF)).toShort().toDouble()
+            for (index in frame.indices step 4 * UPLINK_REPEAT) {
+                val sample = ((frame[index + 1].toInt() shl 8) or (frame[index].toInt() and 0xFF)).toShort().toDouble()
                 sumSquares += sample * sample
             }
             levelFrames += 1
             if (levelFrames == 250) {
                 val rms = sqrt(sumSquares / (levelFrames * FRAME_SAMPLES))
-                Log.i(TAG, "Uplink level over 5s: rms=${"%.1f".format(rms)} in=$packetsIn out=$packetsOut")
+                Log.i(TAG, "REDMI_TELEPHONY_TX_RMS=${"%.1f".format(rms)} REDMI_UPLINK_RECEIVED_PACKETS=$uplinkPacketsReceived REDMI_TELEPHONY_TX_WRITE_COUNT=$packetsIn IPHONE_MEDIA_OWNER=$iPhoneAudioConfirmed")
                 levelFrames = 0
                 sumSquares = 0.0
             }
-
-            if (!iPhoneAudioConfirmed) {
+            recentWrites.addLast(now)
+            while (recentWrites.isNotEmpty() && now - recentWrites.first > 1000) {
+                recentWrites.removeFirst()
+            }
+            if (!iPhoneAudioConfirmed && recentWrites.size >= 30) {
+                val expected = session
                 handler.post { if (session == expected) confirmIPhoneAudio() }
             }
         }
@@ -426,6 +571,10 @@ object CallAudioRelay : CallManager.CallListener {
         var sequence = 0
         var levelFrames = 0
         var sumSquares = 0.0
+        var previousReceived = 0L
+        var previousWritten = 0L
+        var previousWriteMs = 0L
+        var previousSequenceGaps = 0L
         while (streaming) {
             val read = recorder.read(frame, HEADER_BYTES, FRAME_BYTES)
             if (read <= 0) {
@@ -439,7 +588,18 @@ object CallAudioRelay : CallManager.CallListener {
             levelFrames += 1
             if (levelFrames == 250) {
                 val rms = sqrt(sumSquares / (levelFrames * FRAME_SAMPLES))
-                Log.i(TAG, "Downlink level over 5s: rms=${"%.1f".format(rms)} in=$packetsIn out=$packetsOut")
+                val received = uplinkPacketsReceived
+                val written = packetsIn
+                val writeMs = uplinkWriteTimeMs
+                val gaps = uplinkSequenceGaps
+                Log.i(TAG, "REDMI_DOWNLINK_CAPTURE_RMS=${"%.1f".format(rms)} in=$written out=$packetsOut " +
+                    "UPLINK_5S received=${received - previousReceived} written=${written - previousWritten} " +
+                    "writeMs=${writeMs - previousWriteMs} maxWriteMs=$uplinkWriteMaxMs " +
+                    "dropped=$uplinkPacketsDropped sequenceGaps=${gaps - previousSequenceGaps}")
+                previousReceived = received
+                previousWritten = written
+                previousWriteMs = writeMs
+                previousSequenceGaps = gaps
                 levelFrames = 0
                 sumSquares = 0.0
             }
@@ -461,9 +621,9 @@ object CallAudioRelay : CallManager.CallListener {
         }
     }
 
-    private fun pcmFormat(channelMask: Int) = AudioFormat.Builder()
+    private fun pcmFormat(channelMask: Int, sampleRate: Int = SAMPLE_RATE) = AudioFormat.Builder()
         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-        .setSampleRate(SAMPLE_RATE)
+        .setSampleRate(sampleRate)
         .setChannelMask(channelMask)
         .build()
 
@@ -502,79 +662,106 @@ object CallAudioRelay : CallManager.CallListener {
     }
 
     private fun openUplink(audioManager: AudioManager): AudioTrack? {
+        // The system call-redirection track is designed for cellular uplink injection. Try it
+        // before the vendor's incall_music_uplink route, whose PCM writer stalls on this device.
         try {
             val method = AudioManager::class.java.getMethod(
                 "getCallUplinkInjectionAudioTrack", AudioFormat::class.java
             )
-            val player = method.invoke(audioManager, pcmFormat(AudioFormat.CHANNEL_OUT_MONO)) as AudioTrack
+            val player = method.invoke(audioManager, pcmFormat(AudioFormat.CHANNEL_OUT_STEREO, UPLINK_SAMPLE_RATE)) as AudioTrack
             if (player.state == AudioTrack.STATE_INITIALIZED) {
                 player.setVolume(1.0f)
+                uplinkUsesPlatformRedirection = true
+                Log.i(TAG, "Platform call uplink injection track created: sampleRate=${player.sampleRate}, bufferFrames=${player.bufferSizeInFrames}")
                 return player
             }
             player.release()
         } catch (error: Exception) {
-            Log.w(TAG, "Uplink injection unavailable: ${describe(error)}")
+            Log.w(TAG, "Platform call uplink injection unavailable: ${describe(error)}")
         }
 
-        // Fallback: route a voice track explicitly to the telephony TX device.
+        // The vendor exposes this direct Telephony Tx route as a fallback. The packet-rate
+        // gate keeps the Redmi handset active if its incall_music_uplink output stalls.
         val telephonyTx = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             .firstOrNull { it.type == AudioDeviceInfo.TYPE_TELEPHONY }
-            ?: return null
-        return try {
+        uplinkUsesPlatformRedirection = false
+        if (telephonyTx != null) try {
             val player = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
-                .setAudioFormat(pcmFormat(AudioFormat.CHANNEL_OUT_MONO))
+                .setAudioFormat(pcmFormat(AudioFormat.CHANNEL_OUT_STEREO, UPLINK_SAMPLE_RATE))
                 .setTransferMode(AudioTrack.MODE_STREAM)
-                .setBufferSizeInBytes(FRAME_BYTES * 8)
+                .setBufferSizeInBytes(UPLINK_FRAME_BYTES * 8)
                 .build()
-            player.setPreferredDevice(telephonyTx)
-            if (player.state == AudioTrack.STATE_INITIALIZED) {
+            val preferred = player.setPreferredDevice(telephonyTx)
+            if (player.state == AudioTrack.STATE_INITIALIZED && preferred) {
                 player.setVolume(1.0f)
-                player
+                Log.i(TAG, "Telephony Tx track created: deviceId=${telephonyTx.id}, preferred=$preferred, sampleRate=${player.sampleRate}")
+                return player
             } else {
                 player.release()
-                null
             }
         } catch (error: Exception) {
             Log.w(TAG, "Telephony TX track unavailable: ${describe(error)}")
-            null
         }
+
+        return null
     }
 
-    fun quietRedmiHandset(audioManager: AudioManager) {
+    fun quietRedmiHandset(audioManager: AudioManager): Boolean {
         GatewayInCallService.setAudioRoute(CallAudioState.ROUTE_EARPIECE)
+        runCatching {
+            if (savedMicrophoneMuted == null) savedMicrophoneMuted = audioManager.isMicrophoneMute
+            audioManager.isMicrophoneMute = true
+            Log.i(TAG, "Redmi microphone mute requested; actual=${audioManager.isMicrophoneMute}")
+        }.onFailure { Log.w(TAG, "Could not mute local microphone", it) }
         runCatching {
             if (savedVoiceVolume < 0) {
                 savedVoiceVolume = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
+                savedVoiceMuted = audioManager.isStreamMute(AudioManager.STREAM_VOICE_CALL)
+                savedMediaVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
             }
+            val mediaMax = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+            val mediaTarget = maxOf(savedMediaVolume, (mediaMax * 0.8f).toInt().coerceAtLeast(1))
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, mediaTarget, 0)
             val minVol = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 audioManager.getStreamMinVolume(AudioManager.STREAM_VOICE_CALL).coerceAtLeast(1)
             } else {
                 1
             }
             audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, minVol, 0)
-            Log.i(TAG, "Redmi handset quieted: volume set to $minVol (saved: $savedVoiceVolume)")
-        }
+            audioManager.adjustStreamVolume(AudioManager.STREAM_VOICE_CALL, AudioManager.ADJUST_MUTE, 0)
+            Log.i(TAG, "Redmi local downlink muted=${audioManager.isStreamMute(AudioManager.STREAM_VOICE_CALL)}, mediaVolume=${audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)}, physicalMicMuted=${audioManager.isMicrophoneMute}")
+        }.onFailure { Log.w(TAG, "Could not isolate local call audio", it) }
+        return audioManager.isMicrophoneMute &&
+            audioManager.isStreamMute(AudioManager.STREAM_VOICE_CALL) &&
+            audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) > 0
     }
 
     fun restoreRedmiHandset(audioManager: AudioManager?) {
         if (audioManager == null) return
+        if (savedMicrophoneMuted == null && savedVoiceVolume < 0 && savedMediaVolume < 0) return
+        savedMicrophoneMuted?.let { wasMuted ->
+            runCatching { audioManager.isMicrophoneMute = wasMuted }
+            savedMicrophoneMuted = null
+        }
         runCatching {
-            val targetVolume = if (savedVoiceVolume >= 0) {
-                savedVoiceVolume
-            } else {
-                val maxVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-                (maxVol * 0.6f).toInt().coerceAtLeast(1)
+            if (savedVoiceMuted == false) {
+                audioManager.adjustStreamVolume(AudioManager.STREAM_VOICE_CALL, AudioManager.ADJUST_UNMUTE, 0)
             }
-            audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, targetVolume, 0)
-            Log.i(TAG, "Redmi handset restored: volume set to $targetVolume")
+            if (savedVoiceVolume >= 0) {
+                audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, savedVoiceVolume, 0)
+            }
+            if (savedMediaVolume >= 0) audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, savedMediaVolume, 0)
+            Log.i(TAG, "Redmi handset restored: voiceMuted=${audioManager.isStreamMute(AudioManager.STREAM_VOICE_CALL)}, micMuted=${audioManager.isMicrophoneMute}")
         }
         savedVoiceVolume = -1
+        savedVoiceMuted = null
+        savedMediaVolume = -1
     }
 
     fun transferAudioToRedmi() {

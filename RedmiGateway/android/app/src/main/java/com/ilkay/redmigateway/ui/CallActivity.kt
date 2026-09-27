@@ -1,13 +1,19 @@
 package com.ilkay.redmigateway.ui
 
 import android.annotation.SuppressLint
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
+import android.provider.ContactsContract
+import android.net.Uri
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -32,6 +38,22 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
     private var proximityWakeLock: PowerManager.WakeLock? = null
     private var isMuted = false
     private var isAudioOnIPhone = false
+    private var lastResolvedNumber: String? = null
+    private var activeSinceMillis = 0L
+    private val durationHandler = Handler(Looper.getMainLooper())
+    private val durationTicker = object : Runnable {
+        override fun run() {
+            if (CallManager.currentCallState == "active" && activeSinceMillis > 0L) {
+                val seconds = (System.currentTimeMillis() - activeSinceMillis).coerceAtLeast(0L) / 1000L
+                binding.callDuration.text = "%02d:%02d".format(seconds / 60, seconds % 60)
+                if (CallAudioRelay.isAudioTransferUnavailable &&
+                    binding.audioTransferButton.visibility == View.VISIBLE) {
+                    updateAudioCard(false)
+                }
+                durationHandler.postDelayed(this, 1000L)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,6 +88,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
         if (proximityWakeLock?.isHeld == true) {
             proximityWakeLock?.release()
         }
+        durationHandler.removeCallbacks(durationTicker)
         super.onStop()
     }
 
@@ -204,6 +227,10 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
 
     private fun setupAudioTransfer() {
         binding.audioTransferButton.setOnClickListener {
+            if (CallAudioRelay.isAudioTransferUnavailable) {
+                updateAudioCard(false)
+                return@setOnClickListener
+            }
             if (isAudioOnIPhone) {
                 CallAudioRelay.transferAudioToRedmi()
             } else {
@@ -216,18 +243,24 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
     private fun updateAudioCard(streaming: Boolean) {
         isAudioOnIPhone = streaming
         runOnUiThread {
+            binding.mute.isEnabled = !streaming
             if (streaming) {
+                binding.audioTransferButton.visibility = View.VISIBLE
                 binding.audioStatusCard.strokeColor = ContextCompat.getColor(this, R.color.neon_sky)
                 binding.audioStatusTitle.text = "SES iPHONE'DA"
                 binding.audioStatusTitle.setTextColor(ContextCompat.getColor(this, R.color.neon_sky))
-                binding.audioStatusDetail.text = "Görüşme bağlı iPhone üzerinden yapılıyor. Ahizedeki kısık ses geçit yönlendirmesindedir."
+                binding.audioStatusDetail.text = "Ses iPhone'a yönlendirildi. Karşı taraf seni duymuyorsa sesi Redmi'ye al."
                 binding.audioTransferButton.text = "Sesi Redmi'ye Al"
                 binding.audioTransferButton.strokeColor = ContextCompat.getColorStateList(this, R.color.neon_sky)
             } else {
+                val unavailable = CallAudioRelay.isAudioTransferUnavailable
                 binding.audioStatusCard.strokeColor = ContextCompat.getColor(this, R.color.status_good)
                 binding.audioStatusTitle.text = "SES BU TELEFONDA (REDMİ)"
                 binding.audioStatusTitle.setTextColor(ContextCompat.getColor(this, R.color.status_good))
-                binding.audioStatusDetail.text = "Ahize veya hoparlörden konuşabilirsiniz."
+                binding.audioStatusDetail.text = if (unavailable)
+                    "iPhone görüşme sesi bu Redmi'de güvenilir biçimde yönlendirilemedi. Görüşmeye Redmi'den devam edin."
+                else "Ahize veya hoparlörden konuşabilirsiniz."
+                binding.audioTransferButton.visibility = if (unavailable) View.GONE else View.VISIBLE
                 binding.audioTransferButton.text = "iPhone'a Aktar"
                 binding.audioTransferButton.strokeColor = ContextCompat.getColorStateList(this, R.color.status_good)
             }
@@ -245,6 +278,10 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
                 return@runOnUiThread
             }
             binding.number.text = number?.takeIf { it.isNotBlank() } ?: "Gizli numara"
+            if (number != lastResolvedNumber) {
+                lastResolvedNumber = number
+                resolveContact(number)
+            }
             binding.state.text = when (state) {
                 "ringing" -> "Gelen Arama"
                 "active" -> "Görüşme Sürüyor"
@@ -253,6 +290,15 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
                 else -> "Arama Bağlanıyor"
             }
             val incoming = state == "ringing"
+            if (state == "active") {
+                if (activeSinceMillis == 0L) activeSinceMillis = System.currentTimeMillis()
+                binding.callDuration.visibility = View.VISIBLE
+                durationHandler.removeCallbacks(durationTicker)
+                durationHandler.post(durationTicker)
+            } else {
+                durationHandler.removeCallbacks(durationTicker)
+                binding.callDuration.visibility = View.GONE
+            }
             binding.incomingActions.visibility = if (incoming) View.VISIBLE else View.GONE
             binding.activeControls.visibility = if (incoming) View.GONE else View.VISIBLE
             binding.audioStatusCard.visibility = if (state == "active") View.VISIBLE else View.GONE
@@ -268,6 +314,33 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
     }
 
     override fun onLogMessage(message: String) = Unit
+
+    private fun resolveContact(number: String?) {
+        binding.contactName.visibility = View.GONE
+        binding.contactPhoto.visibility = View.GONE
+        binding.number.textSize = 28f
+        if (number.isNullOrBlank() || checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return
+        runCatching {
+            val lookup = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))
+            contentResolver.query(lookup, arrayOf(
+                ContactsContract.PhoneLookup.DISPLAY_NAME,
+                ContactsContract.PhoneLookup.PHOTO_THUMBNAIL_URI
+            ), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val name = cursor.getString(0)
+                    if (!name.isNullOrBlank()) {
+                        binding.contactName.text = name
+                        binding.contactName.visibility = View.VISIBLE
+                        binding.number.textSize = 18f
+                    }
+                    cursor.getString(1)?.let { photo ->
+                        binding.contactPhoto.setImageURI(Uri.parse(photo))
+                        binding.contactPhoto.visibility = View.VISIBLE
+                    }
+                }
+            }
+        }
+    }
 
     private fun updateSpeakerLabel() {
         binding.speaker.text = if (GatewayInCallService.isSpeakerOn())
