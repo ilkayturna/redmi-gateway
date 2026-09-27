@@ -33,6 +33,9 @@ class SmsReceiver : BroadcastReceiver() {
             Log.i(TAG, "SMS received (${fullMessage.length} characters)")
             CallManager.log("SMS received (${fullMessage.length} characters)")
 
+            // The durable journal mirrors the SMS provider; this also covers messages no SMS
+            // app stores. SmsStore stays only for protocol 1 iPhone builds.
+            com.ilkay.redmigateway.journal.SmsJournal.get(context).noteReceived(sender, fullMessage, timestamp)
             val messageId = try {
                 SmsStore.get(context).saveIncoming(sender, fullMessage, timestamp)
             } catch (e: Exception) {

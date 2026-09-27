@@ -101,6 +101,12 @@
             android:name=".telecom.CallActionReceiver"
             android:exported="false" />
 
+        <!-- Lab measurement hooks; only the adb shell (DUMP) can switch them on. -->
+        <receiver
+            android:name=".audio.LabModeReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+
         <!-- Telecom InCallService for Default Dialer -->
         <service
             android:name=".telecom.GatewayInCallService"

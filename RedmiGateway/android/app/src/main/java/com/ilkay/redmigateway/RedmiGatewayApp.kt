@@ -12,18 +12,10 @@ class RedmiGatewayApp : Application() {
             private set
 
         private const val PREFS_NAME = "redmi_gateway_prefs"
-        private const val KEY_PAIRING_TOKEN = "pairing_token"
         private val secureRandom = SecureRandom()
 
-        fun getPairingToken(): String {
-            val prefs = instance.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            var token = prefs.getString(KEY_PAIRING_TOKEN, null)
-            if (token.isNullOrBlank()) {
-                token = generateRandomToken()
-                prefs.edit().putString(KEY_PAIRING_TOKEN, token).apply()
-            }
-            return token
-        }
+        /** The six-character code shown in Settings; see PairingStore. */
+        fun getPairingToken(): String = com.ilkay.redmigateway.security.PairingStore.pairingCode()
 
         private const val KEY_DEVICE_ID = "opaque_device_id"
 
@@ -39,12 +31,6 @@ class RedmiGatewayApp : Application() {
             return deviceId
         }
 
-        private fun generateRandomToken(): String {
-            val chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // Exclude confusing chars like 0/O, 1/I
-            return (1..6)
-                .map { chars[secureRandom.nextInt(chars.length)] }
-                .joinToString("")
-        }
     }
 
     override fun onCreate() {
@@ -53,5 +39,6 @@ class RedmiGatewayApp : Application() {
         // Ensure pairing token and device ID are initialized
         getPairingToken()
         getOpaqueDeviceId()
+        com.ilkay.redmigateway.telecom.IncomingCallPresenter.init(this)
     }
 }

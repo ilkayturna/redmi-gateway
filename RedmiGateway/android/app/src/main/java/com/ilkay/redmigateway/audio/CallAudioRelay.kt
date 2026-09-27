@@ -12,6 +12,7 @@ import android.os.HandlerThread
 import android.os.Process
 import android.os.SystemClock
 import android.util.Log
+import com.ilkay.redmigateway.security.BridgeCrypto
 import com.ilkay.redmigateway.service.GatewayService
 import com.ilkay.redmigateway.telecom.CallManager
 import java.lang.reflect.InvocationTargetException
@@ -26,6 +27,7 @@ import java.security.SecureRandom
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Moves the Redmi's cellular call audio to the paired iPhone and back.
@@ -49,10 +51,16 @@ import java.util.concurrent.atomic.AtomicInteger
  * uplink track drains in real time and the downlink capture delivers frames. Any later failure
  * returns the call to the Redmi's own microphone and earpiece without ending it.
  *
- * UDP packets on port 8791 use the same layout in both directions:
- *   [0..3] session id (uint32 BE)  [4..5] sequence (uint16 BE)
- *   [6]    payload type (0 keepalive, 1 PCM)  [7] reserved
- *   [8..]  20 ms of 16 kHz mono PCM, 16-bit little-endian (640 bytes)
+ * UDP packets on port 8791 carry 20 ms of 16 kHz mono PCM16 (640 bytes) in both directions.
+ * Protocol 2 sessions (sealed):
+ *   [0..3] session id  [4..7] packet counter (uint32 BE, per direction and session)  [8] type
+ *   [9] flags: iPhone -> Redmi bit 0 = the iPhone is receiving downlink frames; otherwise 0
+ *   [10..] AES-256-GCM(payload) || tag, nonce = "UPLK"|"DNLK" + counter + session, AAD = header
+ * With sealed sessions the iPhone owns the call only while audio is confirmed in both
+ * directions: the Redmi sees iPhone frames, and the iPhone's flag says it hears the Redmi.
+ * Protocol 1 sessions (iPhone builds up to 1.0 (33)):
+ *   [0..3] session id  [4..5] sequence  [6] type  [7] 0  [8..] payload in clear
+ * Type 0 is a keepalive, 1 is PCM. Sealed packets must arrive with increasing counters.
  */
 object CallAudioRelay : CallManager.CallListener {
     const val PORT = 8791
@@ -69,6 +77,9 @@ object CallAudioRelay : CallManager.CallListener {
     private const val TAG = "CallAudioRelay"
     private const val FRAME_BYTES = FRAME_SAMPLES * 2
     private const val HEADER_BYTES = 8
+    private const val SEALED_HEADER_BYTES = 10
+    private val UPLINK_TAG = "UPLK".toByteArray(Charsets.US_ASCII)
+    private val DOWNLINK_TAG = "DNLK".toByteArray(Charsets.US_ASCII)
     private const val PAYLOAD_KEEPALIVE: Byte = 0
     private const val PAYLOAD_PCM16: Byte = 1
     private const val UPLINK_RATE = 48000
@@ -96,6 +107,12 @@ object CallAudioRelay : CallManager.CallListener {
     @Volatile var lastReason: String = "idle"
         private set
     @Volatile private var session = 0
+    @Volatile private var mediaKey: ByteArray? = null
+    @Volatile private var lastRxCounter = 0L
+    // Downlink packet counter for the whole session: a GCM nonce must never repeat under one key,
+    // so it is not reset when media restarts inside the same session.
+    private val txCounter = AtomicLong()
+    private val rejectedPackets = AtomicInteger()
     @Volatile private var expectedClientAddress: InetAddress? = null
     @Volatile private var peer: SocketAddress? = null
     @Volatile private var socket: DatagramSocket? = null
@@ -120,6 +137,10 @@ object CallAudioRelay : CallManager.CallListener {
 
     // Health counters (written by audio threads, read by the monitor).
     @Volatile private var lastIPhonePcmAt = 0L
+    // Sealed sessions only: last time the iPhone reported that it is receiving downlink.
+    @Volatile private var lastIPhoneHearingAt = 0L
+    private const val FLAG_IPHONE_HEARING = 0x01
+    private const val IPHONE_DEAF_LIMIT_MS = 2000L
     private val iphoneFrames = AtomicInteger()
     private val uplinkWrites = AtomicInteger()
     private val downlinkReads = AtomicInteger()
@@ -154,6 +175,8 @@ object CallAudioRelay : CallManager.CallListener {
         "uplinkFramesPerSecond" to windowWrites,
         "downlinkFramesPerSecond" to windowReads,
         "droppedFrames" to droppedFrames.get(),
+        "sealed" to (mediaKey != null),
+        "rejectedPackets" to rejectedPackets.get(),
         "underruns" to underruns.get(),
         "maxWriteMs" to maxWriteMs
     )
@@ -162,14 +185,22 @@ object CallAudioRelay : CallManager.CallListener {
      * Opens (or reuses) a relay session for the authenticated iPhone at [clientAddress] and
      * returns its id. The Redmi keeps the call audio until the iPhone's frames prove it ready.
      */
-    fun arm(context: Context, clientAddress: InetAddress?): Int {
+    fun arm(context: Context, clientAddress: InetAddress?, sessionMediaKey: ByteArray? = null): Int {
         synchronized(this) {
             appContext = context.applicationContext
             expectedClientAddress = clientAddress
-            if (session == 0) {
+            if (session == 0 || !sameKey(mediaKey, sessionMediaKey)) {
+                if (session != 0) {
+                    // A different key means a new authenticated connection; start a fresh session.
+                    handler.post { releaseMediaAndKeepSession("iphone_reconnected") }
+                }
                 var id = 0
                 while (id == 0) id = random.nextInt()
                 session = id
+                mediaKey = sessionMediaKey
+                lastRxCounter = 0L
+                txCounter.set(0L)
+                rejectedPackets.set(0)
                 peer = null
                 lastIPhonePcmAt = 0L
                 openSocket()
@@ -276,6 +307,9 @@ object CallAudioRelay : CallManager.CallListener {
         }
         val live = isLiveCallState(CallManager.currentCallState)
         val iphoneFresh = lastIPhonePcmAt != 0L && now - lastIPhonePcmAt < IPHONE_SILENCE_LIMIT_MS
+        // Protocol 1 iPhones cannot report what they receive; for them this stays true.
+        val iphoneHearing = mediaKey == null ||
+            (lastIPhoneHearingAt != 0L && now - lastIPhoneHearingAt < IPHONE_SILENCE_LIMIT_MS)
         when (owner) {
             Owner.REDMI -> Unit
             Owner.PREPARING_IPHONE -> {
@@ -291,7 +325,7 @@ object CallAudioRelay : CallManager.CallListener {
                 val elapsed = now - cutoverStartedAt
                 if (elapsed >= VERIFY_WINDOW_MS && windowStartedAt >= cutoverStartedAt) {
                     val healthy = windowWrites >= MIN_FRAMES_PER_SECOND &&
-                        windowReads >= MIN_FRAMES_PER_SECOND && iphoneFresh
+                        windowReads >= MIN_FRAMES_PER_SECOND && iphoneFresh && iphoneHearing
                     if (healthy) {
                         if (applyIsolation()) {
                             setOwner(Owner.IPHONE, "iphone_confirmed")
@@ -303,7 +337,8 @@ object CallAudioRelay : CallManager.CallListener {
                         val reason = when {
                             windowWrites < MIN_FRAMES_PER_SECOND -> "uplink_path_unavailable"
                             windowReads < MIN_FRAMES_PER_SECOND -> "downlink_unavailable"
-                            else -> "iphone_audio_lost"
+                            !iphoneFresh -> "iphone_audio_lost"
+                            else -> "iphone_not_receiving"
                         }
                         Log.w(TAG, "Cutover verification failed: $reason writes=$windowWrites reads=$windowReads iphone=$windowIPhone")
                         releaseMediaAndKeepSession(reason)
@@ -316,6 +351,10 @@ object CallAudioRelay : CallManager.CallListener {
                 // two consecutive 1 s windows, because call setup briefly slows both paths.
                 if (!iphoneFresh) {
                     fallBack("iphone_audio_lost")
+                    return
+                }
+                if (mediaKey != null && now - lastIPhoneHearingAt > IPHONE_DEAF_LIMIT_MS) {
+                    fallBack("iphone_not_receiving")
                     return
                 }
                 if (!windowFresh || now - cutoverStartedAt < 2000) return
@@ -373,27 +412,55 @@ object CallAudioRelay : CallManager.CallListener {
                 if (!datagram.isClosed) Log.w(TAG, "Receive failed: ${error.javaClass.simpleName}")
                 continue
             }
-            if (packet.length < HEADER_BYTES) continue
             val expected = session
+            if (expected == 0 || packet.length < HEADER_BYTES) continue
             val packetSession = ByteBuffer.wrap(buffer, 0, 4).order(ByteOrder.BIG_ENDIAN).int
-            if (expected == 0 || packetSession != expected) continue
+            if (packetSession != expected) continue
             val allowed = expectedClientAddress
             if (allowed != null && packet.address != allowed) continue
-            val type = buffer[6]
+            val key = mediaKey
+            val type: Byte
+            val pcm: ByteArray?
+            if (key != null) {
+                if (packet.length < SEALED_HEADER_BYTES + BridgeCrypto.TAG_BYTES) continue
+                val counter = ByteBuffer.wrap(buffer, 4, 4).order(ByteOrder.BIG_ENDIAN).int.toLong() and 0xFFFFFFFFL
+                if (counter <= lastRxCounter) continue
+                type = buffer[8]
+                val header = buffer.copyOfRange(0, SEALED_HEADER_BYTES)
+                val sealed = nonce(UPLINK_TAG, counter, expected) + buffer.copyOfRange(SEALED_HEADER_BYTES, packet.length)
+                val plain = BridgeCrypto.open(key, sealed, header)
+                if (plain == null) {
+                    rejectedPackets.incrementAndGet()
+                    continue
+                }
+                lastRxCounter = counter
+                if (buffer[9].toInt() and FLAG_IPHONE_HEARING != 0) lastIPhoneHearingAt = SystemClock.elapsedRealtime()
+                pcm = if (type == PAYLOAD_PCM16 && plain.size == FRAME_BYTES) plain else null
+            } else {
+                type = buffer[6]
+                pcm = if (type == PAYLOAD_PCM16 && packet.length - HEADER_BYTES == FRAME_BYTES)
+                    buffer.copyOfRange(HEADER_BYTES, HEADER_BYTES + FRAME_BYTES) else null
+            }
             if (type != PAYLOAD_KEEPALIVE && type != PAYLOAD_PCM16) continue
             peer = packet.socketAddress
-            if (type != PAYLOAD_PCM16 || packet.length - HEADER_BYTES != FRAME_BYTES) continue
+            if (pcm == null) continue
             lastIPhonePcmAt = SystemClock.elapsedRealtime()
             iphoneFrames.incrementAndGet()
             if (!mediaRunning) continue
-            val frame = buffer.copyOfRange(HEADER_BYTES, HEADER_BYTES + FRAME_BYTES)
             // Freshness beats completeness for live voice: drop the oldest when behind.
             while (uplinkQueue.size >= MAX_QUEUED_FRAMES) {
                 if (uplinkQueue.poll() != null) droppedFrames.incrementAndGet()
             }
-            uplinkQueue.offer(frame)
+            uplinkQueue.offer(pcm)
         }
     }
+
+    private fun nonce(tag: ByteArray, counter: Long, sessionId: Int): ByteArray =
+        ByteBuffer.allocate(BridgeCrypto.NONCE_BYTES).order(ByteOrder.BIG_ENDIAN)
+            .put(tag).putInt(counter.toInt()).putInt(sessionId).array()
+
+    private fun sameKey(a: ByteArray?, b: ByteArray?): Boolean =
+        if (a == null || b == null) a === b else a.contentEquals(b)
 
     private fun startMedia() {
         val context = appContext ?: return
@@ -408,6 +475,7 @@ object CallAudioRelay : CallManager.CallListener {
         }
         downlink = record
         uplink = track
+        lastIPhoneHearingAt = 0L
         uplinkQueue.clear()
         upsampler.reset()
         maxWriteMs = 0
@@ -473,10 +541,9 @@ object CallAudioRelay : CallManager.CallListener {
 
     private fun sendLoop(record: AudioRecord) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-        val frame = ByteArray(HEADER_BYTES + FRAME_BYTES)
-        var sequence = 0
+        val pcm = ByteArray(FRAME_BYTES)
         while (mediaRunning && downlink === record) {
-            val read = record.read(frame, HEADER_BYTES, FRAME_BYTES)
+            val read = record.read(pcm, 0, FRAME_BYTES)
             if (read <= 0) {
                 if (read < 0) SystemClock.sleep(10)
                 continue
@@ -484,18 +551,26 @@ object CallAudioRelay : CallManager.CallListener {
             downlinkReads.incrementAndGet()
             val target = peer ?: continue
             val datagram = socket ?: break
-            ByteBuffer.wrap(frame, 0, HEADER_BYTES).order(ByteOrder.BIG_ENDIAN)
-                .putInt(session)
-                .putShort(sequence.toShort())
-                .put(PAYLOAD_PCM16)
-                .put(0)
-            sequence = (sequence + 1) and 0xFFFF
+            // Session, key and counter are taken together so a re-arm cannot mix them.
+            val bytes = synchronized(this) { packDownlink(pcm, read) }
             try {
-                datagram.send(DatagramPacket(frame, HEADER_BYTES + read, target))
+                datagram.send(DatagramPacket(bytes, bytes.size, target))
             } catch (error: Exception) {
                 if (!datagram.isClosed) Log.w(TAG, "Downlink send failed: ${error.javaClass.simpleName}")
             }
         }
+    }
+
+    private fun packDownlink(pcm: ByteArray, read: Int): ByteArray {
+        val sessionId = session
+        val counter = txCounter.incrementAndGet()
+        val key = mediaKey ?: return ByteBuffer.allocate(HEADER_BYTES + read).order(ByteOrder.BIG_ENDIAN)
+            .putInt(sessionId).putShort(counter.toShort()).put(PAYLOAD_PCM16).put(0)
+            .put(pcm, 0, read).array()
+        val header = ByteBuffer.allocate(SEALED_HEADER_BYTES).order(ByteOrder.BIG_ENDIAN)
+            .putInt(sessionId).putInt(counter.toInt()).put(PAYLOAD_PCM16).put(0).array()
+        val sealed = BridgeCrypto.seal(key, pcm.copyOf(read), header, nonce(DOWNLINK_TAG, counter, sessionId))
+        return header + sealed.copyOfRange(BridgeCrypto.NONCE_BYTES, sealed.size)
     }
 
     private fun pcmFormat(rate: Int, channelMask: Int) = AudioFormat.Builder()
@@ -608,6 +683,7 @@ object CallAudioRelay : CallManager.CallListener {
         releaseMediaAndKeepSession(reason)
         synchronized(this) {
             session = 0
+            mediaKey = null
             peer = null
             expectedClientAddress = null
             socket?.close()

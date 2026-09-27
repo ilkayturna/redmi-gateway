@@ -27,17 +27,46 @@ import android.os.ParcelUuid
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.ilkay.redmigateway.RedmiGatewayApp
+import com.ilkay.redmigateway.security.BridgeCrypto
+import com.ilkay.redmigateway.security.PairingStore
 import com.ilkay.redmigateway.telecom.CallManager
+import com.ilkay.redmigateway.telecom.IncomingCallPresenter
 import org.json.JSONObject
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
+/**
+ * Bluetooth LE companion: presence, the current IP/port for discovery, and a wake-up path.
+ *
+ * iOS keeps a Bluetooth connection alive for a suspended app and wakes it on notifications, so
+ * the call-state characteristic is how a locked iPhone learns about an incoming call. Once an
+ * iPhone is paired with a key (protocol 2), state notifications are sealed with AES-GCM and call
+ * control writes must be sealed, fresh and sequence-increasing; plain JSON is only accepted while
+ * no keyed pairing exists. BLE never carries call audio.
+ */
 class BleServerManager(private val context: Context) : CallManager.CallListener {
 
     companion object {
         private const val TAG = "BleServerManager"
+        private const val SEALED_VERSION: Byte = 2
+        private const val MAX_CONTROL_AGE_MS = 60_000L
+        private val BLE_STATE_AAD = "phonebridge-ble-state".toByteArray(Charsets.UTF_8)
+        private val BLE_CONTROL_AAD = "phonebridge-ble-control".toByteArray(Charsets.UTF_8)
+        @Volatile private var current: BleServerManager? = null
+
+        fun diagnostics(): JSONObject {
+            val server = current ?: return JSONObject().put("running", false)
+            return JSONObject()
+                .put("running", server.isServerRunning)
+                .put("advertising", server.isAdvertising)
+                .put("centrals", server.connectedDevices.size)
+                .put("subscribed", server.subscribedDevices.count { it.value.contains(BleConstants.CHAR_STATE_UUID) })
+                .put("sealed", PairingStore.pairedClient() != null)
+        }
     }
+
+    private var lastControlSeq = 0L
 
     private val bluetoothManager: BluetoothManager? =
         context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
@@ -132,7 +161,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
 
             val value = when (characteristic.uuid) {
                 BleConstants.CHAR_DEVICE_INFO_UUID -> buildDeviceInfoJson().toByteArray(Charsets.UTF_8)
-                BleConstants.CHAR_STATE_UUID -> buildStateJson().toByteArray(Charsets.UTF_8)
+                BleConstants.CHAR_STATE_UUID -> buildStateBytes()
                 BleConstants.CHAR_HEARTBEAT_UUID -> System.currentTimeMillis().toString().toByteArray(Charsets.UTF_8)
                 else -> null
             }
@@ -179,8 +208,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
             var responseBytes: ByteArray? = null
 
             if (characteristic.uuid == BleConstants.CHAR_CALL_CONTROL_UUID && value != null) {
-                val payloadStr = String(value, Charsets.UTF_8)
-                responseBytes = handleCallControlWrite(device, payloadStr)
+                responseBytes = handleCallControlWrite(device, value)
                 success = true
             } else if (characteristic.uuid == BleConstants.CHAR_HEARTBEAT_UUID && value != null) {
                 success = true
@@ -231,8 +259,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
 
                 var responseBytes: ByteArray? = null
                 if (characteristic.uuid == BleConstants.CHAR_CALL_CONTROL_UUID) {
-                    val payloadStr = String(combined, Charsets.UTF_8)
-                    responseBytes = handleCallControlWrite(device, payloadStr)
+                    responseBytes = handleCallControlWrite(device, combined)
                     if (responseBytes != null) {
                         notifyCharacteristicToSubscribers(characteristic, responseBytes)
                     }
@@ -310,6 +337,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     }
 
     fun start(port: Int) {
+        current = this
         this.activePort = port
         this.shouldBeRunning = true
         registerBluetoothReceiver()
@@ -329,14 +357,12 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
                 val bytes = buildDeviceInfoJson().toByteArray(Charsets.UTF_8)
                 notifyCharacteristicToSubscribers(char, bytes)
             }
-            charState?.let { char ->
-                val bytes = buildStateJson().toByteArray(Charsets.UTF_8)
-                notifyCharacteristicToSubscribers(char, bytes)
-            }
+            charState?.let { char -> notifyCharacteristicToSubscribers(char, buildStateBytes()) }
         }
     }
 
     fun stop() {
+        if (current === this) current = null
         this.shouldBeRunning = false
         unregisterBluetoothReceiver()
         CallManager.removeListener(this)
@@ -527,81 +553,59 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         }
     }
 
-    private fun handleCallControlWrite(device: BluetoothDevice, payloadStr: String): ByteArray {
-        var action = "unknown"
-        var callId = ""
-        var seq = 0L
+    private fun bleKey(): ByteArray? = PairingStore.pairedClient()?.key?.let { BridgeCrypto.derive(it, "ble") }
 
-        try {
-            val json = JSONObject(payloadStr)
-            action = json.optString("action", "unknown")
-            callId = json.optString("callId", "")
-            seq = json.optLong("seq", 0L)
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to parse call control JSON: $payloadStr")
-            return JSONObject().apply {
-                put("ack", action)
-                put("callId", callId)
-                put("seq", seq)
-                put("success", false)
-                put("error", "malformed_json")
-            }.toString().toByteArray(Charsets.UTF_8)
-        }
+    /** Answers are sealed the same way as the request, so only the paired iPhone can read them. */
+    private fun controlReply(key: ByteArray?, action: String, callId: String, seq: Long, success: Boolean, error: String? = null): ByteArray {
+        val json = JSONObject().put("ack", action).put("callId", callId).put("seq", seq).put("success", success)
+        if (error != null) json.put("error", error)
+        val bytes = json.toString().toByteArray(Charsets.UTF_8)
+        return if (key == null) bytes else byteArrayOf(SEALED_VERSION) + BridgeCrypto.seal(key, bytes, BLE_CONTROL_AAD)
+    }
 
-        // Strict Invariant: Reject any media / audio control requests
-        if (action.contains("audio") || action.contains("media") || action.contains("pcm") || action.contains("stream")) {
-            Log.w(TAG, "Rejected media action via BLE: $action")
-            return JSONObject().apply {
-                put("ack", action)
-                put("callId", callId)
-                put("seq", seq)
-                put("success", false)
-                put("error", "media actions rejected; BLE is control-only side channel")
-            }.toString().toByteArray(Charsets.UTF_8)
-        }
-
-        // Sequence number deduplication
-        val devKey = device.address ?: "default"
-        val lastSeq = clientLastSeq[devKey] ?: 0L
-        if (seq > 0 && seq <= lastSeq) {
-            Log.w(TAG, "Duplicate or stale call control sequence: $seq <= $lastSeq")
-            return JSONObject().apply {
-                put("ack", action)
-                put("callId", callId)
-                put("seq", seq)
-                put("success", true)
-                put("duplicate", true)
-            }.toString().toByteArray(Charsets.UTF_8)
-        }
-        if (seq > 0) {
-            clientLastSeq[devKey] = seq
-        }
-
-        var executed = false
-        when (action.lowercase()) {
-            "answer" -> {
-                Log.i(TAG, "BLE Call Control: ANSWER for callId=$callId")
-                executed = CallManager.answer(callId.ifEmpty { null })
+    private fun handleCallControlWrite(device: BluetoothDevice, value: ByteArray): ByteArray {
+        val key = bleKey()
+        val json: JSONObject
+        if (key != null) {
+            // Keyed pairing exists: only sealed, fresh, increasing commands are accepted.
+            if (value.isEmpty() || value[0] != SEALED_VERSION) {
+                Log.w(TAG, "Rejected an unsealed BLE command")
+                return controlReply(null, "unknown", "", 0, false, "unauthorized")
             }
-            "reject" -> {
-                Log.i(TAG, "BLE Call Control: REJECT for callId=$callId")
-                executed = CallManager.reject(callId.ifEmpty { null })
+            val plain = BridgeCrypto.open(key, value.copyOfRange(1, value.size), BLE_CONTROL_AAD)
+                ?: return controlReply(null, "unknown", "", 0, false, "unauthorized").also {
+                    Log.w(TAG, "Rejected a BLE command that failed authentication")
+                }
+            json = try { JSONObject(String(plain, Charsets.UTF_8)) } catch (_: Exception) {
+                return controlReply(key, "unknown", "", 0, false, "malformed")
             }
-            "hangup" -> {
-                Log.i(TAG, "BLE Call Control: HANGUP for callId=$callId")
-                executed = CallManager.hangup(callId.ifEmpty { null })
+            val seq = json.optLong("q", 0)
+            val sentAt = json.optLong("t", 0)
+            if (seq <= lastControlSeq || kotlin.math.abs(System.currentTimeMillis() - sentAt) > MAX_CONTROL_AGE_MS) {
+                return controlReply(key, json.optString("a"), json.optString("id"), seq, false, "stale")
             }
-            else -> {
-                Log.w(TAG, "Unknown BLE call control action: $action")
+            lastControlSeq = seq
+        } else {
+            if (!PairingStore.legacyAuthAllowed) return controlReply(null, "unknown", "", 0, false, "unauthorized")
+            json = try { JSONObject(String(value, Charsets.UTF_8)) } catch (_: Exception) {
+                return controlReply(null, "unknown", "", 0, false, "malformed")
             }
         }
-
-        return JSONObject().apply {
-            put("ack", action)
-            put("callId", callId)
-            put("seq", seq)
-            put("success", executed)
-        }.toString().toByteArray(Charsets.UTF_8)
+        val action = (json.optString("a").ifBlank { json.optString("action") }).lowercase()
+        val callId = json.optString("id").ifBlank { json.optString("callId") }
+        val seq = json.optLong("q", json.optLong("seq", 0))
+        val executed = when (action) {
+            "answer" -> CallManager.answer(callId.ifEmpty { null })
+            "reject" -> CallManager.reject(callId.ifEmpty { null })
+            "hangup" -> CallManager.hangup(callId.ifEmpty { null })
+            "ringing_ack" -> {
+                IncomingCallPresenter.onIPhonePresented(callId)
+                true
+            }
+            else -> false
+        }
+        Log.i(TAG, "BLE command $action executed=$executed")
+        return controlReply(key, action, callId, seq, executed)
     }
 
     private fun buildDeviceInfoJson(): String {
@@ -610,19 +614,36 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
             put("id", RedmiGatewayApp.getOpaqueDeviceId())
             put("ip", ip)
             put("port", activePort)
-            put("v", 1)
-            put("ble", 1)
+            put("v", 2)
+            put("ble", if (PairingStore.pairedClient() != null) 2 else 1)
         }.toString()
     }
 
-    private fun buildStateJson(): String {
-        return JSONObject().apply {
-            put("state", CallManager.currentCallState)
-            put("callId", CallManager.currentCallId ?: "")
-            put("number", CallManager.currentPhoneNumber ?: "")
-            put("seq", stateSeq.incrementAndGet())
-            put("ts", System.currentTimeMillis())
-        }.toString()
+    /**
+     * Current call state for the iPhone. Sealed (version byte 2, nonce, ciphertext, tag) once a
+     * keyed pairing exists; compact keys keep it within a typical iOS notification MTU.
+     */
+    private fun buildStateBytes(): ByteArray {
+        val key = bleKey()
+        val state = JSONObject()
+            .put("s", CallManager.currentCallState)
+            .put("id", CallManager.currentCallId ?: "")
+            .put("d", CallManager.currentDirection.take(1))
+            .put("q", stateSeq.incrementAndGet())
+            .put("t", System.currentTimeMillis())
+        CallManager.currentPhoneNumber?.takeIf { it.isNotBlank() }?.let { state.put("n", it) }
+        if (key != null) {
+            return byteArrayOf(SEALED_VERSION) + BridgeCrypto.seal(key, state.toString().toByteArray(Charsets.UTF_8), BLE_STATE_AAD)
+        }
+        if (!PairingStore.legacyAuthAllowed) return ByteArray(0)
+        // Protocol 1 layout for iPhone builds up to 1.0 (33).
+        return JSONObject()
+            .put("state", CallManager.currentCallState)
+            .put("callId", CallManager.currentCallId ?: "")
+            .put("number", CallManager.currentPhoneNumber ?: "")
+            .put("seq", state.getLong("q"))
+            .put("ts", state.getLong("t"))
+            .toString().toByteArray(Charsets.UTF_8)
     }
 
     private fun notifyCharacteristicToSubscribers(
@@ -645,8 +666,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
 
     // CallManager.CallListener implementation
     override fun onCallStateChanged(callId: String, state: String, number: String?) {
-        val stateBytes = buildStateJson().toByteArray(Charsets.UTF_8)
-        charState?.let { notifyCharacteristicToSubscribers(it, stateBytes) }
+        charState?.let { notifyCharacteristicToSubscribers(it, buildStateBytes()) }
     }
 
     override fun onLogMessage(message: String) {}

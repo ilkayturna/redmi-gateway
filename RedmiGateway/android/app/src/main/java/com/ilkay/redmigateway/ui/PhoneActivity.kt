@@ -36,7 +36,7 @@ import com.google.android.material.tabs.TabLayout
 import com.ilkay.redmigateway.R
 import com.ilkay.redmigateway.databinding.ActivityPhoneBinding
 import com.ilkay.redmigateway.service.GatewayService
-import com.ilkay.redmigateway.sms.SmsManagerHelper
+import com.ilkay.redmigateway.sms.SmsSender
 import com.ilkay.redmigateway.telecom.CallManager
 import java.util.Date
 
@@ -478,20 +478,21 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
                 val body = message.text.toString()
                 if (body.isBlank()) return@setOnClickListener
                 isEnabled = false
-                Thread {
-                    val (accepted, error) = SmsManagerHelper.sendSms(this@PhoneActivity, address, body)
+                val immediate = SmsSender.send(this@PhoneActivity, address, body) { sent, _ ->
                     runOnUiThread {
                         isEnabled = true
-                        if (accepted) {
-                            messages = listOf(Message(address, body, System.currentTimeMillis(), true)) + messages
+                        if (sent) {
                             message.text.clear()
-                            showConversation(address)
-                            Toast.makeText(this@PhoneActivity, "SMS gönderim isteği kabul edildi", Toast.LENGTH_SHORT).show()
+                            refreshPhoneData()
                         } else {
-                            Toast.makeText(this@PhoneActivity, error ?: "SMS gönderilemedi", Toast.LENGTH_LONG).show()
+                            Toast.makeText(this@PhoneActivity, "SMS gönderilemedi", Toast.LENGTH_LONG).show()
                         }
                     }
-                }.start()
+                }
+                if (immediate != null) {
+                    isEnabled = true
+                    Toast.makeText(this@PhoneActivity, "SMS gönderilemedi", Toast.LENGTH_LONG).show()
+                }
             }
         }
         compose.addView(send, LinearLayout.LayoutParams(-2, -2))

@@ -20,9 +20,11 @@ import androidx.core.app.NotificationCompat
 import com.ilkay.redmigateway.ble.BleServerManager
 import com.ilkay.redmigateway.discovery.NsdDiscoveryManager
 import com.ilkay.redmigateway.server.GatewayWebSocketServer
-import com.ilkay.redmigateway.server.GatewayWebPageServer
+import com.ilkay.redmigateway.journal.CallJournal
+import com.ilkay.redmigateway.journal.SmsJournal
 import com.ilkay.redmigateway.telecom.CallManager
-import com.ilkay.redmigateway.ui.MainActivity
+import com.ilkay.redmigateway.ui.CallActivity
+import com.ilkay.redmigateway.ui.PhoneActivity
 
 class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
 
@@ -44,7 +46,9 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
          * is relayed, so Android keeps delivering call audio with the screen off.
          */
         /** True while at least one paired iPhone is connected and authenticated. */
-        fun hasAuthenticatedClient(): Boolean = (instance?.getAuthenticatedClientCount() ?: 0) > 0
+        fun hasAuthenticatedClient(): Boolean = authenticatedClientCount() > 0
+
+        fun authenticatedClientCount(): Int = instance?.getAuthenticatedClientCount() ?: 0
 
         fun setCallAudioForeground(active: Boolean) {
             val service = instance ?: return
@@ -53,7 +57,6 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     }
 
     private var webSocketServer: GatewayWebSocketServer? = null
-    private var webPageServer: GatewayWebPageServer? = null
     private var nsdDiscoveryManager: NsdDiscoveryManager? = null
     private var bleServerManager: BleServerManager? = null
     private val handler = Handler(Looper.getMainLooper())
@@ -99,7 +102,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
         }
 
         Log.i(TAG, "Starting Gateway Service...")
-        val notification = buildNotification("Geçit etkin (0 bağlı cihaz)")
+        val notification = buildNotification(clientText(0))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -122,7 +125,8 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
                 serverListener = this@GatewayService
                 start()
             }
-            webPageServer = GatewayWebPageServer(this, 8788).apply { start() }
+            CallJournal.get(this).start()
+            SmsJournal.get(this).start()
             isRunning = true
             CallManager.log("Gateway Foreground Service started on port 8787")
         } catch (e: Exception) {
@@ -139,8 +143,6 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
         nsdDiscoveryManager = null
         bleServerManager?.stop()
         bleServerManager = null
-        webPageServer?.stop()
-        webPageServer = null
         try {
             webSocketServer?.stopServer()
             webSocketServer = null
@@ -181,7 +183,10 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     }
 
     private fun buildNotification(text: String): Notification {
-        val launchIntent = Intent(this, MainActivity::class.java)
+        // The ongoing notification always leads back to the call while one exists.
+        val inCall = CallManager.currentCallState !in setOf("idle", "disconnected")
+        val launchIntent = Intent(this, if (inCall) CallActivity::class.java else PhoneActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val pendingIntent = PendingIntent.getActivity(
             this,
             0,
@@ -211,8 +216,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
             types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
         }
-        val text = if (callAudio) "Görüşme sesi iPhone'a aktarılıyor" else
-            "Geçit etkin (${getAuthenticatedClientCount()} bağlı cihaz)"
+        val text = if (callAudio) "Görüşme sesi iPhone'da" else clientText(getAuthenticatedClientCount())
         try {
             startForeground(NOTIFICATION_ID, buildNotification(text), types)
         } catch (error: Exception) {
@@ -222,15 +226,17 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     }
 
     override fun onClientCountChanged(authenticatedCount: Int) {
-        updateNotification("Geçit etkin ($authenticatedCount bağlı cihaz)")
+        updateNotification(clientText(authenticatedCount))
     }
+
+    private fun clientText(count: Int) = if (count > 0) "iPhone bağlı" else "iPhone bekleniyor"
 
     override fun onServerError(error: String) {
         CallManager.log("Server Error: $error")
     }
 
     fun getAuthenticatedClientCount(): Int {
-        return webSocketServer?.getAuthenticatedClientCount() ?: 0
+        return webSocketServer?.authenticatedCount() ?: 0
     }
 
     override fun onDestroy() {

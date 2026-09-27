@@ -198,7 +198,7 @@ class NsdDiscoveryManager(private val context: Context) {
 
             // Non-sensitive operational metadata TXT records
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                setAttribute("v", "1")
+                setAttribute("v", "2")
                 setAttribute("id", deviceId)
                 setAttribute("audio", "relay_udp_pcm")
                 setAttribute("ble", "1")

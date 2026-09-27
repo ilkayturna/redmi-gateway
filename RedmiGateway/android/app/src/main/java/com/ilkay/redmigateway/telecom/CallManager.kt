@@ -32,6 +32,12 @@ object CallManager {
         private set
     @Volatile var currentPhoneNumber: String? = null
         private set
+    /** "incoming" or "outgoing" for the current call, fixed when Telecom adds it. */
+    @Volatile var currentDirection: String = "outgoing"
+        private set
+    /** Wall-clock time the current call became active, or 0. */
+    @Volatile var activeSinceMillis: Long = 0L
+        private set
     private var activeCallCallback: Call.Callback? = null
 
     fun addListener(listener: CallListener) {
@@ -67,6 +73,10 @@ object CallManager {
         currentPhoneNumber = extractPhoneNumber(call)
         val stateStr = mapCallState(call.state)
         currentCallState = stateStr
+        currentDirection = if (call.state == Call.STATE_RINGING ||
+            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                call.details?.callDirection == Call.Details.DIRECTION_INCOMING)) "incoming" else "outgoing"
+        activeSinceMillis = if (stateStr == "active") System.currentTimeMillis() else 0L
 
         log("Call Added: ID=$currentCallId, State=$stateStr")
         notifyStateChanged()
@@ -76,6 +86,7 @@ object CallManager {
                 if (activeCall !== c) return
                 val mapped = mapCallState(state)
                 currentCallState = mapped
+                if (mapped == "active" && activeSinceMillis == 0L) activeSinceMillis = System.currentTimeMillis()
                 val num = extractPhoneNumber(c)
                 if (!num.isNullOrBlank() && currentPhoneNumber.isNullOrBlank()) {
                     currentPhoneNumber = num
@@ -107,11 +118,13 @@ object CallManager {
             currentCallState = "disconnected"
             notifyStateChanged()
 
+            IncomingCallPresenter.onCallEnded()
             // Reset after informing listeners
             activeCall = null
             currentCallState = "idle"
             currentCallId = null
             currentPhoneNumber = null
+            activeSinceMillis = 0L
             notifyStateChanged()
         }
     }

@@ -16,11 +16,11 @@ import subprocess
 import sys
 import time
 
-import websockets
+import bridge_client
+from bridge_client import BridgeClient
 
 ADB = os.environ.get("ADB", r"C:\Users\ilkay.turna\platform-tools\adb.exe")
 SERIAL = os.environ.get("ADB_SERIAL", "17df6357")
-PREFS = "/data/data/com.ilkay.redmigateway/shared_prefs/redmi_gateway_prefs.xml"
 # Running ALSA PCM substreams and their hardware parameters (read-only).
 ASOUND = ("for f in /proc/asound/card0/pcm*/sub0/status; do "
           "if grep -q RUNNING $f; then d=${f%/sub0/status}; echo \"== $d $(cat $d/info | grep -E '^id:' )\"; "
@@ -203,14 +203,6 @@ def adb(*args, **kw):
     return subprocess.run([ADB, "-s", SERIAL, *args], capture_output=True, text=True, **kw)
 
 
-def pairing_token():
-    xml = adb("shell", "cat " + PREFS).stdout
-    match = re.search(r'name="pairing_token">([^<]+)<', xml)
-    if not match:
-        sys.exit("pairing token not readable over adb")
-    return match.group(1)
-
-
 ROUTE_RE = re.compile(r"(apply mixer and update path: (?:voicemmode\d-call|incall).*|LAB_OP \S+|LAB_STEP .*|start_(?:input|output)_stream: enter.*|select_devices for use case \((?:incall|afe)[^)]*\)|Capture patch.*|[Mm]ute.*)")
 
 
@@ -306,25 +298,23 @@ async def main():
         events.flush()
         return row
 
-    token = pairing_token()
-    async with websockets.connect(f"ws://{args.host}:8787", ping_interval=None) as ws:
+    # The lab hooks are off unless switched on over adb; they expire on their own.
+    bridge_client.enable_lab_mode(True)
+    client = await BridgeClient.connect(args.host)
+    async with client.ws:
         async def request(payload, want):
-            await ws.send(json.dumps(payload))
+            await client.send(payload)
             while True:
-                msg = json.loads(await asyncio.wait_for(ws.recv(), 10))
+                msg = await client.recv(10)
                 if msg.get("type") == "call":
                     record("call", state=msg.get("state"))
                 if msg.get("type") == want:
                     return msg
 
-        await asyncio.wait_for(ws.recv(), 10)  # hello
-        auth = await request({"type": "auth", "token": token}, "auth_result")
-        if not auth.get("success"):
-            sys.exit("auth failed")
-        print("authenticated")
+        print(f"authenticated (protocol {client.protocol})")
 
         if args.dial:
-            await ws.send(json.dumps({"type": "dial", "number": args.dial}))
+            await client.send({"type": "dial", "number": args.dial})
             print("dial sent")
         print("waiting for an active call ...")
         deadline = time.time() + 90
@@ -383,7 +373,7 @@ async def main():
             state = await request({"type": "get_state"}, "state")
             call = state.get("call") or {}
             if call.get("callId"):
-                await ws.send(json.dumps({"type": "hangup", "callId": call["callId"]}))
+                await client.send({"type": "hangup", "callId": call["callId"]})
                 record("hangup_sent")
                 print("hangup sent")
         await asyncio.sleep(2)
