@@ -66,6 +66,13 @@ public final class GatewayConnection: ObservableObject {
     private let kManualHost = "manual_gateway_ip"
     private let kManualPort = "manual_gateway_port"
     private let kLegacyToken = "pairing_token"
+    private let kKnownAddresses = "gateway_addresses"
+
+    /// A Redmi address to try. The Redmi can have several at once (Wi-Fi, its own hotspot, VPN).
+    private struct Endpoint: Hashable {
+        let host: String
+        let port: Int
+    }
 
     private let urlSession: URLSession = {
         let config = URLSessionConfiguration.default
@@ -74,6 +81,10 @@ public final class GatewayConnection: ObservableObject {
         return URLSession(configuration: config)
     }()
     private var webSocketTask: URLSessionWebSocketTask?
+    /// Addresses the Redmi was seen at, newest first; all are tried together on every connect.
+    private var candidates: [Endpoint] = []
+    /// Connection attempts still waiting for the Redmi's hello; the first to answer wins.
+    private var attempts: [(task: URLSessionWebSocketTask, endpoint: Endpoint)] = []
     private var channel: SecureChannel?
     private var serverNonce: Data?
     private var clientNonce: Data?
@@ -89,6 +100,7 @@ public final class GatewayConnection: ObservableObject {
     private var pingTask: Task<Void, Never>?
     private var syncCallsHasMore = false
     private var smsTimeouts: [String: Task<Void, Never>] = [:]
+    private var lastPathSignature = ""
 
     let discovery = NWGatewayDiscovery()
     private let pathMonitor = NWPathMonitor()
@@ -99,15 +111,24 @@ public final class GatewayConnection: ObservableObject {
         currentHost = defaults.string(forKey: kLastHost) ?? ""
         let port = defaults.integer(forKey: kLastPort)
         currentPort = port > 0 ? port : 8787
+        for entry in defaults.stringArray(forKey: kKnownAddresses) ?? [] {
+            let parts = entry.split(separator: "|", maxSplits: 1).map(String.init)
+            if parts.count == 2, let entryPort = Int(parts[1]) {
+                candidates.append(Endpoint(host: parts[0], port: entryPort))
+            }
+        }
+        if !currentHost.isEmpty, !candidates.contains(Endpoint(host: currentHost, port: currentPort)) {
+            candidates.insert(Endpoint(host: currentHost, port: currentPort), at: 0)
+        }
         pairing = PairingKeychain.load()
         link = pairing == nil ? .unpaired : .searching
 
         discovery.onEndpointFound = { [weak self] host, port, deviceId in
-            Task { @MainActor [weak self] in self?.endpointFound(host: host, port: port, deviceId: deviceId, source: "Bonjour") }
+            Task { @MainActor [weak self] in self?.endpointsFound([host], port: port, deviceId: deviceId, source: "Bonjour") }
         }
         let ble = BLECentralManager.shared
-        ble.onEndpointHint = { [weak self] host, port, deviceId in
-            Task { @MainActor [weak self] in self?.endpointFound(host: host, port: port, deviceId: deviceId, source: "Bluetooth") }
+        ble.onEndpointHint = { [weak self] hosts, port, deviceId in
+            Task { @MainActor [weak self] in self?.endpointsFound(hosts, port: port, deviceId: deviceId, source: "Bluetooth") }
         }
         ble.onStateUpdate = { [weak self] update in
             Task { @MainActor [weak self] in self?.applyBluetoothCallState(update) }
@@ -194,55 +215,110 @@ public final class GatewayConnection: ObservableObject {
     /// Reconnect immediately (app foregrounded, Bluetooth woke the app, network changed).
     func reconnectNow(reason: String) {
         guard pairing != nil || pendingPairCode != nil else { return }
-        guard state != .authenticated, state != .connecting else { return }
+        guard state != .authenticated, webSocketTask == nil else { return }
         log("Reconnecting: \(reason)")
         reconnectAttempt = 0
         connectToBestEndpoint()
     }
 
+    /// Tries every known address of the Redmi at once (manual address first); the first one
+    /// that answers wins. A stale address can never hold up a fresh one.
     private func connectToBestEndpoint() {
-        if let manual = manualAddress {
-            connect(host: manual.host, port: manual.port)
-        } else if !currentHost.isEmpty {
-            connect(host: currentHost, port: currentPort)
-        } else {
-            state = .connecting
-            if link != .pairing { link = .searching }
-            scheduleReconnect()
-        }
+        var list: [Endpoint] = []
+        if let manual = manualAddress { list.append(Endpoint(host: manual.host, port: manual.port)) }
+        list += candidates
+        race(list)
     }
 
-    private func endpointFound(host: String, port: Int, deviceId: String?, source: String) {
+    private func endpointsFound(_ hosts: [String], port: Int, deviceId: String?, source: String) {
         if let pairing, let deviceId, !deviceId.isEmpty, deviceId != pairing.gatewayId { return }
-        guard !ignoredHosts.contains(host) else { return }
-        guard pairing != nil || pendingPairCode != nil else { return }
-        guard state != .authenticated else { return }
-        // Never interrupt a handshake in progress: Bonjour and Bluetooth often report the same
-        // Redmi within milliseconds, and a second pairing attempt would meet a rotated code.
-        if webSocketTask != nil && (state == .connecting || state == .connected) { return }
-        log("Redmi found via \(source)")
-        connect(host: host, port: port)
+        let found = hosts.filter { !$0.isEmpty && !ignoredHosts.contains($0) }.map { Endpoint(host: $0, port: port) }
+        guard !found.isEmpty else { return }
+        let fresh = found.contains { !candidates.contains($0) }
+        remember(found)
+        guard pairing != nil || pendingPairCode != nil, state != .authenticated, webSocketTask == nil else { return }
+        if fresh { log("Redmi address found via \(source)") }
+        // Joins a race in progress, or starts one.
+        race(found + candidates)
+    }
+
+    private func remember(_ endpoints: [Endpoint]) {
+        for endpoint in endpoints.reversed() {
+            candidates.removeAll { $0 == endpoint }
+            candidates.insert(endpoint, at: 0)
+        }
+        if candidates.count > 10 { candidates.removeLast(candidates.count - 10) }
+        UserDefaults.standard.set(candidates.map { "\($0.host)|\($0.port)" }, forKey: kKnownAddresses)
     }
 
     // MARK: - Socket
 
-    private func connect(host: String, port: Int) {
+    private func race(_ list: [Endpoint]) {
+        guard webSocketTask == nil else { return }
         cancelReconnect()
-        closeSocket()
-        let formatted = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
-        guard let url = URL(string: "ws://\(formatted):\(port)") else { return }
-        currentHost = host
-        currentPort = port
+        var seen = Set<Endpoint>()
+        let unique = list.filter { seen.insert($0).inserted && !ignoredHosts.contains($0.host) }
+        for endpoint in unique.prefix(6) where !attempts.contains(where: { $0.endpoint == endpoint }) {
+            startAttempt(endpoint)
+        }
         state = .connecting
+        if attempts.isEmpty {
+            if link != .pairing { link = .searching }
+            scheduleReconnect()
+            return
+        }
         if link != .pairing { link = .connecting }
+    }
+
+    private func startAttempt(_ endpoint: Endpoint) {
+        let host = endpoint.host.contains(":") && !endpoint.host.hasPrefix("[") ? "[\(endpoint.host)]" : endpoint.host
+        guard let url = URL(string: "ws://\(host):\(endpoint.port)") else { return }
         let task = urlSession.webSocketTask(with: url)
         task.maximumMessageSize = 1 << 20
-        webSocketTask = task
+        attempts.append((task, endpoint))
         task.resume()
-        receive(on: task)
+        task.receive { [weak self] result in
+            Task { @MainActor [weak self] in self?.attemptAnswered(task, endpoint: endpoint, result: result) }
+        }
+    }
+
+    private func attemptAnswered(_ task: URLSessionWebSocketTask, endpoint: Endpoint,
+                                 result: Result<URLSessionWebSocketTask.Message, Error>) {
+        guard let index = attempts.firstIndex(where: { $0.task === task }) else { return }
+        attempts.remove(at: index)
+        switch result {
+        case .success(let message):
+            guard webSocketTask == nil else {
+                task.cancel(with: .goingAway, reason: nil)
+                return
+            }
+            // The first Redmi address to answer wins; the other attempts end here.
+            for other in attempts { other.task.cancel(with: .goingAway, reason: nil) }
+            attempts.removeAll()
+            webSocketTask = task
+            currentHost = endpoint.host
+            currentPort = endpoint.port
+            remember([endpoint])
+            switch message {
+            case .string(let text): handleFrame(text)
+            case .data(let data): handleFrame(String(decoding: data, as: UTF8.self))
+            @unknown default: break
+            }
+            if webSocketTask === task { receive(on: task) }
+        case .failure:
+            guard attempts.isEmpty, webSocketTask == nil else { return }
+            state = .failed
+            switch link {
+            case .unpaired, .incompatible, .pairing: break
+            default: link = .offline(isNetworkViable ? "Redmi'ye ulaşılamıyor" : "Ağ bağlantısı yok")
+            }
+            scheduleReconnect()
+        }
     }
 
     private func closeSocket() {
+        for attempt in attempts { attempt.task.cancel(with: .goingAway, reason: nil) }
+        attempts.removeAll()
         pingTask?.cancel()
         pingTask = nil
         webSocketTask?.cancel(with: .goingAway, reason: nil)
@@ -252,6 +328,15 @@ public final class GatewayConnection: ObservableObject {
         serverNonce = nil
         clientNonce = nil
         if state != .disconnected { state = .disconnected }
+    }
+
+    /// After a network change an authenticated socket may be dead without knowing it yet.
+    private func validateLink() {
+        guard let task = webSocketTask, state == .authenticated else { return }
+        task.sendPing { error in
+            guard error != nil else { return }
+            Task { @MainActor in GatewayConnection.shared.handleDrop(task) }
+        }
     }
 
     private func receive(on task: URLSessionWebSocketTask) {
@@ -303,11 +388,8 @@ public final class GatewayConnection: ObservableObject {
             self.reconnectAttempt += 1
             self.discovery.start()
             BLECentralManager.shared.start()
-            if !self.currentHost.isEmpty || self.manualAddress != nil {
-                self.connectToBestEndpoint()
-            } else {
-                self.scheduleReconnect()
-            }
+            BLECentralManager.shared.refreshDeviceInfo()
+            self.connectToBestEndpoint()
         }
     }
 
@@ -426,6 +508,9 @@ public final class GatewayConnection: ObservableObject {
             return
         }
         compatibility = serverProtocol > BridgeProtocol.version ? .degraded : .supported
+        if let addresses = hello.addresses, pairing == nil || hello.gatewayId == pairing?.gatewayId {
+            remember(addresses.map { Endpoint(host: $0, port: currentPort) } + [Endpoint(host: currentHost, port: currentPort)])
+        }
         guard let nonceText = hello.nonce, let nonce = Data(base64Encoded: nonceText) else { return }
         serverNonce = nonce
 
@@ -799,8 +884,16 @@ public final class GatewayConnection: ObservableObject {
                 let connection = GatewayConnection.shared
                 connection.isWiFiConnected = path.usesInterfaceType(.wifi)
                 connection.isNetworkViable = path.status == .satisfied
+                let signature = "\(path.status)|" + path.availableInterfaces.map { $0.name }.joined(separator: ",")
+                guard signature != connection.lastPathSignature else { return }
+                connection.lastPathSignature = signature
                 if path.status == .satisfied {
+                    // New network: find the Redmi's addresses again and check the current link.
                     connection.ignoredHosts.removeAll()
+                    connection.discovery.stop()
+                    connection.discovery.start()
+                    BLECentralManager.shared.refreshDeviceInfo()
+                    connection.validateLink()
                     connection.reconnectNow(reason: "network changed")
                 } else if connection.state != .authenticated, connection.link != .unpaired {
                     connection.link = .offline("Ağ bağlantısı yok")

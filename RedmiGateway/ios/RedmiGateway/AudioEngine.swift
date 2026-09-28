@@ -210,7 +210,11 @@ final class AudioEngine {
             self.lastPcmSentAt = Date()
             self.recoveryRequested = false
 
-            let socket = NWConnection(host: NWEndpoint.Host(host), port: endpointPort, using: .udp)
+            // Interactive voice: Wi-Fi queues these packets as voice (WMM AC_VO), which keeps
+            // latency low on busy hotspots and shared networks.
+            let parameters = NWParameters.udp
+            parameters.serviceClass = .interactiveVoice
+            let socket = NWConnection(host: NWEndpoint.Host(host), port: endpointPort, using: parameters)
             self.connection = socket
             socket.stateUpdateHandler = { [weak self, weak socket] state in
                 guard let self, let socket, self.connection === socket else { return }

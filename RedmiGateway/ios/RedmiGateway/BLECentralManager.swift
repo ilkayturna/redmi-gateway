@@ -30,12 +30,13 @@ final class BLECentralManager: NSObject, ObservableObject {
     @Published private(set) var isConnected = false
     @Published private(set) var lastSeenDate: Date?
 
-    var onEndpointHint: ((_ host: String, _ port: Int, _ deviceId: String) -> Void)?
+    var onEndpointHint: ((_ hosts: [String], _ port: Int, _ deviceId: String) -> Void)?
     var onStateUpdate: ((BLECallState) -> Void)?
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
     private var stateChar: CBCharacteristic?
+    private var deviceInfoChar: CBCharacteristic?
     private var controlChar: CBCharacteristic?
     private var pendingControl: [Int64: (Bool) -> Void] = [:]
     private var lastControlSeq: Int64 = 0
@@ -77,6 +78,12 @@ final class BLECentralManager: NSObject, ObservableObject {
         }
     }
 
+    /// Reads the Redmi's current addresses again (after this iPhone changed networks).
+    func refreshDeviceInfo() {
+        guard let peripheral, peripheral.state == .connected, let deviceInfoChar else { return }
+        peripheral.readValue(for: deviceInfoChar)
+    }
+
     func setGateway(id: String) {
         if let current = gatewayId, current != id { forgetGateway() }
         gatewayId = id
@@ -88,6 +95,7 @@ final class BLECentralManager: NSObject, ObservableObject {
         if let peripheral { central.cancelPeripheralConnection(peripheral) }
         peripheral = nil
         stateChar = nil
+        deviceInfoChar = nil
         controlChar = nil
         isConnected = false
     }
@@ -132,8 +140,9 @@ final class BLECentralManager: NSObject, ObservableObject {
             peripheral = nil
             return
         }
-        if let ip = info.ip, !ip.isEmpty, let port = info.port, port > 0 {
-            onEndpointHint?(ip, port, info.id)
+        let hosts = ([info.ip].compactMap { $0 } + (info.ips ?? [])).filter { !$0.isEmpty }
+        if !hosts.isEmpty, let port = info.port, port > 0 {
+            onEndpointHint?(hosts, port, info.id)
         }
     }
 
@@ -199,6 +208,7 @@ extension BLECentralManager: CBCentralManagerDelegate {
             } else {
                 self.isConnected = false
                 self.stateChar = nil
+                self.deviceInfoChar = nil
                 self.controlChar = nil
             }
         }
@@ -234,6 +244,7 @@ extension BLECentralManager: CBCentralManagerDelegate {
             guard self.peripheral === peripheral else { return }
             self.isConnected = false
             self.stateChar = nil
+            self.deviceInfoChar = nil
             self.controlChar = nil
             GatewayConnection.shared.log("Bluetooth disconnected: \((error as NSError?)?.code ?? 0)")
             // A pending connection completes whenever the Redmi is back in range, even suspended.
@@ -273,6 +284,9 @@ extension BLECentralManager: CBPeripheralDelegate {
             for characteristic in characteristics {
                 switch characteristic.uuid {
                 case RedmiGatewayBLEConstants.charDeviceInfoUUID:
+                    // Notified whenever the Redmi's addresses change (new Wi-Fi, hotspot on/off).
+                    self.deviceInfoChar = characteristic
+                    if characteristic.properties.contains(.notify) { peripheral.setNotifyValue(true, for: characteristic) }
                     peripheral.readValue(for: characteristic)
                 case RedmiGatewayBLEConstants.charStateUUID:
                     self.stateChar = characteristic

@@ -23,9 +23,11 @@ struct HelloMessage: Decodable {
     let nonce: String?
     let paired: Bool?
     let appVersion: String?
+    /// Every local address of the Redmi (Wi-Fi, its hotspot, VPN).
+    let addresses: [String]?
 
     enum CodingKeys: String, CodingKey {
-        case device, minProtocol, gatewayId, nonce, paired, appVersion
+        case device, minProtocol, gatewayId, nonce, paired, appVersion, addresses
         case protocolVersion = "protocol"
     }
 }

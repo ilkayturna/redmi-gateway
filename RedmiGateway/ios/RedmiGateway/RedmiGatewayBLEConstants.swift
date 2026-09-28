@@ -17,6 +17,8 @@ enum RedmiGatewayBLEConstants {
 struct BLEDeviceInfoPayload: Codable {
     let id: String
     let ip: String?
+    /// All local addresses; Wi-Fi and the Redmi's own hotspot can be up together.
+    let ips: [String]?
     let port: Int?
     let v: Int?
     let ble: Int?
