@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- VoIP pushes ring the iPhone while it is away from the Redmi. Passed to xcodebuild only
+         when the release pipeline installed a profile that carries push (scripts/ensure_push_profile.py). -->
+    <key>aps-environment</key>
+    <string>production</string>
+</dict>
+</plist>

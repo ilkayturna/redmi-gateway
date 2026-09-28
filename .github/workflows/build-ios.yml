@@ -87,17 +87,44 @@ jobs:
           security unlock-keychain -p "$keychain_password" "$keychain"
           security list-keychains -d user -s "$keychain"
           security import "$RUNNER_TEMP/dist.p12" -k "$keychain" -P "$IOS_DIST_P12_PASSWORD" -T /usr/bin/codesign
+          # Serial of the signing certificate, so the push profile is issued for the same one.
+          (openssl pkcs12 -in "$RUNNER_TEMP/dist.p12" -passin env:IOS_DIST_P12_PASSWORD -nokeys -legacy 2>/dev/null \
+            || openssl pkcs12 -in "$RUNNER_TEMP/dist.p12" -passin env:IOS_DIST_P12_PASSWORD -nokeys 2>/dev/null) \
+            | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2 > "$RUNNER_TEMP/cert_serial" || true
           security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
           profiles="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$profiles"
           cp "$RUNNER_TEMP/profile.mobileprovision" "$profiles/N6ZRK2NV2U.mobileprovision"
           rm "$RUNNER_TEMP/dist.p12" "$RUNNER_TEMP/profile.mobileprovision"
 
+      - name: Provision push notifications
+        id: push
+        continue-on-error: true
+        shell: bash
+        env:
+          ASC_API_KEY_B64: ${{ secrets.ASC_API_KEY_B64 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --disable-pip-version-check --quiet 'PyJWT[crypto]>=2,<3'
+          CERT_SERIAL="$(cat "$RUNNER_TEMP/cert_serial" 2>/dev/null || true)" python3 scripts/ensure_push_profile.py
+
       - name: Archive iPhone app
         shell: bash
+        env:
+          PUSH_PROFILE: ${{ steps.push.outputs.push_profile }}
         run: |
           set -euo pipefail
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" RedmiGateway/ios/RedmiGateway/Info.plist
+          # With a push profile the app gets the push entitlement; otherwise it signs as before.
+          profile='Telefon Gecidi App Store 2026'
+          entitlements=()
+          if [ -n "${PUSH_PROFILE:-}" ]; then
+            profile="$PUSH_PROFILE"
+            entitlements=(CODE_SIGN_ENTITLEMENTS=RedmiGateway/RedmiGateway.entitlements)
+          fi
+          echo "$profile" > "$RUNNER_TEMP/profile_name"
           xcodebuild archive \
             -project RedmiGateway/ios/RedmiGateway.xcodeproj \
             -scheme RedmiGateway \
@@ -106,14 +133,16 @@ jobs:
             -archivePath "$RUNNER_TEMP/RedmiGateway.xcarchive" \
             DEVELOPMENT_TEAM=6FR2S79P48 \
             CODE_SIGN_STYLE=Manual \
-            'PROVISIONING_PROFILE_SPECIFIER=Telefon Gecidi App Store 2026' \
-            'CODE_SIGN_IDENTITY=iPhone Distribution'
+            "PROVISIONING_PROFILE_SPECIFIER=$profile" \
+            'CODE_SIGN_IDENTITY=iPhone Distribution' \
+            ${entitlements[@]+"${entitlements[@]}"}
 
       - name: Export IPA
         shell: bash
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/ExportOptions.plist" <<'PLIST'
+          profile="$(cat "$RUNNER_TEMP/profile_name")"
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
@@ -121,7 +150,7 @@ jobs:
             <key>signingStyle</key><string>manual</string>
             <key>teamID</key><string>6FR2S79P48</string>
             <key>provisioningProfiles</key><dict>
-              <key>com.ilkay.redmigateway.ios</key><string>Telefon Gecidi App Store 2026</string>
+              <key>com.ilkay.redmigateway.ios</key><string>${profile}</string>
             </dict>
           </dict></plist>
           PLIST
