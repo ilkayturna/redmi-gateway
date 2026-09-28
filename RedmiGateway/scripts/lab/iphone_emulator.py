@@ -38,7 +38,7 @@ class Media:
         self.rx = 0
         self.rx_nonzero = 0
         self.phase = 0.0
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setblocking(False)
 
     def frame(self):

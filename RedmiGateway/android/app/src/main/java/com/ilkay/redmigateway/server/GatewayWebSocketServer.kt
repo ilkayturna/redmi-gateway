@@ -95,6 +95,7 @@ class GatewayWebSocketServer(
             .put("gatewayId", RedmiGatewayApp.getOpaqueDeviceId())
             .put("nonce", BridgeCrypto.b64(peer.serverNonce))
             .put("paired", PairingStore.pairedClient() != null)
+            .put("addresses", JSONArray(com.ilkay.redmigateway.ble.NetworkUtils.localAddresses()))
             .put("appVersion", BuildConfig.VERSION_NAME)
             .put("appBuild", BuildConfig.VERSION_CODE)
         sendPlain(conn, hello)
@@ -352,7 +353,8 @@ class GatewayWebSocketServer(
             send(peer, JSONObject().put("type", "error").put("code", "audio_busy").put("message", "Another client owns call audio"))
             return
         }
-        val session = CallAudioRelay.arm(context, conn.remoteSocketAddress?.address, peer.mediaKey)
+        val session = CallAudioRelay.arm(context, conn.remoteSocketAddress?.address, peer.mediaKey,
+            conn.localSocketAddress?.address)
         audioOwner = conn
         send(peer, JSONObject()
             .put("type", "audio_ready")

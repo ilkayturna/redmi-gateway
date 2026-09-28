@@ -116,6 +116,8 @@ object CallAudioRelay : CallManager.CallListener {
     @Volatile private var expectedClientAddress: InetAddress? = null
     @Volatile private var peer: SocketAddress? = null
     @Volatile private var socket: DatagramSocket? = null
+    /** Local address the audio socket is bound to: the one the iPhone's control link uses. */
+    @Volatile private var boundAddress: InetAddress? = null
     private var receiveThread: Thread? = null
 
     // Media endpoints; only non-null between cutover and release.
@@ -185,7 +187,14 @@ object CallAudioRelay : CallManager.CallListener {
      * Opens (or reuses) a relay session for the authenticated iPhone at [clientAddress] and
      * returns its id. The Redmi keeps the call audio until the iPhone's frames prove it ready.
      */
-    fun arm(context: Context, clientAddress: InetAddress?, sessionMediaKey: ByteArray? = null): Int {
+    /**
+     * [localAddress] is the Redmi address the iPhone reached for its control link. The audio
+     * socket binds to it, so replies leave from the address the iPhone sends to: a Redmi with
+     * Wi-Fi and a hotspot (or mobile data) at once would otherwise answer from another address,
+     * and the iPhone drops those packets.
+     */
+    fun arm(context: Context, clientAddress: InetAddress?, sessionMediaKey: ByteArray? = null,
+            localAddress: InetAddress? = null): Int {
         synchronized(this) {
             appContext = context.applicationContext
             expectedClientAddress = clientAddress
@@ -203,7 +212,7 @@ object CallAudioRelay : CallManager.CallListener {
                 rejectedPackets.set(0)
                 peer = null
                 lastIPhonePcmAt = 0L
-                openSocket()
+                openSocket(localAddress)
             }
         }
         handler.post {
@@ -390,19 +399,33 @@ object CallAudioRelay : CallManager.CallListener {
         }
     }
 
-    private fun openSocket() {
-        if (socket?.isClosed == false) return
-        val datagram = DatagramSocket(null).apply {
-            reuseAddress = true
-            receiveBufferSize = 64 * 1024
-            sendBufferSize = 64 * 1024
-            bind(InetSocketAddress(PORT))
+    private fun openSocket(localAddress: InetAddress?) {
+        val current = socket
+        if (current != null && !current.isClosed && boundAddress == localAddress) return
+        current?.close()
+        receiveThread?.join(300)
+        val datagram = try {
+            newAudioSocket(if (localAddress != null) InetSocketAddress(localAddress, PORT) else InetSocketAddress(PORT))
+        } catch (error: Exception) {
+            Log.w(TAG, "Could not bind audio to the control link address: ${error.javaClass.simpleName}")
+            newAudioSocket(InetSocketAddress(PORT))
         }
+        boundAddress = if (datagram.localAddress?.isAnyLocalAddress == true) null else localAddress
+        Log.i(TAG, "Audio socket bound to ${if (boundAddress == null) "all addresses" else "the control link address"}")
         socket = datagram
         receiveThread = Thread({ receiveLoop(datagram) }, "CallAudio-Receive").apply {
             priority = Thread.MAX_PRIORITY
             start()
         }
+    }
+
+    private fun newAudioSocket(address: InetSocketAddress) = DatagramSocket(null).apply {
+        reuseAddress = true
+        receiveBufferSize = 64 * 1024
+        sendBufferSize = 64 * 1024
+        // DSCP EF (46): Wi-Fi access points and hotspots queue these as voice (WMM AC_VO).
+        runCatching { trafficClass = 0xB8 }
+        bind(address)
     }
 
     private fun receiveLoop(datagram: DatagramSocket) {
@@ -693,6 +716,7 @@ object CallAudioRelay : CallManager.CallListener {
             expectedClientAddress = null
             socket?.close()
             socket = null
+            boundAddress = null
         }
         receiveThread?.join(300)
         receiveThread = null

@@ -214,7 +214,8 @@ class BridgeClient:
 
     @classmethod
     async def open(cls, host):
-        ws = await websockets.connect(f"ws://{host}:8787", ping_interval=None, max_size=None)
+        target = f"[{host}]" if ":" in host else host
+        ws = await websockets.connect(f"ws://{target}:8787", ping_interval=None, max_size=None)
         client = cls(ws)
         client.hello = await client.expect("hello")
         return client

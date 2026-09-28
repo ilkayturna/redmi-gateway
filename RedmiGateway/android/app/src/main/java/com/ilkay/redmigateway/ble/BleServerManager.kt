@@ -368,9 +368,13 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         this.activePort = port
     }
 
+    private var lastAnnouncedAddresses: List<String> = emptyList()
+
     fun updateActiveIp(ip: String) {
-        val changed = (this.activeIp != ip)
+        val addresses = NetworkUtils.localAddresses()
+        val changed = this.activeIp != ip || addresses != lastAnnouncedAddresses
         this.activeIp = ip
+        lastAnnouncedAddresses = addresses
         Log.i(TAG, "Active IP updated: $ip (changed=$changed)")
         if (changed && isServerRunning) {
             charDeviceInfo?.let { char ->
@@ -704,6 +708,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         return JSONObject().apply {
             put("id", RedmiGatewayApp.getOpaqueDeviceId())
             put("ip", ip)
+            // Wi-Fi and hotspot can be up together; the iPhone tries every address.
+            put("ips", org.json.JSONArray(NetworkUtils.localAddresses()))
             put("port", activePort)
             put("v", 2)
             put("ble", if (PairingStore.pairedClient() != null) 2 else 1)
@@ -746,8 +752,10 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         // Call state goes to every connected device. A link can outlive a restart of this app
         // (the Bluetooth stack keeps it); the iPhone then still listens on the same handle,
         // while this new server instance has no record of its subscription.
-        val toAll = characteristic.uuid == BleConstants.CHAR_STATE_UUID
-        if (toAll) Log.i(TAG, "BLE call state notified to ${connectedDevices.size} device(s), ${bytes.size} bytes")
+        val toAll = characteristic.uuid == BleConstants.CHAR_STATE_UUID || characteristic.uuid == BleConstants.CHAR_DEVICE_INFO_UUID
+        if (characteristic.uuid == BleConstants.CHAR_STATE_UUID) {
+            Log.i(TAG, "BLE call state notified to ${connectedDevices.size} device(s), ${bytes.size} bytes")
+        }
         for (device in connectedDevices) {
             val subs = subscribedDevices[device]
             if (toAll || subs?.contains(characteristic.uuid) == true) {
