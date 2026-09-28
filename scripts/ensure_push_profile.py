@@ -61,7 +61,7 @@ def bundle_id() -> str:
 
 
 def ensure_push(bundle: str) -> None:
-    capabilities = request("GET", f"/bundleIds/{bundle}/bundleIdCapabilities?limit=200")["data"]
+    capabilities = request("GET", f"/bundleIds/{bundle}/bundleIdCapabilities")["data"]
     if any(c["attributes"].get("capabilityType") == "PUSH_NOTIFICATIONS" for c in capabilities):
         print("Push Notifications already enabled on the app ID")
         return
