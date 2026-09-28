@@ -80,6 +80,21 @@ gh workflow run build-ios.yml --ref delivery/phone-bridge -f release=false -f pr
 
 The owner approved automated IVR calls to Turkcell 532.
 
+## Away from home (Redmi at home, iPhone elsewhere)
+
+Owner steps, done once:
+
+1. Install **Tailscale** on both phones and sign in with the same account. The Redmi announces
+   its Tailscale address, and the iPhone learns it at home and uses it when away.
+2. In the Apple Developer account, open Keys, create a key with "Apple Push Notifications service"
+   enabled, and download `AuthKey_XXXXXXXXXX.p8`.
+3. Copy that file to the Redmi and choose it under Advanced and diagnostics › Uzaktan kullanım.
+4. Open the iPhone app once at home; it registers for push and hands its token to the Redmi.
+
+The release pipeline enables Push Notifications on the app ID and builds with a push-capable
+profile (`scripts/ensure_push_profile.py`). If that step fails, the build falls back to the old
+profile, without push.
+
 ## Known limits (platform)
 
 - iOS does not relaunch a swiped-away app for Bluetooth. The call wake iBeacon covers that case,

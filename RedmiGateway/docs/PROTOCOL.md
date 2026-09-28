@@ -124,8 +124,11 @@ Protocol 1 sessions use the old clear layout: `[0..3] session [4..5] seq [6] typ
 The Bluetooth key is `derive(K, "ble")`. Sealed values are `0x02 | nonce | ciphertext | tag`.
 
 - **State characteristic** (`…0003`, read and notify): JSON
-  `{"s":state,"id":callId,"d":"i"|"o","q":seq,"t":epochMs,"n"?:number}`, AAD
-  `"phonebridge-ble-state"`.
+  `{"s":state,"id":callId,"d":"i"|"o","q":seq,"t":epochMs,"n"?:number,"k":callsSeq,"m":smsSeq}`,
+  AAD `"phonebridge-ble-state"`.
+  - `k` and `m` are the newest journal sequences. The state is notified again whenever they
+    change, so a sleeping iPhone wakes up for a new SMS or missed call, fetches it and posts a
+    notification.
   - The iPhone accepts it only if `t` is within 120 s of its own clock and newer than the last one
     accepted. Unsealed state is ignored.
   - Continuation reads of a long value return the same bytes.
@@ -165,6 +168,7 @@ The Bluetooth key is `derive(K, "ble")`. Sealed values are `0x02 | nonce | ciphe
 | `sync` | `callsAfter`, `smsAfter` | `sync_calls` then `sync_sms` |
 | `diagnostics` | — | `diagnostics_result` (no numbers, message text or keys) |
 | `unpair` | — | `ack`, then the Redmi closes the connection |
+| `push_token` | `token` (hex), `environment` | — (stored for Apple push while the iPhone is away) |
 
 `audio_start` is accepted up to 10 s after this client's own `dial`, before Telecom has created the
 call.
@@ -176,6 +180,10 @@ call.
 - `audio_state {owner: redmi|preparing_iphone|iphone, running, detail}`. The Redmi is the only
   authority on who carries the conversation; see AUDIO_ARCHITECTURE.md for the reasons.
 - `call_log {item}` and `sms {item}` are live journal entries.
+- `call_waiting {state: ringing|ended, callId, number?}` is a second incoming call during the
+  current one. `answer` with its `callId` ends the current call and answers it. `reject` or
+  `hangup` with its `callId` declines it. When the current call ends, the waiting call becomes
+  the current call under the same `callId`.
 - `sync_calls` / `sync_sms` `{items, hasMore, lastSeq}`.
 
 ### Journals and replay
@@ -195,6 +203,23 @@ and repeats while `hasMore`. Nothing that happened while the iPhone was away is 
 - Live pushes only advance the stored position when they are contiguous; anything else is picked
   up by the next sync and merged by id.
 - The first import on the Redmi keeps 30 days of history and is not announced as new.
+
+## Away from home (Apple push)
+
+When the iPhone is not near the Redmi, the network link runs through Tailscale; the Redmi
+announces its VPN address with the others. Wake-ups come through Apple:
+
+- **Incoming call.** If the iPhone has not confirmed within 1.5 s that it shows the call, the
+  Redmi sends a VoIP push (`apns-push-type: voip`, topic `<bundle>.voip`, expiration 0).
+  - Its payload is `{"p": base64(AES-GCM(derive(K,"push"), {"id","n","t"}, aad "phonebridge-push"))}`,
+    so Apple sees only ciphertext.
+  - iOS launches the app even after it was swiped away, and the app reports the call to CallKit
+    before returning.
+- **SMS and missed calls.** If no connected iPhone received a new journal entry within 8 s, the
+  Redmi sends an ordinary alert. The SMS text is included unless the owner turns that off.
+- **Credentials.** The Redmi talks to `api.push.apple.com` directly with the owner's APNs key
+  (`.p8`, imported on its Advanced screen), signing ES256 provider tokens. No server of ours is
+  involved.
 
 ## Error codes
 

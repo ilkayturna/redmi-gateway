@@ -81,6 +81,19 @@ audio in both directions.
   so a quick reconnect resumes audio there; after that it lets go, and the call continues on the
   Redmi.
 
+## Call waiting
+
+A second incoming call during a call is tracked apart from the current call. Every audio,
+Bluetooth and notification listener keeps seeing only the current call, so the verified
+single-call audio path is untouched.
+
+- The waiting call shows on both phones: CallKit's call-waiting screen on the iPhone, and a card
+  on the Redmi call screen.
+- It can be declined, or taken with "end current and answer". The current call ends, the waiting
+  call becomes current under the same id, and it is answered; its audio then moves to the iPhone
+  like any answered call.
+- Holding two calls at once is not offered.
+
 ## Incoming call on a locked iPhone
 
 1. The Redmi rings. Its Bluetooth state characteristic notifies a sealed `ringing` state.
