@@ -27,6 +27,14 @@ Physical tests on 27 Sep 2026, by the owner with both phones.
 | P6 | iPhone: contacts with photos, favorites, keypad, full-screen call UI, SMS conversations with send status | BUILD VERIFIED · partly PHYSICALLY VERIFIED | The keypad, call screen and transfer were used in the tests; SMS sending not done physically |
 | P7 | Missed calls and SMS survive iPhone absence (replay by sequence) | RUNTIME LOG VERIFIED | `sync` returns 60 calls and 4 SMS, then nothing after `lastSeq`; live `call_log` push with `answeredOn=iphone` |
 | P8 | Reconnect after network or service restart | RUNTIME LOG VERIFIED (service restart, reinstall) | Physical network-change test pending |
+| N1 | Redmi on Wi-Fi and its own hotspot at once (this morning's failure) | RUNTIME LOG VERIFIED | Root cause: UDP replies left from another Redmi address. Audio now binds to the control-link address; sealed IVR handoff passes over IPv4 and over a non-default IPv6 address |
+| N2 | iPhone finds the Redmi on any network (office, cafe, PC hotspot) | CODE VERIFIED · BUILD VERIFIED | All known addresses raced; Bluetooth address list notified live; re-read on network change. Physical test pending |
+| N3 | Calls over 4G (VoLTE) move to the iPhone | RUNTIME LOG VERIFIED | Wi-Fi Calling turned off for the test: `call_type=LTE`, handoff confirmed, 50 frames/s both ways; switch to WLAN mid-call did not break it |
+| F1 | Notifications for new SMS and missed calls on the iPhone (app in background) | CODE VERIFIED · BUILD VERIFIED | Bluetooth state carries journal positions; the iPhone wakes, fetches and notifies. Physical test pending |
+| F2 | Call waiting | CODE VERIFIED · BUILD VERIFIED | Shown on both phones; decline or end-and-answer. Needs two callers for a physical test |
+| F3 | Calling from iOS Recents / Contacts | CODE VERIFIED · BUILD VERIFIED | `INStartCallIntent` dials through the Redmi, even before the link is up |
+| R1 | Redmi at home, iPhone away: calls, SMS, missed calls | CODE VERIFIED · BUILD VERIFIED | Tailscale for the link; VoIP push for calls and alerts for SMS/missed calls, straight from the Redmi to Apple. Needs the owner's Tailscale login and APNs key |
+| R2 | Remote link tolerance | RUNTIME LOG VERIFIED (local limits unchanged) | Wider limits and 3 retries only on VPN or non-local addresses; home Wi-Fi addresses stay local |
 | S1 | No unauthenticated LAN control or audio injection | RUNTIME LOG VERIFIED | 10/10 security checks (`iphone_emulator.py --scenario security`) |
 | S2 | No numbers, message text or keys in logs | CODE VERIFIED | Log audit; SMS logged by length only, numbers masked |
 | S3 | No call recording or storage | CODE VERIFIED | No audio written to disk on either phone |
