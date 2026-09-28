@@ -9,7 +9,7 @@ Evidence labels:
 - **BLOCKED BY PLATFORM**: iOS or Android does not allow it.
 - **NOT VERIFIED**: not yet tested.
 
-Builds: Android 2.0.0 (200), `delivery/phone-bridge`. iPhone 2.0, TestFlight build 41.
+Builds: Android 2.0.0 (200), `delivery/phone-bridge`. iPhone 2.0, TestFlight build 47 (with push).
 Physical tests on 27 Sep 2026, by the owner with both phones.
 
 | # | Requirement | Status | Evidence |

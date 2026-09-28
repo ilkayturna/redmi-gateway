@@ -7,7 +7,7 @@
 | `main` | The last state before this delivery (build 33 era). Not changed by the delivery. |
 | `checkpoint/takeover-worktree-20260927` | The exact working tree found at takeover, committed as-is. |
 | `baseline/16khz-uplink-20260927-1231` | The Android build installed at 12:31 on 27 Sep 2026 (16 kHz uplink baseline). |
-| `delivery/phone-bridge` | This delivery (Android 2.0.0 (200), iPhone TestFlight 2.0 (41)). Merging to `main` is the owner's decision. |
+| `delivery/phone-bridge` | This delivery (Android 2.0.0 (200), iPhone TestFlight 2.0 (47)). Merging to `main` is the owner's decision. |
 
 ## Android (Redmi)
 
