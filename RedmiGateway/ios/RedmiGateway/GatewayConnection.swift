@@ -977,6 +977,13 @@ public final class GatewayConnection: ObservableObject {
         if pairing != nil { link = .searching }
     }
 
+    /// The Redmi's beacon woke the app: a call rings, or the app had lost its links (for example
+    /// after being swiped away). Fetch state and journals; in the background the network link
+    /// closes again afterwards unless a call turned up, and Bluetooth stays connected.
+    func wakeFromBeacon() {
+        catchUp(reason: "beacon wake")
+    }
+
     /// Bluetooth announced new SMS or calls while the app sleeps: connect, fetch, notify, sleep.
     private func catchUp(reason: String) {
         guard pairing != nil else { return }

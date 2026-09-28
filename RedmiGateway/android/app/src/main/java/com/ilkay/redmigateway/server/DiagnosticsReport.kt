@@ -14,7 +14,7 @@ import org.json.JSONObject
 import java.io.File
 
 /**
- * Technical state for Advanced > Diagnostics on both phones. Contains no phone numbers, message
+ * Technical state for the Settings status on the Redmi and diagnostics on the iPhone. Contains no phone numbers, message
  * text, keys or audio; safe to copy into a support report.
  */
 object DiagnosticsReport {
@@ -42,6 +42,7 @@ object DiagnosticsReport {
             .put("service", JSONObject()
                 .put("running", GatewayService.isRunning)
                 .put("clients", GatewayService.authenticatedClientCount())
+                .put("iphone", com.ilkay.redmigateway.service.IPhoneReachability.current().level.name)
                 .put("defaultDialer", telecom?.defaultDialerPackage == context.packageName))
             .put("pairing", JSONObject()
                 .put("paired", paired != null)

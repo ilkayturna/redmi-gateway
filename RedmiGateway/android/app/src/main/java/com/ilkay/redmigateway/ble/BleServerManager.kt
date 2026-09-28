@@ -52,6 +52,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         private const val SEALED_VERSION: Byte = 2
         private const val MAX_CONTROL_AGE_MS = 60_000L
         private const val SUBSCRIBE_GRACE_MS = 10_000L
+        private const val RECONNECT_GRACE_MS = 20_000L
+        private const val PULSE_MS = 10_000L
         private val BLE_STATE_AAD = "phonebridge-ble-state".toByteArray(Charsets.UTF_8)
         private val BLE_CONTROL_AAD = "phonebridge-ble-control".toByteArray(Charsets.UTF_8)
         @Volatile private var current: BleServerManager? = null
@@ -64,7 +66,11 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
                 .put("centrals", server.connectedDevices.size)
                 .put("subscribed", server.subscribedDevices.count { it.value.contains(BleConstants.CHAR_STATE_UUID) })
                 .put("sealed", PairingStore.pairedClient() != null)
+                .put("reconnectPulses", server.reconnectPulses)
         }
+
+        /** Bluetooth links to this Redmi; in practice only the paired iPhone connects. */
+        fun linkedCentrals(): Int = current?.connectedDevices?.size ?: 0
     }
 
     private var lastControlSeq = 0L
@@ -157,6 +163,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 Log.i(TAG, "BLE client connected: ${device.address}")
                 connectedDevices.add(device)
+                linkChanged()
                 mainHandler.postDelayed({
                     val subscribed = subscribedDevices[device]?.contains(BleConstants.CHAR_STATE_UUID) == true
                     if (connectedDevices.contains(device) && !subscribed) {
@@ -169,6 +176,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
                 connectedDevices.remove(device)
                 subscribedDevices.remove(device)
                 preparedWrites.remove(device)
+                linkChanged()
             }
         }
 
@@ -375,6 +383,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         this.shouldBeRunning = true
         registerBluetoothReceiver()
         restartBleServer()
+        com.ilkay.redmigateway.service.IPhoneReachability.addListener(reachabilityListener)
+        linkChanged()
     }
 
     fun updatePort(port: Int) {
@@ -403,6 +413,10 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         this.shouldBeRunning = false
         unregisterBluetoothReceiver()
         CallManager.removeListener(this)
+        com.ilkay.redmigateway.service.IPhoneReachability.removeListener(reachabilityListener)
+        mainHandler.removeCallbacks(reconnectPulse)
+        pulseScheduled = false
+        pulseUntil = 0L
         stopCallBeacon()
         tearDownGattServerAndAdvertiser()
         Log.i(TAG, "BleServerManager stopped")
@@ -474,6 +488,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         gattServer = null
         connectedDevices.clear()
         subscribedDevices.clear()
+        linkChanged()
         clientLastSeq.clear()
         preparedWrites.clear()
         isServerRunning = false
@@ -602,7 +617,60 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     private fun updateCallBeacon() {
         val ringingHere = CallManager.currentCallState == "ringing" && CallManager.currentDirection == "incoming" &&
             IncomingCallPresenter.presentedOnIPhoneCallId != CallManager.currentCallId
-        if (ringingHere && shouldBeRunning) startCallBeacon() else stopCallBeacon()
+        val pulsing = android.os.SystemClock.elapsedRealtime() < pulseUntil
+        if ((ringingHere || pulsing) && shouldBeRunning) startCallBeacon() else stopCallBeacon()
+    }
+
+    // ---- Reconnect pulse ----
+    //
+    // A swiped-away iPhone app loses its Bluetooth link, and iOS does not relaunch it for
+    // Bluetooth. While the paired iPhone has neither link, the same beacon is shown for a few
+    // seconds now and then: iOS relaunches the app for the region entry, it reconnects over
+    // Bluetooth and is back to "connected, asleep" without being opened. The pause between
+    // pulses lets iOS see the region empty again; nobody hears the pulses while the iPhone is away.
+
+    @Volatile private var reconnectPulses = 0
+    private var pulseUntil = 0L
+    private val reachabilityListener: () -> Unit = { linkChanged() }
+    private var pulseScheduled = false
+    private val reconnectPulse = Runnable { pulseScheduled = false; pulse() }
+
+    private fun schedulePulse(delayMs: Long) {
+        mainHandler.removeCallbacks(reconnectPulse)
+        pulseScheduled = true
+        mainHandler.postDelayed(reconnectPulse, delayMs)
+    }
+
+    private fun linkChanged() {
+        com.ilkay.redmigateway.service.IPhoneReachability.changed()
+        mainHandler.post {
+            val linked = connectedDevices.isNotEmpty() || com.ilkay.redmigateway.service.GatewayService.authenticatedClientCount() > 0
+            if (linked || !shouldBeRunning || PairingStore.pairedClient() == null) {
+                if (reconnectPulses > 0 || pulseUntil != 0L) Log.i(TAG, "iPhone linked again; reconnect pulses stop")
+                mainHandler.removeCallbacks(reconnectPulse)
+                pulseScheduled = false
+                reconnectPulses = 0
+                pulseUntil = 0L
+                updateCallBeacon()
+            } else if (!pulseScheduled) {
+                // A short grace first: Bluetooth restarts and range blips reconnect by themselves.
+                schedulePulse(RECONNECT_GRACE_MS)
+            }
+        }
+    }
+
+    private fun pulse() {
+        val linked = connectedDevices.isNotEmpty() || com.ilkay.redmigateway.service.GatewayService.authenticatedClientCount() > 0
+        if (linked || !shouldBeRunning || PairingStore.pairedClient() == null) return
+        reconnectPulses++
+        Log.i(TAG, "iPhone has no link; reconnect pulse $reconnectPulses")
+        pulseUntil = android.os.SystemClock.elapsedRealtime() + PULSE_MS
+        updateCallBeacon()
+        // Pulses keep coming until a link returns: every 3 minutes, then every 10 once the
+        // iPhone has been gone for half an hour (probably away from home).
+        val pause = if (reconnectPulses < 10) 3 * 60_000L else 10 * 60_000L
+        schedulePulse(PULSE_MS + pause)
+        mainHandler.postDelayed({ updateCallBeacon() }, PULSE_MS + 100)
     }
 
     private fun startCallBeacon() {

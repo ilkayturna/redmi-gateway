@@ -61,6 +61,8 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     private var bleServerManager: BleServerManager? = null
     private val handler = Handler(Looper.getMainLooper())
     private val restoreHotspot = Runnable { if (isRunning) HotspotRestarter.startIfNeeded(this) }
+    @Volatile private var callAudioOnIPhone = false
+    private val reachabilityListener: () -> Unit = { if (isRunning) updateNotification(statusText()) }
 
     inner class LocalBinder : Binder() {
         fun getService(): GatewayService = this@GatewayService
@@ -102,7 +104,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
         }
 
         Log.i(TAG, "Starting Gateway Service...")
-        val notification = buildNotification(clientText(0))
+        val notification = buildNotification(statusText())
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -128,6 +130,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
             CallJournal.get(this).start()
             SmsJournal.get(this).start()
             com.ilkay.redmigateway.push.PushNotifier.start(this)
+            IPhoneReachability.addListener(reachabilityListener)
             isRunning = true
             CallManager.log("Gateway Foreground Service started on port 8787")
         } catch (e: Exception) {
@@ -140,6 +143,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     private fun stopGateway() {
         Log.i(TAG, "Stopping Gateway Service...")
         handler.removeCallbacks(restoreHotspot)
+        IPhoneReachability.removeListener(reachabilityListener)
         nsdDiscoveryManager?.stop()
         nsdDiscoveryManager = null
         bleServerManager?.stop()
@@ -217,9 +221,9 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
             types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
         }
-        val text = if (callAudio) "Görüşme sesi iPhone'da" else clientText(getAuthenticatedClientCount())
+        callAudioOnIPhone = callAudio
         try {
-            startForeground(NOTIFICATION_ID, buildNotification(text), types)
+            startForeground(NOTIFICATION_ID, buildNotification(statusText()), types)
         } catch (error: Exception) {
             Log.w(TAG, "Could not change foreground service types", error)
             CallManager.log("Foreground call audio type rejected: ${error.message}")
@@ -227,10 +231,11 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     }
 
     override fun onClientCountChanged(authenticatedCount: Int) {
-        updateNotification(clientText(authenticatedCount))
+        IPhoneReachability.changed()
     }
 
-    private fun clientText(count: Int) = if (count > 0) "iPhone bağlı" else "iPhone bekleniyor"
+    /** The ongoing notification: call audio on the iPhone, otherwise how the iPhone is reached. */
+    private fun statusText() = if (callAudioOnIPhone) "Görüşme sesi iPhone'da" else IPhoneReachability.notificationText()
 
     override fun onServerError(error: String) {
         CallManager.log("Server Error: $error")

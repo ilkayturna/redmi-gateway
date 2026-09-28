@@ -4,14 +4,15 @@ import UIKit
 
 private let callWakeRegionIdentifier = "com.ilkay.redmigateway.call-wake"
 
-/// Wakes the app for an incoming call even after the person swiped it away.
+/// Wakes the app for an incoming call, and brings back its Bluetooth link, even after the
+/// person swiped it away.
 ///
 /// iOS does not relaunch a swiped-away app for Bluetooth, but it does for iBeacon region
-/// monitoring. While a call rings and this iPhone has not yet shown it, the Redmi advertises
-/// an iBeacon whose UUID is derived from the pairing key. Entering that region launches the
-/// app in the background; it then connects to the Redmi, and the call arrives through
-/// Bluetooth or the network as usual. Only proximity to the paired Redmi is observed; no
-/// location is read, stored or sent.
+/// monitoring. The Redmi advertises an iBeacon whose UUID is derived from the pairing key while
+/// a call rings that this iPhone has not yet shown, and for a few seconds now and then while
+/// this iPhone has no link at all. Entering that region launches the app in the background; it
+/// reconnects over Bluetooth, and a ringing call arrives as usual. Only proximity to the paired
+/// Redmi is observed; no location is read, stored or sent.
 @MainActor
 final class CallWakeMonitor: NSObject, ObservableObject {
     static let shared = CallWakeMonitor()
@@ -77,7 +78,7 @@ final class CallWakeMonitor: NSObject, ObservableObject {
             }
         }
         BLECentralManager.shared.start()
-        GatewayConnection.shared.reconnectNow(reason: "call wake")
+        GatewayConnection.shared.wakeFromBeacon()
     }
 
     private func endBackgroundTask() {

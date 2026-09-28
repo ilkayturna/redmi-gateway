@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/nav_recents"
+        android:icon="@drawable/ic_pb_history"
+        android:title="Son" />
+    <item
+        android:id="@+id/nav_contacts"
+        android:icon="@drawable/ic_pb_person"
+        android:title="Kişiler" />
+    <item
+        android:id="@+id/nav_keypad"
+        android:icon="@drawable/ic_pb_dialpad"
+        android:title="Tuşlar" />
+    <item
+        android:id="@+id/nav_messages"
+        android:icon="@drawable/ic_pb_message"
+        android:title="Mesajlar" />
+</menu>

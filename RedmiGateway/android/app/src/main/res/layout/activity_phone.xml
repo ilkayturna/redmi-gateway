@@ -3,34 +3,177 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:background="?attr/colorSurface">
+    android:background="@color/bg_void"
+    android:orientation="vertical">
 
+    <!-- Title row: back (conversation only), title, call (conversation only), settings -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:paddingStart="20dp"
-        android:paddingEnd="20dp"
-        android:paddingTop="20dp"
-        android:paddingBottom="12dp">
+        android:gravity="center_vertical"
+        android:minHeight="64dp"
+        android:orientation="horizontal"
+        android:paddingStart="8dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="8dp">
 
-        <TextView
-            android:id="@+id/phoneTitle"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Telefon"
-            android:textAppearance="?attr/textAppearanceHeadline5" />
+        <ImageButton
+            android:id="@+id/phoneBack"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Mesajlara dön"
+            android:src="@drawable/ic_pb_back"
+            android:visibility="gone"
+            app:tint="@color/text_primary" />
 
-        <TextView
-            android:id="@+id/phoneSubtitle"
-            android:layout_width="match_parent"
+        <LinearLayout
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="Redmi hattı hazır"
-            android:textAppearance="?attr/textAppearanceBody2" />
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:paddingStart="12dp"
+            android:paddingEnd="8dp">
+
+            <TextView
+                android:id="@+id/phoneTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:text="Telefon"
+                android:textColor="@color/text_primary"
+                android:textSize="28sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/phoneTitleDetail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <ImageButton
+            android:id="@+id/phoneCall"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Ara"
+            android:src="@drawable/ic_pb_call"
+            android:visibility="gone"
+            app:tint="@color/accent" />
+
+        <ImageButton
+            android:id="@+id/phoneSettings"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="Ayarlar"
+            android:src="@drawable/ic_pb_settings"
+            app:tint="@color/text_secondary" />
     </LinearLayout>
 
+    <!-- How the iPhone is reached right now; opens Settings -->
+    <LinearLayout
+        android:id="@+id/phoneStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="4dp"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="8dp"
+        android:background="@drawable/pb_pill"
+        android:clickable="true"
+        android:focusable="true"
+        android:foreground="?attr/selectableItemBackground"
+        android:gravity="center_vertical"
+        android:minHeight="44dp"
+        android:orientation="horizontal"
+        android:paddingStart="14dp"
+        android:paddingEnd="8dp">
+
+        <ImageView
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_pb_iphone"
+            app:tint="@color/text_secondary" />
+
+        <View
+            android:id="@+id/phoneStatusDot"
+            android:layout_width="8dp"
+            android:layout_height="8dp"
+            android:layout_marginStart="10dp"
+            android:background="@drawable/pb_dot" />
+
+        <TextView
+            android:id="@+id/phoneStatusText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:textColor="@color/text_primary"
+            android:textSize="14sp" />
+
+        <ImageView
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_pb_chevron"
+            app:tint="@color/text_muted" />
+    </LinearLayout>
+
+    <!-- Something needs the person's attention (default phone app, gateway off) -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/attentionCard"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="8dp"
+        android:visibility="gone"
+        app:cardBackgroundColor="#FFF6E5"
+        app:cardCornerRadius="16dp"
+        app:cardElevation="0dp"
+        app:strokeColor="#F0D9A8"
+        app:strokeWidth="1dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="16dp"
+            android:paddingTop="8dp"
+            android:paddingEnd="8dp"
+            android:paddingBottom="8dp">
+
+            <TextView
+                android:id="@+id/attentionText"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textColor="@color/status_attention"
+                android:textSize="14sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/attentionAction"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minHeight="48dp"
+                android:textAllCaps="false"
+                android:textColor="@color/status_attention" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- The call in progress; always one tap away -->
     <com.google.android.material.card.MaterialCardView
         android:id="@+id/currentCallCard"
         android:layout_width="match_parent"
@@ -39,21 +182,30 @@
         android:layout_marginEnd="16dp"
         android:layout_marginBottom="8dp"
         android:visibility="gone"
-        app:cardBackgroundColor="?attr/colorSurface"
+        app:cardBackgroundColor="@color/pb_call_green"
         app:cardCornerRadius="16dp"
-        app:strokeColor="?attr/colorPrimary"
-        app:strokeWidth="1dp">
+        app:cardElevation="0dp">
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center_vertical"
+            android:minHeight="64dp"
             android:orientation="horizontal"
-            android:padding="12dp">
+            android:paddingStart="16dp"
+            android:paddingEnd="8dp">
+
+            <ImageView
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_pb_call"
+                app:tint="#FFFFFF" />
 
             <LinearLayout
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
+                android:layout_marginStart="14dp"
                 android:layout_weight="1"
                 android:orientation="vertical">
 
@@ -62,8 +214,9 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:text="Görüşme sürüyor"
-                    android:textAppearance="?attr/textAppearanceSubtitle1"
-                    android:textColor="?attr/colorOnSurface" />
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
 
                 <TextView
                     android:id="@+id/currentCallNumber"
@@ -71,16 +224,20 @@
                     android:layout_height="wrap_content"
                     android:ellipsize="end"
                     android:maxLines="1"
-                    android:textAppearance="?attr/textAppearanceBody2" />
+                    android:textColor="#E6FFFFFF"
+                    android:textSize="14sp" />
             </LinearLayout>
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/openCurrentCall"
+                style="@style/Widget.MaterialComponents.Button.TextButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
                 android:minHeight="48dp"
-                android:text="Aramayı aç" />
+                android:text="Aç"
+                android:textAllCaps="false"
+                android:textColor="#FFFFFF"
+                android:textSize="16sp" />
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
@@ -90,11 +247,20 @@
         android:layout_height="0dp"
         android:layout_weight="1" />
 
-    <com.google.android.material.tabs.TabLayout
-        android:id="@+id/phoneTabs"
+    <View
+        android:id="@+id/phoneNavDivider"
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@color/border_subtle" />
+
+    <com.google.android.material.bottomnavigation.BottomNavigationView
+        android:id="@+id/phoneNav"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:minHeight="64dp"
-        app:tabGravity="fill"
-        app:tabMode="fixed" />
+        android:background="@color/bg_card"
+        app:elevation="0dp"
+        app:itemIconTint="@color/pb_nav_item"
+        app:itemTextColor="@color/pb_nav_item"
+        app:labelVisibilityMode="labeled"
+        app:menu="@menu/phone_tabs" />
 </LinearLayout>

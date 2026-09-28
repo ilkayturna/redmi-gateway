@@ -22,7 +22,7 @@ struct PairingView: View {
                     VStack(spacing: 8) {
                         Text("Redmi ile eşleştir")
                             .font(.title.weight(.semibold))
-                        Text("Redmi'de Telefon Geçidi › Ayarlar › Gelişmiş ve tanılama ekranındaki 6 karakterlik kodu gir. Bu yalnızca bir kez gerekir.")
+                        Text("Redmi'de Telefon Geçidi › Ayarlar (sağ üstteki dişli) ekranındaki 6 karakterlik kodu gir. Bu yalnızca bir kez gerekir.")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)

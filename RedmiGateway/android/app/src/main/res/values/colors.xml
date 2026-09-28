@@ -38,4 +38,9 @@
     <color name="green_500">#00F59B</color>
     <color name="red_500">#F43F5E</color>
     <color name="amber_500">#FBBF24</color>
+    <!-- Phone screens -->
+    <color name="pb_surface_variant">#EDF0F3</color>
+    <color name="pb_call_green">#1E9E4F</color>
+    <color name="pb_ripple">#1F18232C</color>
+    <color name="pb_ripple_light">#33FFFFFF</color>
 </resources>

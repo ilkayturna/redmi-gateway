@@ -9,7 +9,7 @@ Evidence labels:
 - **BLOCKED BY PLATFORM**: iOS or Android does not allow it.
 - **NOT VERIFIED**: not yet tested.
 
-Builds: Android 2.0.0 (200), `delivery/phone-bridge`. iPhone 2.0, TestFlight build 47 (with push).
+Builds: Android 2.0.1 (201), `delivery/phone-bridge`. iPhone 2.0, TestFlight build 47 (with push).
 Physical tests on 27 Sep 2026, by the owner with both phones.
 
 | # | Requirement | Status | Evidence |
@@ -23,7 +23,8 @@ Physical tests on 27 Sep 2026, by the owner with both phones.
 | P4a | Incoming call rings on a locked iPhone (app in background) | PHYSICALLY VERIFIED · RUNTIME LOG VERIFIED | Owner: "ekrana düştü". Log 19:38:24: BLE state sent, iPhone's `ringing_ack` over BLE 0.1 s later |
 | P4b | Redmi rings quietly once the iPhone shows the call | RUNTIME LOG VERIFIED | "Incoming call is showing on the iPhone", after which the ringer is silenced |
 | P4c | Incoming call after the person swiped the iPhone app away | PHYSICALLY VERIFIED (build 41, "Always" location permission) | iOS will not relaunch a swiped-away app for Bluetooth; the call wake iBeacon relaunches it. Owner: "çalıyor … kapalı olsa bile". Without the permission, only the Redmi rings |
-| P5 | Redmi as a standalone phone: recents, contacts, keypad, messages, call screens, active call always reachable | BUILD VERIFIED | Call card and notification lead to the call screen; physical test pending |
+| P4d | Redmi shows the iPhone as connected while it sleeps; a swiped-away app reconnects by itself | CODE VERIFIED · BUILD VERIFIED | Status counts the Bluetooth link and Apple push, not only the network socket; reconnect beacon pulses while no link exists. Physical test pending |
+| P5 | Redmi as a standalone phone: recents, contacts, keypad, messages, call screens, active call always reachable | BUILD VERIFIED | Rebuilt phone screen: iPhone status on top, tab bar, round-key keypad, grouped recents with missed-call badge, contacts with photos and search, conversations with a composer. Physical test pending |
 | P6 | iPhone: contacts with photos, favorites, keypad, full-screen call UI, SMS conversations with send status | BUILD VERIFIED · partly PHYSICALLY VERIFIED | The keypad, call screen and transfer were used in the tests; SMS sending not done physically |
 | P7 | Missed calls and SMS survive iPhone absence (replay by sequence) | RUNTIME LOG VERIFIED | `sync` returns 60 calls and 4 SMS, then nothing after `lastSeq`; live `call_log` push with `answeredOn=iphone` |
 | P8 | Reconnect after network or service restart | RUNTIME LOG VERIFIED (service restart, reinstall) | Physical network-change test pending |

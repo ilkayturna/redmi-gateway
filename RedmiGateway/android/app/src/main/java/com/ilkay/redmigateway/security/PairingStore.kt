@@ -56,6 +56,7 @@ object PairingStore {
             .putLong(KEY_PAIRED_AT, System.currentTimeMillis())
             .putString(KEY_CODE, newCode())
             .apply()
+        com.ilkay.redmigateway.service.IPhoneReachability.changed()
     }
 
     /** Forgets the paired iPhone; call history, SMS and contacts are untouched. */
@@ -66,6 +67,7 @@ object PairingStore {
             .remove(KEY_CLIENT_ID).remove(KEY_CLIENT_NAME).remove(KEY_SECRET).remove(KEY_PAIRED_AT)
             .putString(KEY_CODE, newCode())
             .apply()
+        com.ilkay.redmigateway.service.IPhoneReachability.changed()
     }
 
     private fun newCode(): String = (1..6).map { CODE_ALPHABET[random.nextInt(CODE_ALPHABET.length)] }.joinToString("")

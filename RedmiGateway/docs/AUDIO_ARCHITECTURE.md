@@ -114,9 +114,16 @@ iBeacon region monitoring.
 - The iPhone monitors that region (needs "Always" location permission; only proximity is used).
 - Entering the region relaunches the app, which connects and presents the call. Physically
   verified with build 41.
+- The same beacon is pulsed briefly now and then while the iPhone has no link at all, so a
+  swiped-away app comes back to "connected, asleep" by itself (see PROTOCOL.md, reconnect pulse).
 
-PushKit is not used: it would need an Apple push server and a WAN relay, which this product
-excludes.
+**Away from home:** with the owner's APNs key imported on the Redmi, the Redmi sends a VoIP push
+straight to Apple when the iPhone has not shown a ringing call within 1.5 s; PushKit wakes the app,
+which reports the call to CallKit and connects over Tailscale. There is no server of ours.
+
+**What the Redmi shows:** "Bağlı" while the network link is up, "Bağlı · iPhone uykuda" while only
+Bluetooth is connected (the normal state of a locked iPhone at home), "Uzakta · ulaşılabilir" when
+only Apple push can reach it, and "Bağlı değil" otherwise.
 
 ## Security and privacy of audio
 

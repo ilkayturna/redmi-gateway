@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit
  * Sends Apple push notifications (APNs, HTTP/2) straight from the Redmi to the paired iPhone
  * while it is away. No server of ours sits in between.
  *
- * The owner imports the APNs key (.p8) from the Apple Developer account on the Redmi's Advanced
+ * The owner imports the APNs key (.p8) from the Apple Developer account on the Redmi's Settings
  * screen; it stays in this app's private storage. The iPhone hands over its push token after
  * each authentication.
  */
@@ -60,21 +60,25 @@ object ApnsSender {
         prefs.edit().putString(KEY_PEM, pem).putString(KEY_ID, id).apply()
         cachedToken = null
         Log.i(TAG, "APNs key imported")
+        com.ilkay.redmigateway.service.IPhoneReachability.changed()
         return true
     }
 
     fun removeKey() {
         prefs.edit().remove(KEY_PEM).remove(KEY_ID).apply()
         cachedToken = null
+        com.ilkay.redmigateway.service.IPhoneReachability.changed()
     }
 
     fun setDeviceToken(token: String) {
         if (!token.matches(Regex("^[0-9a-f]{32,200}$"))) return
         prefs.edit().putString(KEY_TOKEN, token).apply()
+        com.ilkay.redmigateway.service.IPhoneReachability.changed()
     }
 
     fun clearDeviceToken() {
         prefs.edit().remove(KEY_TOKEN).apply()
+        com.ilkay.redmigateway.service.IPhoneReachability.changed()
     }
 
     /** VoIP push: iOS launches the app, which must show the call with CallKit. */

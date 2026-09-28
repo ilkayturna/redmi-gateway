@@ -53,7 +53,7 @@ padding.
 ### Pairing (once per iPhone)
 
 The Redmi shows a 6-character code (alphabet `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`) under
-Settings › Advanced and diagnostics.
+Settings (the gear on the phone screen).
 
 1. Redmi → `hello` with a fresh 16-byte `nonce` (nS).
 2. iPhone → `{"type":"pair","clientId","clientName","nonce":nC,"proof"}` where
@@ -146,6 +146,11 @@ The Bluetooth key is `derive(K, "ble")`. Sealed values are `0x02 | nonce | ciphe
   Redmi advertises a non-connectable iBeacon (Apple company id `0x004C`, UUID = first 16 bytes of
   `derive(K, "beacon")`, major 1, minor 1). The iPhone monitors it with Core Location, so iOS
   relaunches the app even after it was swiped away. The beacon carries no call data.
+- **Reconnect pulse:** while a keyed pairing exists and the iPhone has neither a network link nor
+  a Bluetooth link, the Redmi shows the same beacon for 10 s, 20 s after the link is lost and
+  then every 3 minutes (every 10 minutes after the first half hour). A swiped-away app is
+  relaunched by the region entry, reconnects over Bluetooth and sleeps again; the pulses stop as
+  soon as a link exists. The pause lets iOS register the region as left before the next pulse.
 - Call state notifications go to every connected central. A link can outlive a restart of the
   Redmi app, and the iPhone keeps listening on the same handle.
 - Bluetooth never carries audio.

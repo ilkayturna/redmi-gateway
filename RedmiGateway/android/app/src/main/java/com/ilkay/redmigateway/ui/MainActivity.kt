@@ -34,7 +34,7 @@ import org.json.JSONObject
 import java.util.Date
 
 /**
- * Settings > Advanced and Diagnostics. Everyday use never needs this screen; it holds pairing,
+ * Settings (the gear on the phone screen). Everyday use never needs this screen; it holds pairing,
  * the ringing preference and the technical status used for support.
  */
 class MainActivity : AppCompatActivity() {
@@ -44,6 +44,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pairedView: TextView
     private lateinit var statusList: LinearLayout
     private lateinit var remoteStatus: TextView
+    private lateinit var iphoneTitle: TextView
+    private lateinit var iphoneDetail: TextView
     private val pickKey = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) importKey(uri)
     }
@@ -63,9 +65,20 @@ class MainActivity : AppCompatActivity() {
         }
         scroll.addView(content)
         setContentView(scroll)
-        title = "Gelişmiş ve tanılama"
+        title = "Ayarlar"
 
-        content.addView(heading("Gelişmiş ve tanılama"))
+        content.addView(heading("Ayarlar"))
+
+        // How the iPhone is reached right now (network, Bluetooth while it sleeps, or Apple push).
+        val link = section("iPhone bağlantısı")
+        iphoneTitle = TextView(this).apply {
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_MaterialComponents_Headline6)
+            setTextColor(color(R.color.text_primary))
+            compoundDrawablePadding = dp(10)
+        }
+        link.addView(iphoneTitle)
+        iphoneDetail = body("")
+        link.addView(iphoneDetail)
 
         // Pairing
         val pairing = section("iPhone eşleştirme")
@@ -170,6 +183,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun refresh() {
         codeView.text = PairingStore.pairingCode()
+        val iphone = com.ilkay.redmigateway.service.IPhoneReachability.current()
+        iphoneTitle.text = iphone.title
+        iphoneTitle.setCompoundDrawablesRelativeWithIntrinsicBounds(dot(when (iphone.level) {
+            com.ilkay.redmigateway.service.IPhoneReachability.Level.CONNECTED,
+            com.ilkay.redmigateway.service.IPhoneReachability.Level.BLUETOOTH -> R.color.status_good
+            com.ilkay.redmigateway.service.IPhoneReachability.Level.PUSH -> R.color.accent
+            com.ilkay.redmigateway.service.IPhoneReachability.Level.OFFLINE -> R.color.status_attention
+            com.ilkay.redmigateway.service.IPhoneReachability.Level.UNPAIRED -> R.color.text_muted
+        }), null, null, null)
+        iphoneDetail.text = iphone.detail
         val apns = com.ilkay.redmigateway.push.ApnsSender
         remoteStatus.text = when {
             apns.isReady -> "Hazır: aramalar ve mesajlar iPhone uzaktayken Apple üzerinden iletilir (anahtar ${apns.keyId})."
@@ -187,7 +210,6 @@ class MainActivity : AppCompatActivity() {
         val ble = report.getJSONObject("ble")
         val app = report.getJSONObject("app")
         row("Geçit servisi", if (service.getBoolean("running")) "Çalışıyor" else "Kapalı", service.getBoolean("running"))
-        row("Bağlı iPhone", if (service.getInt("clients") > 0) "Bağlı" else "Bağlı değil", service.getInt("clients") > 0)
         val dialer = service.getBoolean("defaultDialer")
         row("Varsayılan telefon uygulaması", if (dialer) "Evet" else "Hayır — aramalar için gerekli", dialer)
         if (!dialer) statusList.addView(button("Varsayılan telefon uygulaması yap", outlined = false) { requestDialerRole() })
@@ -195,6 +217,7 @@ class MainActivity : AppCompatActivity() {
         val fix = audio.optBoolean("vendorFix")
         row("iPhone ses kanalı (SIM 2)", if (fix) "Hazır" else "Düzeltme yok — iPhone sesi çalışmaz", fix)
         row("Bluetooth", if (ble.optBoolean("running")) "Açık · ${ble.optInt("centrals")} bağlantı" else "Kapalı", ble.optBoolean("running"))
+        row("Ağ bağlantısı", if (service.getInt("clients") > 0) "Açık" else "Uykuda (iPhone açınca kurulur)", true)
         val battery = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
         row("Pil optimizasyonu", if (battery) "Muaf" else "Kısıtlı olabilir", battery)
         if (!battery) statusList.addView(button("Pil kısıtlamasını kaldır", outlined = false) { requestBatteryExemption() })
@@ -238,6 +261,12 @@ class MainActivity : AppCompatActivity() {
     private fun dp(value: Int) = (resources.displayMetrics.density * value).toInt()
 
     private fun color(id: Int) = ContextCompat.getColor(this, id)
+
+    private fun dot(colorId: Int) = android.graphics.drawable.GradientDrawable().apply {
+        shape = android.graphics.drawable.GradientDrawable.OVAL
+        setColor(color(colorId))
+        setSize(dp(10), dp(10))
+    }
 
     private fun heading(text: String) = TextView(this).apply {
         this.text = text

@@ -4,91 +4,160 @@ import android.Manifest
 import android.app.role.RoleManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
+import android.database.ContentObserver
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.CallLog
 import android.provider.ContactsContract
 import android.provider.Telephony
 import android.telecom.TelecomManager
+import android.telephony.PhoneNumberUtils
+import android.text.Editable
 import android.text.InputType
-import android.text.format.DateFormat
+import android.text.TextWatcher
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
+import android.widget.AbsListView
+import android.widget.ArrayAdapter
+import android.widget.AutoCompleteTextView
 import android.widget.BaseAdapter
-import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.GridLayout
+import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
-import android.widget.SimpleAdapter
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import com.google.android.material.tabs.TabLayout
+import com.google.android.material.button.MaterialButton
+import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.ilkay.redmigateway.R
 import com.ilkay.redmigateway.databinding.ActivityPhoneBinding
 import com.ilkay.redmigateway.journal.CallJournal
 import com.ilkay.redmigateway.service.GatewayService
+import com.ilkay.redmigateway.service.IPhoneReachability
 import com.ilkay.redmigateway.sms.SmsSender
 import com.ilkay.redmigateway.telecom.CallManager
+import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
-/** The Redmi's everyday phone shell. Gateway diagnostics live behind Settings. */
+/**
+ * The Redmi's everyday phone: recents, contacts, keypad and messages, with the iPhone's link
+ * state on top. Gateway settings and diagnostics sit behind the gear.
+ */
 class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
-    private data class Person(val name: String, val number: String, val photo: String?)
+    private data class Person(val name: String, val number: String, val label: String, val photo: String?)
     private data class Recent(val number: String, val type: Int, val time: Long, val seconds: Long, val carrier: String?)
-    private data class Message(val address: String, val body: String, val time: Long, val sent: Boolean)
+    private data class Message(val address: String, val body: String, val time: Long, val sent: Boolean, val failed: Boolean)
+    private data class Header(val text: String)
+    private data class RecentEntry(val call: Recent, val count: Int)
+    private data class Conversation(val address: String, val latest: Message)
+
+    private enum class Tab(val itemId: Int, val title: String) {
+        RECENTS(R.id.nav_recents, "Son aramalar"),
+        CONTACTS(R.id.nav_contacts, "Kişiler"),
+        KEYPAD(R.id.nav_keypad, "Tuş takımı"),
+        MESSAGES(R.id.nav_messages, "Mesajlar")
+    }
+
+    private enum class Kind { INCOMING, OUTGOING, MISSED, OTHER }
 
     private lateinit var binding: ActivityPhoneBinding
-    private var selectedTab = 2
+    private lateinit var views: PhoneViews
+    private val handler = Handler(Looper.getMainLooper())
+    private val prefs by lazy { getSharedPreferences("phone_screen", MODE_PRIVATE) }
+    private val turkish = Locale("tr", "TR")
+
+    private var tab = Tab.RECENTS
     private var openThread: String? = null
+    private var suppressNav = false
     private var contacts: List<Person> = emptyList()
+    private var contactByKey: Map<String, Person> = emptyMap()
     private var recents: List<Recent> = emptyList()
     private var messages: List<Message> = emptyList()
+    private var loaded = false
+    private var loading = false
+    private var reloadAgain = false
     private var draftNumber = ""
+    private var contactQuery = ""
+    private val smsDrafts = HashMap<String, String>()
+    /** Rebinds the visible list after new data without rebuilding it (keeps scroll, focus, keyboard). */
+    private var contentUpdater: (() -> Unit)? = null
+    private var keypadMatch: TextView? = null
 
     private val permissions = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { refreshPhoneData() }
+    ) {
+        loaded = false
+        refreshPhoneData()
+        render()
+    }
     private val dialerRole = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
-    ) { if (selectedTab == 4) showSelectedTab() }
+    ) { renderChrome() }
+    private val backToThreads = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            openThread = null
+            render()
+        }
+    }
+    private val reload = Runnable { refreshPhoneData() }
+    private val dataObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) {
+            handler.removeCallbacks(reload)
+            handler.postDelayed(reload, 400)
+        }
+    }
+    private val reachabilityListener: () -> Unit = { updateStatus() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityPhoneBinding.inflate(layoutInflater)
         setContentView(binding.root)
-        val labels = listOf("Son", "Kişiler", "Tuşlar", "Mesajlar", "Ayarlar")
-        labels.forEach { binding.phoneTabs.addTab(binding.phoneTabs.newTab().setText(it)) }
-        binding.phoneTabs.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
-            override fun onTabSelected(tab: TabLayout.Tab) {
-                selectedTab = tab.position
-                openThread = null
-                showSelectedTab()
+        views = PhoneViews(this)
+        onBackPressedDispatcher.addCallback(this, backToThreads)
+
+        tab = Tab.values().firstOrNull { it.name == prefs.getString("tab", null) } ?: Tab.RECENTS
+        dialNumber(intent)?.let {
+            draftNumber = it
+            tab = Tab.KEYPAD
+        }
+        binding.phoneNav.selectedItemId = tab.itemId
+        binding.phoneNav.setOnItemSelectedListener { item ->
+            if (!suppressNav) {
+                Tab.values().firstOrNull { it.itemId == item.itemId }?.let { selectTab(it) }
             }
-            override fun onTabUnselected(tab: TabLayout.Tab) = Unit
-            override fun onTabReselected(tab: TabLayout.Tab) {
+            true
+        }
+        binding.phoneNav.setOnItemReselectedListener {
+            if (!suppressNav && openThread != null) {
                 openThread = null
-                showSelectedTab()
+                render()
             }
-        })
-        val incomingNumber = intent?.data?.schemeSpecificPart.orEmpty()
-        if (incomingNumber.isNotBlank()) draftNumber = incomingNumber
-        binding.phoneTabs.getTabAt(selectedTab)?.select()
-        showSelectedTab()
+        }
+        binding.phoneSettings.setOnClickListener { openSettings() }
+        binding.phoneStatus.setOnClickListener { openSettings() }
+        binding.phoneBack.setOnClickListener { openThread = null; render() }
+        binding.phoneCall.setOnClickListener { openThread?.let(::callNumber) }
         binding.currentCallCard.setOnClickListener { openCurrentCall() }
         binding.openCurrentCall.setOnClickListener { openCurrentCall() }
-        if (isCallLive()) {
-            binding.root.post { if (isCallLive()) openCurrentCall() }
-        }
+
+        render()
+        if (isCallLive()) binding.root.post { if (isCallLive()) openCurrentCall() }
         requestPermissionsIfNeeded()
         if (!GatewayService.isRunning) startBridge()
     }
@@ -96,11 +165,12 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        intent.data?.schemeSpecificPart?.takeIf { it.isNotBlank() }?.let {
-            draftNumber = it
-            binding.phoneTabs.getTabAt(2)?.select()
-        }
-        if (isCallLive() && intent.data == null) {
+        val number = dialNumber(intent)
+        if (number != null) {
+            draftNumber = number
+            openThread = null
+            selectTab(Tab.KEYPAD, syncNav = true)
+        } else if (isCallLive()) {
             binding.root.post { if (isCallLive()) openCurrentCall() }
         }
     }
@@ -108,18 +178,44 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
     override fun onStart() {
         super.onStart()
         CallManager.addListener(this)
+        IPhoneReachability.addListener(reachabilityListener)
+        for (uri in listOf(CallLog.Calls.CONTENT_URI, Telephony.Sms.CONTENT_URI, ContactsContract.Contacts.CONTENT_URI)) {
+            runCatching { contentResolver.registerContentObserver(uri, true, dataObserver) }
+        }
     }
 
     override fun onResume() {
         super.onResume()
+        renderChrome()
         refreshPhoneData()
-        updateSubtitle()
     }
 
     override fun onStop() {
         CallManager.removeListener(this)
+        IPhoneReachability.removeListener(reachabilityListener)
+        runCatching { contentResolver.unregisterContentObserver(dataObserver) }
+        handler.removeCallbacks(reload)
         super.onStop()
     }
+
+    private fun dialNumber(intent: Intent?): String? =
+        intent?.data?.takeIf { it.scheme == "tel" }?.schemeSpecificPart?.takeIf { it.isNotBlank() }
+
+    private fun selectTab(next: Tab, syncNav: Boolean = false) {
+        tab = next
+        openThread = null
+        prefs.edit().putString("tab", next.name).apply()
+        if (syncNav && binding.phoneNav.selectedItemId != next.itemId) {
+            suppressNav = true
+            binding.phoneNav.selectedItemId = next.itemId
+            suppressNav = false
+        }
+        render()
+    }
+
+    // ---- data ----
+
+    private fun has(permission: String) = checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 
     private fun requestPermissionsIfNeeded() {
         val required = listOf(
@@ -127,27 +223,45 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
             Manifest.permission.READ_CONTACTS, Manifest.permission.READ_SMS,
             Manifest.permission.SEND_SMS
         )
-        val missing = required.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        val missing = required.filter { !has(it) }
         if (missing.isNotEmpty()) permissions.launch(missing.toTypedArray())
     }
 
     private fun refreshPhoneData() {
-        Thread {
+        if (loading) {
+            reloadAgain = true
+            return
+        }
+        loading = true
+        kotlin.concurrent.thread(name = "phone-data") {
             val people = readContacts()
             val calls = readRecents()
             val sms = readMessages()
             runOnUiThread {
+                loading = false
                 if (isFinishing || isDestroyed) return@runOnUiThread
+                val changed = !loaded || people != contacts || calls != recents || sms != messages
+                val wasLoaded = loaded
+                loaded = true
                 contacts = people
+                contactByKey = people.associateBy { numberKey(it.number) }
                 recents = calls
                 messages = sms
-                if (selectedTab != 2) showSelectedTab()
+                if (changed) {
+                    val update = contentUpdater
+                    if (wasLoaded && update != null) update() else renderContent()
+                    renderChrome()
+                }
+                if (reloadAgain) {
+                    reloadAgain = false
+                    refreshPhoneData()
+                }
             }
-        }.start()
+        }
     }
 
     private fun readContacts(): List<Person> {
-        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return emptyList()
+        if (!has(Manifest.permission.READ_CONTACTS)) return emptyList()
         val rows = ArrayList<Person>()
         runCatching {
             contentResolver.query(
@@ -155,20 +269,25 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
                 arrayOf(
                     ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
                     ContactsContract.CommonDataKinds.Phone.NUMBER,
-                    ContactsContract.CommonDataKinds.Phone.PHOTO_THUMBNAIL_URI
-                ), null, null, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC"
+                    ContactsContract.CommonDataKinds.Phone.PHOTO_THUMBNAIL_URI,
+                    ContactsContract.CommonDataKinds.Phone.TYPE,
+                    ContactsContract.CommonDataKinds.Phone.LABEL
+                ), null, null, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " COLLATE LOCALIZED ASC"
             )?.use { cursor ->
                 while (cursor.moveToNext()) {
                     val number = cursor.getString(1) ?: continue
-                    rows.add(Person(cursor.getString(0) ?: number, number, cursor.getString(2)))
+                    val label = ContactsContract.CommonDataKinds.Phone.getTypeLabel(
+                        resources, cursor.getInt(3), cursor.getString(4)
+                    ).toString()
+                    rows.add(Person(cursor.getString(0) ?: number, number, label, cursor.getString(2)))
                 }
             }
         }
-        return rows.distinctBy { numberKey(it.number) + it.name }
+        return rows.distinctBy { numberKey(it.number) + "|" + it.name }
     }
 
     private fun readRecents(): List<Recent> {
-        if (checkSelfPermission(Manifest.permission.READ_CALL_LOG) != PackageManager.PERMISSION_GRANTED) return emptyList()
+        if (!has(Manifest.permission.READ_CALL_LOG)) return emptyList()
         val rows = ArrayList<Recent>()
         val carriers = runCatching { CallJournal.get(this).carriers() }.getOrDefault(emptyMap())
         runCatching {
@@ -177,7 +296,7 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
                 arrayOf(CallLog.Calls.NUMBER, CallLog.Calls.TYPE, CallLog.Calls.DATE, CallLog.Calls.DURATION, CallLog.Calls._ID),
                 null, null, CallLog.Calls.DATE + " DESC"
             )?.use { cursor ->
-                while (cursor.moveToNext() && rows.size < 250) {
+                while (cursor.moveToNext() && rows.size < 300) {
                     rows.add(Recent(cursor.getString(0).orEmpty(), cursor.getInt(1), cursor.getLong(2), cursor.getLong(3),
                         carriers[cursor.getLong(4)]))
                 }
@@ -187,7 +306,7 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
     }
 
     private fun readMessages(): List<Message> {
-        if (checkSelfPermission(Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) return emptyList()
+        if (!has(Manifest.permission.READ_SMS)) return emptyList()
         val rows = ArrayList<Message>()
         runCatching {
             contentResolver.query(
@@ -195,9 +314,13 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
                 arrayOf(Telephony.Sms.ADDRESS, Telephony.Sms.BODY, Telephony.Sms.DATE, Telephony.Sms.TYPE),
                 null, null, Telephony.Sms.DATE + " DESC"
             )?.use { cursor ->
-                while (cursor.moveToNext() && rows.size < 1000) {
-                    rows.add(Message(cursor.getString(0).orEmpty(), cursor.getString(1).orEmpty(),
-                        cursor.getLong(2), cursor.getInt(3) == Telephony.Sms.MESSAGE_TYPE_SENT))
+                while (cursor.moveToNext() && rows.size < 2000) {
+                    val type = cursor.getInt(3)
+                    rows.add(Message(
+                        cursor.getString(0).orEmpty(), cursor.getString(1).orEmpty(), cursor.getLong(2),
+                        sent = type != Telephony.Sms.MESSAGE_TYPE_INBOX,
+                        failed = type == Telephony.Sms.MESSAGE_TYPE_FAILED
+                    ))
                 }
             }
         }
@@ -206,60 +329,114 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
 
     private fun numberKey(number: String): String {
         val digits = number.filter(Char::isDigit)
-        return digits.takeLast(10).ifBlank { number.trim() }
+        return if (digits.length >= 7) digits.takeLast(10) else number.trim().lowercase(turkish)
     }
 
-    private fun nameFor(number: String): String =
-        contacts.firstOrNull { numberKey(it.number) == numberKey(number) }?.name
-            ?: number.ifBlank { "Gizli numara" }
+    private fun contactFor(number: String): Person? = contactByKey[numberKey(number)]
 
-    private fun showSelectedTab() {
-        binding.phoneContent.removeAllViews()
-        binding.phoneTitle.text = when (selectedTab) {
-            0 -> "Son aramalar"
-            1 -> "Kişiler"
-            2 -> "Telefon"
-            3 -> if (openThread == null) "Mesajlar" else nameFor(openThread!!)
-            else -> "Ayarlar"
-        }
-        updateSubtitle()
-        when (selectedTab) {
-            0 -> showRecents()
-            1 -> showContacts()
-            2 -> showKeypad()
-            3 -> if (openThread == null) showThreads() else showConversation(openThread!!)
-            else -> showSettings()
-        }
+    private fun isHidden(number: String) = number.isBlank() || number.startsWith("-")
+
+    /** Senders like "TURKCELL" cannot be called or answered. */
+    private fun dialable(address: String) = address.any(Char::isDigit) && address.none(Char::isLetter)
+
+    private fun formatNumber(number: String): String =
+        if (dialable(number)) PhoneNumberUtils.formatNumber(number, "TR") ?: number else number
+
+    private fun nameFor(number: String): String = when {
+        isHidden(number) -> "Gizli numara"
+        else -> contactFor(number)?.name ?: formatNumber(number)
     }
 
-    private fun updateSubtitle() {
-        val state = CallManager.currentCallState
-        val live = isCallLive()
-        binding.currentCallCard.visibility = if (live) View.VISIBLE else View.GONE
-        if (live) {
-            val number = CallManager.currentPhoneNumber?.takeIf { it.isNotBlank() } ?: "Gizli numara"
-            binding.currentCallState.text = when (state) {
-                "ringing" -> "Gelen arama"
-                "dialing", "connecting" -> "Aranıyor"
-                "holding" -> "Arama beklemede"
-                else -> "Görüşme sürüyor"
-            }
-            binding.currentCallNumber.text = number
-            binding.currentCallCard.contentDescription = "${binding.currentCallState.text}, $number, arama ekranını aç"
-        }
-        binding.phoneSubtitle.text = if (live) {
-            "Redmi hattı görüşmede"
-        } else if (GatewayService.isRunning) {
-            "Redmi hattı hazır · geçit açık"
+    // ---- chrome: title, iPhone status, attention, current call, badges ----
+
+    private fun render() {
+        renderChrome()
+        renderContent()
+    }
+
+    private fun renderChrome() {
+        val conversation = openThread
+        backToThreads.isEnabled = conversation != null
+        binding.phoneBack.visibility = visibleIf(conversation != null)
+        binding.phoneSettings.visibility = visibleIf(conversation == null)
+        binding.phoneCall.visibility = visibleIf(conversation != null && dialable(conversation))
+        binding.phoneStatus.visibility = visibleIf(conversation == null)
+        binding.phoneNav.visibility = visibleIf(conversation == null)
+        binding.phoneNavDivider.visibility = visibleIf(conversation == null)
+        if (conversation != null) {
+            val person = contactFor(conversation)
+            binding.phoneTitle.text = nameFor(conversation)
+            binding.phoneTitle.textSize = 20f
+            binding.phoneTitleDetail.text = formatNumber(conversation)
+            binding.phoneTitleDetail.visibility = visibleIf(person != null)
+            binding.phoneCall.contentDescription = "${nameFor(conversation)} ara"
         } else {
-            "Redmi hattı hazır · geçit kapalı"
+            binding.phoneTitle.text = tab.title
+            binding.phoneTitle.textSize = 28f
+            binding.phoneTitleDetail.visibility = View.GONE
         }
-        binding.phoneSubtitle.setOnClickListener {
-            if (isCallLive()) openCurrentCall()
+        updateStatus()
+        updateAttention()
+        updateCallCard()
+        updateBadges()
+    }
+
+    private fun visibleIf(condition: Boolean) = if (condition) View.VISIBLE else View.GONE
+
+    private fun updateStatus() {
+        val status = IPhoneReachability.current()
+        binding.phoneStatusText.text = status.short
+        val dot = when (status.level) {
+            IPhoneReachability.Level.CONNECTED, IPhoneReachability.Level.BLUETOOTH -> R.color.status_good
+            IPhoneReachability.Level.PUSH -> R.color.accent
+            IPhoneReachability.Level.OFFLINE -> R.color.status_attention
+            IPhoneReachability.Level.UNPAIRED -> R.color.text_muted
+        }
+        binding.phoneStatusDot.backgroundTintList = ColorStateList.valueOf(views.color(dot))
+        binding.phoneStatus.contentDescription = "${status.short}. ${status.detail} Ayarlar için dokun."
+    }
+
+    private fun updateAttention() {
+        val dialer = getSystemService(TelecomManager::class.java)?.defaultDialerPackage == packageName
+        val card = binding.attentionCard
+        when {
+            openThread != null -> card.visibility = View.GONE
+            !dialer -> {
+                card.visibility = View.VISIBLE
+                binding.attentionText.text = "Aramalar için bu uygulama varsayılan telefon uygulaması olmalı."
+                binding.attentionAction.text = "Ayarla"
+                binding.attentionAction.setOnClickListener { requestDialerRole() }
+            }
+            !GatewayService.isRunning -> {
+                card.visibility = View.VISIBLE
+                binding.attentionText.text = "Telefon geçidi kapalı; iPhone bağlanamaz."
+                binding.attentionAction.text = "Başlat"
+                binding.attentionAction.setOnClickListener {
+                    startBridge()
+                    handler.postDelayed({ renderChrome() }, 1500)
+                }
+            }
+            else -> card.visibility = View.GONE
         }
     }
 
     private fun isCallLive() = CallManager.currentCallState !in listOf("idle", "disconnected")
+
+    private fun updateCallCard() {
+        val live = isCallLive()
+        binding.currentCallCard.visibility = visibleIf(live)
+        if (!live) return
+        val number = CallManager.currentPhoneNumber.orEmpty()
+        val who = if (number.isBlank()) "Gizli numara" else nameFor(number)
+        binding.currentCallState.text = when (CallManager.currentCallState) {
+            "ringing" -> "Gelen arama"
+            "dialing", "connecting" -> "Aranıyor"
+            "holding" -> "Arama beklemede"
+            else -> "Görüşme sürüyor"
+        }
+        binding.currentCallNumber.text = who
+        binding.currentCallCard.contentDescription = "${binding.currentCallState.text}, $who. Arama ekranını aç."
+    }
 
     private fun openCurrentCall() {
         if (!isCallLive()) return
@@ -268,322 +445,791 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         ))
     }
 
-    private fun showRecents() {
-        if (recents.isEmpty()) return showEmpty("Henüz arama yok veya arama izni verilmedi.")
-        val list = ListView(this)
-        list.adapter = object : BaseAdapter() {
-            override fun getCount() = recents.size
-            override fun getItem(position: Int) = recents[position]
-            override fun getItemId(position: Int) = position.toLong()
-            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                val call = recents[position]
-                val missed = call.type == CallLog.Calls.MISSED_TYPE || call.type == CallLog.Calls.REJECTED_TYPE
-                val direction = when (call.type) {
-                    CallLog.Calls.INCOMING_TYPE -> "Gelen"
-                    CallLog.Calls.OUTGOING_TYPE -> "Giden"
-                    CallLog.Calls.MISSED_TYPE -> "Cevapsız"
-                    CallLog.Calls.REJECTED_TYPE -> "Reddedilen"
-                    else -> "Arama"
-                }
-                val parts = mutableListOf(direction, DateFormat.format("d MMM HH:mm", Date(call.time)).toString())
-                if (call.seconds > 0) parts.add("${call.seconds / 60}:${(call.seconds % 60).toString().padStart(2, '0')}")
-                when (call.carrier) {
-                    "iphone" -> parts.add("iPhone'da")
-                    "redmi" -> parts.add("Redmi'de")
-                }
-                return LinearLayout(this@PhoneActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(dp(8), dp(10), dp(8), dp(10))
-                    addView(TextView(this@PhoneActivity).apply {
-                        text = nameFor(call.number)
-                        textSize = 17f
-                        setTextColor(if (missed) ContextCompat.getColor(this@PhoneActivity, R.color.status_bad)
-                            else ContextCompat.getColor(this@PhoneActivity, R.color.text_primary))
-                    })
-                    addView(TextView(this@PhoneActivity).apply {
-                        text = parts.joinToString(" · ")
-                        textSize = 14f
-                        setTextColor(ContextCompat.getColor(this@PhoneActivity, R.color.text_secondary))
-                    })
-                    contentDescription = "${nameFor(call.number)}, ${parts.joinToString(", ")}"
-                }
+    /** Missed calls since Recents was last looked at. */
+    private fun updateBadges() {
+        if (!loaded) return
+        val now = System.currentTimeMillis()
+        if (tab == Tab.RECENTS && openThread == null) prefs.edit().putLong("recents_seen", now).apply()
+        val seen = prefs.getLong("recents_seen", 0L)
+        val missed = recents.count { kind(it.type) == Kind.MISSED && it.time > seen }
+        val badge = binding.phoneNav.getOrCreateBadge(R.id.nav_recents)
+        badge.isVisible = missed > 0
+        if (missed > 0) badge.number = missed
+    }
+
+    // ---- content ----
+
+    private fun renderContent() {
+        contentUpdater = null
+        keypadMatch = null
+        binding.phoneContent.removeAllViews()
+        val conversation = openThread
+        when {
+            conversation != null -> showConversation(conversation)
+            tab == Tab.RECENTS -> showRecents()
+            tab == Tab.CONTACTS -> showContacts()
+            tab == Tab.KEYPAD -> showKeypad()
+            else -> showThreads()
+        }
+    }
+
+    private inner class RowAdapter(var items: List<Any>, val bind: (PhoneViews.Row, Any) -> Unit) : BaseAdapter() {
+        override fun getCount() = items.size
+        override fun getItem(position: Int) = items[position]
+        override fun getItemId(position: Int) = position.toLong()
+        override fun getViewTypeCount() = 2
+        override fun getItemViewType(position: Int) = if (items[position] is Header) 0 else 1
+        override fun isEnabled(position: Int) = items[position] !is Header
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val item = items[position]
+            if (item is Header) {
+                val view = convertView as? TextView ?: views.header()
+                view.text = item.text
+                return view
+            }
+            val row = convertView?.tag as? PhoneViews.Row ?: views.row().also { it.root.tag = it }
+            bind(row, item)
+            return row.root
+        }
+    }
+
+    private fun listView() = ListView(this).apply {
+        divider = null
+        dividerHeight = 0
+        selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+        clipToPadding = false
+        setPadding(0, 0, 0, views.dp(88))
+    }
+
+    private fun showEmpty(icon: Int, text: String, actionLabel: String? = null, action: (() -> Unit)? = null) {
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(views.dp(32), 0, views.dp(32), views.dp(48))
+        }
+        column.addView(ImageView(this).apply {
+            setImageResource(icon)
+            imageTintList = ColorStateList.valueOf(views.color(R.color.text_muted))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LinearLayout.LayoutParams(views.dp(48), views.dp(48)))
+        column.addView(TextView(this).apply {
+            this.text = text
+            textSize = 16f
+            gravity = Gravity.CENTER
+            setTextColor(views.color(R.color.text_secondary))
+            setPadding(0, views.dp(12), 0, views.dp(12))
+        })
+        if (actionLabel != null && action != null) {
+            column.addView(MaterialButton(this).apply {
+                this.text = actionLabel
+                isAllCaps = false
+                setOnClickListener { action() }
+            })
+        }
+        binding.phoneContent.addView(column, FrameLayout.LayoutParams(-1, -1))
+    }
+
+    // Recents
+
+    private fun kind(type: Int) = when (type) {
+        CallLog.Calls.INCOMING_TYPE, CallLog.Calls.ANSWERED_EXTERNALLY_TYPE -> Kind.INCOMING
+        CallLog.Calls.OUTGOING_TYPE -> Kind.OUTGOING
+        CallLog.Calls.MISSED_TYPE, CallLog.Calls.REJECTED_TYPE -> Kind.MISSED
+        else -> Kind.OTHER
+    }
+
+    private fun recentItems(): List<Any> {
+        // Consecutive calls with the same number, kind and day read as one line with a count.
+        val entries = ArrayList<RecentEntry>()
+        for (call in recents) {
+            val last = entries.lastOrNull()
+            if (last != null && numberKey(last.call.number) == numberKey(call.number) &&
+                kind(last.call.type) == kind(call.type) && dayNumber(last.call.time) == dayNumber(call.time)) {
+                entries[entries.lastIndex] = last.copy(count = last.count + 1)
+            } else {
+                entries.add(RecentEntry(call, 1))
             }
         }
-        list.setOnItemClickListener { _, _, position, _ -> callNumber(recents[position].number) }
+        val items = ArrayList<Any>()
+        var header: String? = null
+        for (entry in entries) {
+            val title = dayHeader(entry.call.time)
+            if (title != header) {
+                items.add(Header(title))
+                header = title
+            }
+            items.add(entry)
+        }
+        return items
+    }
+
+    private fun showRecents() {
+        if (!has(Manifest.permission.READ_CALL_LOG)) {
+            return showEmpty(R.drawable.ic_pb_history, "Arama geçmişi için izin gerekli.", "İzin ver") { requestPermissionsIfNeeded() }
+        }
+        if (recents.isEmpty()) return showEmpty(R.drawable.ic_pb_history, if (loaded) "Henüz arama yok." else "")
+        val adapter = RowAdapter(recentItems()) { row, item -> bindRecent(row, item as RecentEntry) }
+        val list = listView()
+        list.adapter = adapter
         binding.phoneContent.addView(list)
+        contentUpdater = {
+            adapter.items = recentItems()
+            adapter.notifyDataSetChanged()
+        }
+    }
+
+    private fun bindRecent(row: PhoneViews.Row, entry: RecentEntry) {
+        val call = entry.call
+        val hidden = isHidden(call.number)
+        val person = if (hidden) null else contactFor(call.number)
+        val name = nameFor(call.number)
+        val kind = kind(call.type)
+        row.title.text = if (entry.count > 1) "$name (${entry.count})" else name
+        row.title.setTextColor(views.color(if (kind == Kind.MISSED) R.color.status_bad else R.color.text_primary))
+        views.bindAvatar(row.avatar, person?.name, person?.photo)
+        row.subtitleIcon.visibility = View.VISIBLE
+        row.subtitleIcon.setImageResource(when (kind) {
+            Kind.OUTGOING -> R.drawable.ic_pb_call_made
+            Kind.MISSED -> R.drawable.ic_pb_call_missed
+            else -> R.drawable.ic_pb_call_received
+        })
+        row.subtitleIcon.imageTintList = ColorStateList.valueOf(views.color(
+            when (kind) {
+                Kind.MISSED -> R.color.status_bad
+                Kind.INCOMING -> R.color.status_good
+                else -> R.color.text_secondary
+            }
+        ))
+        val parts = mutableListOf(when (call.type) {
+            CallLog.Calls.INCOMING_TYPE -> "Gelen"
+            CallLog.Calls.OUTGOING_TYPE -> "Giden"
+            CallLog.Calls.MISSED_TYPE -> "Cevapsız"
+            CallLog.Calls.REJECTED_TYPE -> "Reddedildi"
+            CallLog.Calls.BLOCKED_TYPE -> "Engellendi"
+            CallLog.Calls.ANSWERED_EXTERNALLY_TYPE -> "Başka cihazda"
+            CallLog.Calls.VOICEMAIL_TYPE -> "Sesli mesaj"
+            else -> "Arama"
+        })
+        if (call.seconds > 0 && kind != Kind.MISSED) parts.add(duration(call.seconds))
+        when (call.carrier) {
+            "iphone" -> parts.add("iPhone'da")
+            "redmi" -> parts.add("Redmi'de")
+        }
+        row.subtitle.text = parts.joinToString(" · ")
+        row.trailing.visibility = View.VISIBLE
+        row.trailing.text = timeLabel(call.time)
+        if (!hidden && dialable(call.number)) {
+            row.action.visibility = View.VISIBLE
+            row.action.setImageResource(R.drawable.ic_pb_message)
+            row.action.contentDescription = "$name kişisine mesaj yaz"
+            row.action.setOnClickListener { openConversation(call.number) }
+            row.root.setOnClickListener { callNumber(call.number) }
+        } else {
+            row.action.visibility = View.GONE
+            row.root.setOnClickListener(null)
+            row.root.isClickable = false
+        }
+        row.root.contentDescription = "$name, ${parts.joinToString(", ")}, ${timeLabel(call.time)}"
+    }
+
+    private fun duration(seconds: Long): String =
+        if (seconds >= 3600) "%d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60)
+        else "%d:%02d".format(seconds / 60, seconds % 60)
+
+    // Contacts
+
+    private fun contactItems(): List<Any> {
+        val query = contactQuery.trim().lowercase(turkish)
+        val digits = query.filter(Char::isDigit)
+        val filtered = if (query.isEmpty()) contacts else contacts.filter {
+            it.name.lowercase(turkish).contains(query) ||
+                (digits.length >= 2 && it.number.filter(Char::isDigit).contains(digits))
+        }
+        if (query.isNotEmpty()) return filtered
+        val items = ArrayList<Any>()
+        var header: String? = null
+        for (person in filtered) {
+            val first = person.name.trim().firstOrNull()
+            val letter = if (first != null && first.isLetter()) first.toString().uppercase(turkish) else "#"
+            if (letter != header) {
+                items.add(Header(letter))
+                header = letter
+            }
+            items.add(person)
+        }
+        return items
     }
 
     private fun showContacts() {
-        val column = column()
+        if (!has(Manifest.permission.READ_CONTACTS)) {
+            return showEmpty(R.drawable.ic_pb_person, "Kişiler için izin gerekli.", "İzin ver") { requestPermissionsIfNeeded() }
+        }
+        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val search = EditText(this).apply {
-            hint = "Kişi veya numara ara"
+            background = ContextCompat.getDrawable(this@PhoneActivity, R.drawable.pb_field)
+            hint = "Kişilerde ara"
             setSingleLine(true)
-            contentDescription = "Kişi ara"
+            textSize = 16f
+            setTextColor(views.color(R.color.text_primary))
+            setHintTextColor(views.color(R.color.text_muted))
+            setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_pb_search, 0, 0, 0)
+            compoundDrawablePadding = views.dp(10)
+            compoundDrawableTintList = ColorStateList.valueOf(views.color(R.color.text_secondary))
+            setPadding(views.dp(16), 0, views.dp(16), 0)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PERSON_NAME
+            setText(contactQuery)
+            contentDescription = "Kişilerde ara"
         }
-        column.addView(search, LinearLayout.LayoutParams(-1, -2))
-        val list = ListView(this)
-        column.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
-        fun update(query: String) {
-            val filtered = contacts.filter {
-                it.name.contains(query, ignoreCase = true) || it.number.contains(query)
-            }
-            list.adapter = object : BaseAdapter() {
-                override fun getCount() = filtered.size
-                override fun getItem(position: Int) = filtered[position]
-                override fun getItemId(position: Int) = position.toLong()
-                override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                    val person = filtered[position]
-                    val row = LinearLayout(this@PhoneActivity).apply {
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-                        setPadding(dp(8), dp(8), dp(8), dp(8))
-                    }
-                    val avatar = FrameLayout(this@PhoneActivity).apply {
-                        background = GradientDrawable().apply {
-                            shape = GradientDrawable.OVAL
-                            setColor(ContextCompat.getColor(this@PhoneActivity, R.color.neon_emerald))
-                        }
-                        clipToOutline = true
-                    }
-                    if (person.photo != null) {
-                        avatar.addView(ImageView(this@PhoneActivity).apply {
-                            setImageURI(Uri.parse(person.photo))
-                            scaleType = ImageView.ScaleType.CENTER_CROP
-                        }, FrameLayout.LayoutParams(-1, -1))
-                    } else {
-                        avatar.addView(TextView(this@PhoneActivity).apply {
-                            text = person.name.take(1).uppercase()
-                            setTextColor(Color.WHITE)
-                            gravity = Gravity.CENTER
-                            textSize = 20f
-                        }, FrameLayout.LayoutParams(-1, -1))
-                    }
-                    row.addView(avatar, LinearLayout.LayoutParams(dp(44), dp(44)))
-                    row.addView(LinearLayout(this@PhoneActivity).apply {
-                        orientation = LinearLayout.VERTICAL
-                        setPadding(dp(16), 0, 0, 0)
-                        addView(TextView(this@PhoneActivity).apply {
-                            text = person.name
-                            textSize = 17f
-                        })
-                        addView(TextView(this@PhoneActivity).apply {
-                            text = person.number
-                            textSize = 14f
-                        })
-                    }, LinearLayout.LayoutParams(0, -2, 1f))
-                    return row
-                }
-            }
-            list.setOnItemClickListener { _, _, index, _ -> callNumber(filtered[index].number) }
-        }
-        search.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = update(s.toString())
-            override fun afterTextChanged(s: android.text.Editable?) = Unit
+        column.addView(search, LinearLayout.LayoutParams(-1, views.dp(48)).apply {
+            setMargins(views.dp(16), views.dp(4), views.dp(16), views.dp(4))
         })
-        update("")
+        val empty = TextView(this).apply {
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setTextColor(views.color(R.color.text_secondary))
+            setPadding(views.dp(24), views.dp(32), views.dp(24), 0)
+        }
+        column.addView(empty, LinearLayout.LayoutParams(-1, -2))
+        val adapter = RowAdapter(contactItems()) { row, item -> bindContact(row, item as Person) }
+        val list = listView()
+        list.adapter = adapter
+        column.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
+        fun update() {
+            adapter.items = contactItems()
+            adapter.notifyDataSetChanged()
+            empty.visibility = visibleIf(adapter.items.isEmpty())
+            empty.text = when {
+                contacts.isEmpty() && loaded -> "Rehberde kişi yok."
+                contacts.isEmpty() -> ""
+                else -> "\"${contactQuery.trim()}\" bulunamadı."
+            }
+        }
+        search.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: Editable?) {
+                contactQuery = s?.toString().orEmpty()
+                update()
+            }
+        })
+        update()
         binding.phoneContent.addView(column)
+        contentUpdater = { update() }
     }
 
+    private fun bindContact(row: PhoneViews.Row, person: Person) {
+        row.title.text = person.name
+        row.title.setTextColor(views.color(R.color.text_primary))
+        views.bindAvatar(row.avatar, person.name, person.photo)
+        row.subtitleIcon.visibility = View.GONE
+        row.subtitle.text = listOf(person.label, formatNumber(person.number)).filter { it.isNotBlank() }.joinToString(" · ")
+        row.trailing.visibility = View.GONE
+        row.root.setOnClickListener { callNumber(person.number) }
+        row.root.contentDescription = "${person.name}, ${row.subtitle.text}. Aramak için dokun."
+        if (dialable(person.number)) {
+            row.action.visibility = View.VISIBLE
+            row.action.setImageResource(R.drawable.ic_pb_message)
+            row.action.contentDescription = "${person.name} kişisine mesaj yaz"
+            row.action.setOnClickListener { openConversation(person.number) }
+        } else {
+            row.action.visibility = View.GONE
+        }
+    }
+
+    // Keypad
+
     private fun showKeypad() {
-        val column = column()
-        column.gravity = Gravity.CENTER_HORIZONTAL
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(views.dp(24), 0, views.dp(24), views.dp(12))
+        }
         val number = EditText(this).apply {
-            hint = "Telefon numarası"
-            inputType = InputType.TYPE_CLASS_PHONE
-            textSize = 28f
+            background = null
+            textSize = 34f
             gravity = Gravity.CENTER
             setSingleLine(true)
+            showSoftInputOnFocus = false
+            inputType = InputType.TYPE_CLASS_PHONE
+            setTextColor(views.color(R.color.text_primary))
             setText(draftNumber)
             setSelection(text.length)
             contentDescription = "Aranacak numara"
         }
-        column.addView(number, LinearLayout.LayoutParams(-1, -2))
-        val grid = GridLayout(this).apply { columnCount = 3; alignmentMode = GridLayout.ALIGN_BOUNDS }
-        "123456789*0#".forEachIndexed { index, digit ->
-            val button = Button(this).apply {
-                text = digit.toString()
-                textSize = 24f
-                setOnClickListener {
-                    number.text.insert(number.selectionStart.coerceAtLeast(0), digit.toString())
-                    if (CallManager.currentCallState == "active") CallManager.playDtmf(digit)
+        column.addView(number, LinearLayout.LayoutParams(-1, -2).apply { topMargin = views.dp(8) })
+        val match = TextView(this).apply {
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setTextColor(views.color(R.color.accent))
+            minHeight = views.dp(32)
+            background = views.selectable()
+        }
+        column.addView(match, LinearLayout.LayoutParams(-2, -2))
+        keypadMatch = match
+        column.addView(View(this), LinearLayout.LayoutParams(-1, 0, 1f))
+
+        fun insert(text: String) {
+            val start = number.selectionStart.coerceAtLeast(0)
+            val end = number.selectionEnd.coerceAtLeast(start)
+            number.text.replace(start, end, text)
+        }
+        val keys = listOf(
+            "1" to "", "2" to "ABC", "3" to "DEF",
+            "4" to "GHİ", "5" to "JKL", "6" to "MNO",
+            "7" to "PQRS", "8" to "TUV", "9" to "WXYZ",
+            "*" to "", "0" to "+", "#" to ""
+        )
+        for (rowKeys in keys.chunked(3)) {
+            val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            for ((digit, letters) in rowKeys) {
+                val key = keypadKey(digit, letters)
+                key.setOnClickListener {
+                    it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                    insert(digit)
+                    if (CallManager.currentCallState == "active") CallManager.playDtmf(digit[0])
+                }
+                if (digit == "0") key.setOnLongClickListener { insert("+"); true }
+                val cell = FrameLayout(this)
+                cell.addView(key, FrameLayout.LayoutParams(views.dp(76), views.dp(76), Gravity.CENTER))
+                line.addView(cell, LinearLayout.LayoutParams(0, views.dp(88), 1f))
+            }
+            column.addView(line, LinearLayout.LayoutParams(-1, -2))
+        }
+
+        val bottom = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        bottom.addView(View(this), LinearLayout.LayoutParams(0, views.dp(88), 1f))
+        val call = ImageButton(this).apply {
+            background = ContextCompat.getDrawable(this@PhoneActivity, R.drawable.pb_call_button)
+            setImageResource(R.drawable.ic_pb_call)
+            imageTintList = ColorStateList.valueOf(Color.WHITE)
+            contentDescription = "Ara"
+            elevation = views.dp(2).toFloat()
+            setOnClickListener {
+                val typed = number.text.toString().trim()
+                if (typed.isEmpty()) {
+                    // Like most phones: an empty call key brings back the last number dialled.
+                    recents.firstOrNull { it.type == CallLog.Calls.OUTGOING_TYPE && !isHidden(it.number) }?.let {
+                        number.setText(it.number)
+                        number.setSelection(number.text.length)
+                    }
+                } else {
+                    callNumber(typed)
                 }
             }
-            grid.addView(button, GridLayout.LayoutParams(GridLayout.spec(index / 3), GridLayout.spec(index % 3, 1f)).apply {
-                width = 0
-                height = dp(64)
-                setMargins(dp(4), dp(4), dp(4), dp(4))
-            })
         }
-        column.addView(grid, LinearLayout.LayoutParams(-1, -2))
-        val delete = Button(this).apply {
-            text = "Sil"
+        val callCell = FrameLayout(this)
+        callCell.addView(call, FrameLayout.LayoutParams(views.dp(72), views.dp(72), Gravity.CENTER))
+        bottom.addView(callCell, LinearLayout.LayoutParams(0, views.dp(88), 1f))
+        val delete = ImageButton(this).apply {
+            background = views.selectable(borderless = true)
+            setImageResource(R.drawable.ic_pb_backspace)
+            imageTintList = ColorStateList.valueOf(views.color(R.color.text_secondary))
+            contentDescription = "Sil"
             setOnClickListener {
                 val start = number.selectionStart
-                if (start > 0) number.text.delete(start - 1, start)
+                val end = number.selectionEnd
+                if (end > start) number.text.delete(start, end)
+                else if (start > 0) number.text.delete(start - 1, start)
+            }
+            setOnLongClickListener {
+                number.text.clear()
+                true
             }
         }
-        column.addView(delete, LinearLayout.LayoutParams(-1, -2))
-        val call = Button(this).apply {
-            text = "Ara"
-            textSize = 20f
-            setOnClickListener {
-                draftNumber = number.text.toString()
-                callNumber(draftNumber)
-            }
+        val deleteCell = FrameLayout(this)
+        deleteCell.addView(delete, FrameLayout.LayoutParams(views.dp(56), views.dp(56), Gravity.CENTER))
+        bottom.addView(deleteCell, LinearLayout.LayoutParams(0, views.dp(88), 1f))
+        column.addView(bottom, LinearLayout.LayoutParams(-1, -2))
+
+        fun update() {
+            draftNumber = number.text.toString()
+            delete.visibility = if (draftNumber.isEmpty()) View.INVISIBLE else View.VISIBLE
+            updateKeypadMatch(number)
         }
-        column.addView(call, LinearLayout.LayoutParams(-1, dp(56)))
+        number.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: Editable?) = update()
+        })
+        update()
         binding.phoneContent.addView(column)
+        contentUpdater = { updateKeypadMatch(number) }
     }
+
+    private fun keypadKey(digit: String, letters: String): View {
+        val key = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            background = ContextCompat.getDrawable(this@PhoneActivity, R.drawable.pb_round_key)
+            isClickable = true
+            isFocusable = true
+            contentDescription = if (letters.isEmpty()) digit else "$digit $letters"
+        }
+        key.addView(TextView(this).apply {
+            text = digit
+            textSize = 28f
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            setTextColor(views.color(R.color.text_primary))
+        })
+        if (letters.isNotEmpty()) {
+            key.addView(TextView(this).apply {
+                text = letters
+                textSize = 10f
+                letterSpacing = 0.15f
+                gravity = Gravity.CENTER
+                setTextColor(views.color(R.color.text_secondary))
+            })
+        }
+        return key
+    }
+
+    /** Shows whose number is typed, or the first contact it could belong to (tap to use it). */
+    private fun updateKeypadMatch(number: EditText) {
+        val match = keypadMatch ?: return
+        val typed = number.text.toString()
+        val digits = typed.filter(Char::isDigit)
+        val exact = if (digits.length >= 7) contactFor(typed) else null
+        val partial = if (exact == null && digits.length >= 3) {
+            contacts.firstOrNull { it.number.filter(Char::isDigit).contains(digits) }
+        } else null
+        when {
+            exact != null -> {
+                match.text = exact.name
+                match.setOnClickListener(null)
+                match.isClickable = false
+            }
+            partial != null -> {
+                match.text = "${partial.name} · ${formatNumber(partial.number)}"
+                match.contentDescription = "${partial.name} numarasını kullan"
+                match.setOnClickListener {
+                    number.setText(partial.number)
+                    number.setSelection(number.text.length)
+                }
+            }
+            else -> {
+                match.text = ""
+                match.setOnClickListener(null)
+                match.isClickable = false
+            }
+        }
+    }
+
+    // Messages
+
+    private fun threads(): List<Conversation> = messages.groupBy { numberKey(it.address) }
+        .values.mapNotNull { group -> group.maxByOrNull(Message::time)?.let { Conversation(it.address, it) } }
+        .sortedByDescending { it.latest.time }
 
     private fun showThreads() {
-        val latest = messages.groupBy { numberKey(it.address) }
-            .values.mapNotNull { it.maxByOrNull(Message::time) }
-            .sortedByDescending(Message::time)
-        val column = column()
-        val newMessage = Button(this).apply {
-            text = "Yeni mesaj"
+        if (!has(Manifest.permission.READ_SMS)) {
+            return showEmpty(R.drawable.ic_pb_message, "Mesajlar için izin gerekli.", "İzin ver") { requestPermissionsIfNeeded() }
+        }
+        val frame = FrameLayout(this)
+        val adapter = RowAdapter(threads()) { row, item -> bindThread(row, item as Conversation) }
+        if (adapter.items.isEmpty()) {
+            showEmpty(R.drawable.ic_pb_message, if (loaded) "Henüz mesaj yok." else "")
+        } else {
+            val list = listView()
+            list.adapter = adapter
+            frame.addView(list, FrameLayout.LayoutParams(-1, -1))
+            contentUpdater = {
+                adapter.items = threads()
+                adapter.notifyDataSetChanged()
+            }
+        }
+        frame.addView(FloatingActionButton(this).apply {
+            setImageResource(R.drawable.ic_pb_add)
+            backgroundTintList = ColorStateList.valueOf(views.color(R.color.accent))
+            imageTintList = ColorStateList.valueOf(Color.WHITE)
+            contentDescription = "Yeni mesaj"
             setOnClickListener { showNewMessage() }
-        }
-        column.addView(newMessage, LinearLayout.LayoutParams(-1, -2))
-        val list = ListView(this)
-        val rows = latest.map {
-            mapOf("title" to nameFor(it.address),
-                "detail" to "${if (it.sent) "Ben: " else ""}${it.body.take(70)} · ${DateFormat.format("dd MMM", Date(it.time))}")
-        }
-        list.adapter = twoLineAdapter(rows)
-        list.setOnItemClickListener { _, _, position, _ ->
-            openThread = latest[position].address
-            showSelectedTab()
-        }
-        column.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
-        binding.phoneContent.addView(column)
+        }, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END).apply {
+            setMargins(0, 0, views.dp(16), views.dp(16))
+        })
+        binding.phoneContent.addView(frame, FrameLayout.LayoutParams(-1, -1))
     }
 
-    private fun showNewMessage() {
-        val input = EditText(this).apply {
-            hint = "Alıcı numarası"
-            inputType = InputType.TYPE_CLASS_PHONE
+    private fun bindThread(row: PhoneViews.Row, thread: Conversation) {
+        val person = contactFor(thread.address)
+        val name = nameFor(thread.address)
+        row.title.text = name
+        row.title.setTextColor(views.color(R.color.text_primary))
+        views.bindAvatar(row.avatar, person?.name ?: thread.address.takeIf { it.any(Char::isLetter) }, person?.photo)
+        row.subtitleIcon.visibility = View.GONE
+        val body = thread.latest.body.replace('\n', ' ')
+        row.subtitle.text = when {
+            thread.latest.failed -> "Gönderilemedi: $body"
+            thread.latest.sent -> "Sen: $body"
+            else -> body
         }
-        androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("Yeni mesaj")
-            .setView(input)
-            .setNegativeButton("Vazgeç", null)
-            .setPositiveButton("Devam") { _, _ ->
-                val address = input.text.toString().trim()
-                if (address.isNotBlank()) {
-                    openThread = address
-                    showSelectedTab()
-                }
-            }.show()
+        row.trailing.visibility = View.VISIBLE
+        row.trailing.text = timeLabel(thread.latest.time)
+        row.action.visibility = View.GONE
+        row.root.setOnClickListener { openConversation(thread.address) }
+        row.root.contentDescription = "$name, ${row.subtitle.text}, ${row.trailing.text}"
+    }
+
+    private fun openConversation(address: String) {
+        if (tab != Tab.MESSAGES) {
+            tab = Tab.MESSAGES
+            prefs.edit().putString("tab", tab.name).apply()
+            suppressNav = true
+            binding.phoneNav.selectedItemId = tab.itemId
+            suppressNav = false
+        }
+        openThread = address
+        render()
+    }
+
+    private fun conversationItems(address: String): List<Any> {
+        val key = numberKey(address)
+        val items = ArrayList<Any>()
+        var day = -1L
+        for (message in messages.filter { numberKey(it.address) == key }.sortedBy(Message::time)) {
+            val today = dayNumber(message.time)
+            if (today != day) {
+                items.add(Header(conversationDay(message.time)))
+                day = today
+            }
+            items.add(message)
+        }
+        return items
     }
 
     private fun showConversation(address: String) {
-        val column = column()
-        val back = Button(this).apply {
-            text = "‹ Mesajlar"
-            setOnClickListener { openThread = null; showSelectedTab() }
-        }
-        column.addView(back, LinearLayout.LayoutParams(-1, -2))
-        val history = messages.filter { numberKey(it.address) == numberKey(address) }.sortedBy(Message::time)
+        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val list = ListView(this).apply {
             divider = null
-            transcriptMode = ListView.TRANSCRIPT_MODE_ALWAYS_SCROLL
+            dividerHeight = 0
+            selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
+            isStackFromBottom = true
+            transcriptMode = AbsListView.TRANSCRIPT_MODE_NORMAL
+            clipToPadding = false
+            setPadding(views.dp(12), views.dp(8), views.dp(12), views.dp(8))
         }
-        list.adapter = object : BaseAdapter() {
-            override fun getCount() = history.size
-            override fun getItem(position: Int) = history[position]
+        val adapter = object : BaseAdapter() {
+            var items = conversationItems(address)
+            override fun getCount() = items.size
+            override fun getItem(position: Int) = items[position]
             override fun getItemId(position: Int) = position.toLong()
+            override fun getViewTypeCount() = 2
+            override fun getItemViewType(position: Int) = if (items[position] is Header) 0 else 1
+            override fun isEnabled(position: Int) = false
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                val message = history[position]
-                val bubble = TextView(this@PhoneActivity).apply {
-                    text = message.body
-                    textSize = 16f
-                    setTextIsSelectable(true)
-                    setPadding(dp(14), dp(9), dp(14), dp(9))
-                    setTextColor(if (message.sent) Color.WHITE else ContextCompat.getColor(this@PhoneActivity, R.color.text_primary))
-                    background = GradientDrawable().apply {
-                        cornerRadius = dp(18).toFloat()
-                        setColor(ContextCompat.getColor(this@PhoneActivity, if (message.sent) R.color.status_good else R.color.bg_card))
-                        if (!message.sent) setStroke(dp(1), ContextCompat.getColor(this@PhoneActivity, R.color.border_subtle))
+                val item = items[position]
+                if (item is Header) {
+                    val view = convertView as? TextView ?: TextView(this@PhoneActivity).apply {
+                        textSize = 12f
+                        gravity = Gravity.CENTER
+                        setTextColor(views.color(R.color.text_secondary))
+                        setPadding(0, views.dp(14), 0, views.dp(6))
+                        layoutParams = AbsListView.LayoutParams(-1, -2)
                     }
-                    maxWidth = (resources.displayMetrics.widthPixels * 0.78).toInt()
+                    view.text = item.text
+                    return view
                 }
-                val time = TextView(this@PhoneActivity).apply {
-                    text = DateFormat.format("d MMM HH:mm", Date(message.time))
-                    textSize = 12f
-                    setTextColor(ContextCompat.getColor(this@PhoneActivity, R.color.text_secondary))
-                    setPadding(dp(6), dp(2), dp(6), 0)
-                }
-                return LinearLayout(this@PhoneActivity).apply {
-                    orientation = LinearLayout.VERTICAL
-                    gravity = if (message.sent) Gravity.END else Gravity.START
-                    setPadding(0, dp(4), 0, dp(4))
-                    addView(bubble, LinearLayout.LayoutParams(-2, -2))
-                    addView(time, LinearLayout.LayoutParams(-2, -2))
-                }
+                return bubble(item as Message, convertView as? LinearLayout)
             }
         }
+        list.adapter = adapter
         column.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
-        list.setSelection(history.lastIndex.coerceAtLeast(0))
-        val compose = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val message = EditText(this).apply {
-            hint = "Mesaj yaz"
-            minLines = 1
-            maxLines = 4
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        column.addView(View(this).apply { setBackgroundColor(views.color(R.color.border_subtle)) },
+            LinearLayout.LayoutParams(-1, views.dp(1)))
+        if (dialable(address)) {
+            column.addView(composer(address), LinearLayout.LayoutParams(-1, -2))
+        } else {
+            column.addView(TextView(this).apply {
+                text = "Bu gönderene yanıt verilemez."
+                textSize = 14f
+                gravity = Gravity.CENTER
+                setTextColor(views.color(R.color.text_secondary))
+                setBackgroundColor(views.color(R.color.bg_card))
+                setPadding(views.dp(16), views.dp(16), views.dp(16), views.dp(16))
+            }, LinearLayout.LayoutParams(-1, -2))
         }
-        compose.addView(message, LinearLayout.LayoutParams(0, -2, 1f))
-        val send = Button(this).apply {
-            text = "Gönder"
-            setOnClickListener {
-                val body = message.text.toString()
-                if (body.isBlank()) return@setOnClickListener
-                isEnabled = false
-                val immediate = SmsSender.send(this@PhoneActivity, address, body) { sent, _ ->
-                    runOnUiThread {
-                        isEnabled = true
-                        if (sent) {
-                            message.text.clear()
-                            refreshPhoneData()
-                        } else {
-                            Toast.makeText(this@PhoneActivity, "SMS gönderilemedi", Toast.LENGTH_LONG).show()
-                        }
-                    }
-                }
-                if (immediate != null) {
-                    isEnabled = true
-                    Toast.makeText(this@PhoneActivity, "SMS gönderilemedi", Toast.LENGTH_LONG).show()
-                }
-            }
-        }
-        compose.addView(send, LinearLayout.LayoutParams(-2, -2))
-        column.addView(compose, LinearLayout.LayoutParams(-1, -2))
         binding.phoneContent.addView(column)
+        contentUpdater = {
+            adapter.items = conversationItems(address)
+            adapter.notifyDataSetChanged()
+            renderChrome()
+        }
     }
 
-    private fun showSettings() {
-        val column = column()
-        column.addView(label(if (GatewayService.isRunning) "Telefon geçidi çalışıyor" else "Telefon geçidi kapalı"))
-        val telecom = getSystemService(TelecomManager::class.java)
-        val defaultDialer = telecom.defaultDialerPackage == packageName
-        column.addView(label(if (defaultDialer) "Varsayılan telefon uygulaması" else "Varsayılan telefon uygulaması değil"))
-        column.addView(Button(this).apply {
-            text = "Varsayılan telefon uygulaması yap"
-            visibility = if (defaultDialer) View.GONE else View.VISIBLE
-            setOnClickListener { requestDialerRole() }
-        })
-        column.addView(Button(this).apply {
-            text = if (GatewayService.isRunning) "Geçit açık" else "Geçidi başlat"
-            isEnabled = !GatewayService.isRunning
-            setOnClickListener { startBridge(); showSelectedTab() }
-        })
-        column.addView(Button(this).apply {
-            text = "Gelişmiş ayarlar ve tanılama"
-            setOnClickListener { startActivity(Intent(this@PhoneActivity, MainActivity::class.java)) }
-        })
-        binding.phoneContent.addView(column)
+    private fun bubble(message: Message, recycled: LinearLayout?): View {
+        val container = recycled ?: LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = AbsListView.LayoutParams(-1, -2)
+            setPadding(0, views.dp(3), 0, views.dp(3))
+            addView(TextView(this@PhoneActivity).apply {
+                textSize = 16f
+                setTextIsSelectable(true)
+                setPadding(views.dp(14), views.dp(9), views.dp(14), views.dp(9))
+                maxWidth = (resources.displayMetrics.widthPixels * 0.78).toInt()
+            }, LinearLayout.LayoutParams(-2, -2))
+            addView(TextView(this@PhoneActivity).apply {
+                textSize = 11f
+                setPadding(views.dp(6), views.dp(2), views.dp(6), 0)
+            }, LinearLayout.LayoutParams(-2, -2))
+        }
+        val text = container.getChildAt(0) as TextView
+        val meta = container.getChildAt(1) as TextView
+        container.gravity = if (message.sent) Gravity.END else Gravity.START
+        text.text = message.body
+        text.setTextColor(if (message.sent) Color.WHITE else views.color(R.color.text_primary))
+        text.background = GradientDrawable().apply {
+            cornerRadius = views.dp(18).toFloat()
+            setColor(views.color(if (message.sent) R.color.accent else R.color.pb_surface_variant))
+        }
+        val time = SimpleDateFormat("HH:mm", turkish).format(Date(message.time))
+        meta.text = if (message.failed) "$time · Gönderilemedi" else time
+        meta.setTextColor(views.color(if (message.failed) R.color.status_bad else R.color.text_secondary))
+        return container
     }
+
+    private fun composer(address: String): View {
+        val key = numberKey(address)
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.BOTTOM
+            setBackgroundColor(views.color(R.color.bg_card))
+            setPadding(views.dp(12), views.dp(8), views.dp(12), views.dp(10))
+        }
+        val input = EditText(this).apply {
+            background = ContextCompat.getDrawable(this@PhoneActivity, R.drawable.pb_field)
+            hint = "Mesaj"
+            textSize = 16f
+            minHeight = views.dp(48)
+            maxLines = 5
+            setTextColor(views.color(R.color.text_primary))
+            setHintTextColor(views.color(R.color.text_muted))
+            setPadding(views.dp(18), views.dp(12), views.dp(18), views.dp(12))
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            setText(smsDrafts[key].orEmpty())
+            contentDescription = "Mesaj yaz"
+        }
+        bar.addView(input, LinearLayout.LayoutParams(0, -2, 1f))
+        val send = ImageButton(this).apply {
+            background = ContextCompat.getDrawable(this@PhoneActivity, R.drawable.pb_send_button)
+            setImageResource(R.drawable.ic_pb_send)
+            imageTintList = ColorStateList.valueOf(Color.WHITE)
+            contentDescription = "Gönder"
+        }
+        bar.addView(send, LinearLayout.LayoutParams(views.dp(48), views.dp(48)).apply { marginStart = views.dp(8) })
+        fun updateSend() {
+            val ready = input.text.isNotBlank()
+            send.isEnabled = ready
+            send.alpha = if (ready) 1f else 0.4f
+        }
+        input.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(s: Editable?) {
+                smsDrafts[key] = s?.toString().orEmpty()
+                updateSend()
+            }
+        })
+        updateSend()
+        send.setOnClickListener {
+            val body = input.text.toString()
+            if (body.isBlank()) return@setOnClickListener
+            send.isEnabled = false
+            val immediate = SmsSender.send(this, address, body) { sent, _ ->
+                runOnUiThread {
+                    if (sent) {
+                        smsDrafts.remove(key)
+                        input.text.clear()
+                        refreshPhoneData()
+                    } else {
+                        Toast.makeText(this, "SMS gönderilemedi", Toast.LENGTH_LONG).show()
+                    }
+                    updateSend()
+                }
+            }
+            if (immediate != null) {
+                updateSend()
+                Toast.makeText(this, "SMS gönderilemedi", Toast.LENGTH_LONG).show()
+            }
+        }
+        return bar
+    }
+
+    private fun showNewMessage() {
+        val options = contacts.filter { dialable(it.number) }.map { "${it.name} · ${formatNumber(it.number)}" to it.number }
+        var picked: String? = null
+        val input = AutoCompleteTextView(this).apply {
+            hint = "Ad veya numara"
+            threshold = 1
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PERSON_NAME
+            setAdapter(ArrayAdapter(this@PhoneActivity, android.R.layout.simple_dropdown_item_1line, options.map { it.first }))
+            setOnItemClickListener { parent, _, position, _ ->
+                val label = parent.getItemAtPosition(position) as String
+                picked = options.firstOrNull { it.first == label }?.second
+            }
+        }
+        val frame = FrameLayout(this).apply {
+            setPadding(views.dp(24), views.dp(8), views.dp(24), 0)
+            addView(input)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Yeni mesaj")
+            .setView(frame)
+            .setNegativeButton("Vazgeç", null)
+            .setPositiveButton("Yaz") { _, _ ->
+                val typed = input.text.toString().trim()
+                val address = picked
+                    ?: contacts.firstOrNull { it.name.equals(typed, ignoreCase = true) && dialable(it.number) }?.number
+                    ?: typed.takeIf(::dialable)
+                if (address == null) {
+                    Toast.makeText(this, "Bir kişi seç veya numara yaz", Toast.LENGTH_SHORT).show()
+                } else {
+                    openConversation(address)
+                }
+            }
+            .show()
+        input.requestFocus()
+    }
+
+    // ---- time labels ----
+
+    private fun dayNumber(time: Long): Long = (time + TimeZone.getDefault().getOffset(time)) / 86_400_000L
+
+    private fun daysAgo(time: Long) = dayNumber(System.currentTimeMillis()) - dayNumber(time)
+
+    private fun timeLabel(time: Long): String {
+        val days = daysAgo(time)
+        val pattern = when {
+            days <= 0L -> "HH:mm"
+            days == 1L -> return "Dün"
+            days < 7L -> "EEEE"
+            SimpleDateFormat("yyyy", turkish).format(Date(time)) == SimpleDateFormat("yyyy", turkish).format(Date()) -> "d MMM"
+            else -> "d.MM.yyyy"
+        }
+        return SimpleDateFormat(pattern, turkish).format(Date(time))
+    }
+
+    private fun dayHeader(time: Long) = when (daysAgo(time)) {
+        0L -> "Bugün"
+        1L -> "Dün"
+        in 2L..6L -> "Bu hafta"
+        else -> "Daha önce"
+    }
+
+    private fun conversationDay(time: Long): String = when (daysAgo(time)) {
+        0L -> "Bugün"
+        1L -> "Dün"
+        in 2L..6L -> SimpleDateFormat("EEEE", turkish).format(Date(time))
+        else -> SimpleDateFormat("d MMMM yyyy", turkish).format(Date(time))
+    }
+
+    // ---- actions ----
+
+    private fun openSettings() = startActivity(Intent(this, MainActivity::class.java))
 
     private fun requestDialerRole() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
@@ -600,43 +1246,17 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
     }
 
     private fun callNumber(number: String) {
+        if (isHidden(number)) return
         if (!CallManager.dial(this, number)) {
             Toast.makeText(this, "Arama başlatılamadı", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun column() = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(16), dp(8), dp(16), dp(8))
-        layoutParams = FrameLayout.LayoutParams(-1, -1)
-    }
-
-    private fun label(text: String) = TextView(this).apply {
-        this.text = text
-        textSize = 16f
-        setPadding(dp(8), dp(16), dp(8), dp(16))
-    }
-
-    private fun showEmpty(text: String) {
-        binding.phoneContent.addView(label(text))
-    }
-
-    private fun twoLineAdapter(rows: List<Map<String, String>>) = SimpleAdapter(
-        this, rows, android.R.layout.simple_list_item_2,
-        arrayOf("title", "detail"), intArrayOf(android.R.id.text1, android.R.id.text2)
-    )
-
-    private fun showTwoLineList(rows: List<Map<String, String>>, onClick: (Int) -> Unit) {
-        val list = ListView(this)
-        list.adapter = twoLineAdapter(rows)
-        list.setOnItemClickListener { _, _, position, _ -> onClick(position) }
-        binding.phoneContent.addView(list)
-    }
-
-    private fun dp(value: Int) = (resources.displayMetrics.density * value).toInt()
-
     override fun onCallStateChanged(callId: String, state: String, number: String?) {
-        runOnUiThread { updateSubtitle() }
+        runOnUiThread {
+            updateCallCard()
+            if (state == "disconnected" || state == "idle") handler.postDelayed(reload, 1500)
+        }
     }
 
     override fun onLogMessage(message: String) = Unit
