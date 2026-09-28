@@ -15,6 +15,19 @@ and `ble/BleServerManager.kt` on Android, and `GatewayConnection.swift`, `Bridge
 `AudioEngine.swift` and `BLECentralManager.swift` on iOS. `scripts/lab/bridge_client.py` is a
 third implementation used for tests.
 
+## Addresses
+
+A Redmi can have several local addresses at once, for example its home Wi-Fi and its own
+hotspot.
+
+- `hello` lists them in `addresses`, and Bluetooth device info lists them in `ips`.
+- The iPhone tries every known address at the same time: manual first, then Bluetooth, Bonjour,
+  the Redmi's own list and the last working one. The first to answer wins and the other attempts
+  end.
+- The Redmi binds the call audio socket to the local address of the iPhone's control link. Audio
+  replies therefore always leave from the address the iPhone sends to; the iPhone drops packets
+  from any other address.
+
 ## Versions and compatibility
 
 `hello` announces `protocol` (the Redmi's version) and `minProtocol` (the oldest client it accepts).
@@ -122,7 +135,10 @@ The Bluetooth key is `derive(K, "ble")`. Sealed values are `0x02 | nonce | ciphe
   - The Redmi requires `q` above the last accepted value and `t` within 60 s. The iPhone uses
     milliseconds for `q`, so it keeps increasing across restarts.
   - The reply `{"ack","callId","seq","success","error"?}` is notified sealed the same way.
-- **Device info** (`…0002`, read): plain `{"id","ip","port","v":2,"ble"}`; no call data.
+- **Device info** (`…0002`, read and notify): plain `{"id","ip","ips","port","v":2,"ble"}`, with
+  no call data. `ips` lists every reachable local IPv4 address (Wi-Fi, the Redmi's own hotspot,
+  tethering, VPN) and never includes mobile data. It is notified to every connected iPhone when
+  the list changes.
 - **Call wake beacon:** while an incoming call rings and the iPhone has not sent `ringing_ack`, the
   Redmi advertises a non-connectable iBeacon (Apple company id `0x004C`, UUID = first 16 bytes of
   `derive(K, "beacon")`, major 1, minor 1). The iPhone monitors it with Core Location, so iOS
