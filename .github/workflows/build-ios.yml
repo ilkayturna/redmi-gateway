@@ -107,8 +107,10 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
           set -euo pipefail
-          python3 -m pip install --disable-pip-version-check --quiet 'PyJWT[crypto]>=2,<3'
-          CERT_SERIAL="$(cat "$RUNNER_TEMP/cert_serial" 2>/dev/null || true)" python3 scripts/ensure_push_profile.py
+          # The runner's Python is externally managed (PEP 668); use a private environment.
+          python3 -m venv "$RUNNER_TEMP/pushenv"
+          "$RUNNER_TEMP/pushenv/bin/pip" install --disable-pip-version-check --quiet 'PyJWT[crypto]>=2,<3'
+          CERT_SERIAL="$(cat "$RUNNER_TEMP/cert_serial" 2>/dev/null || true)" "$RUNNER_TEMP/pushenv/bin/python" scripts/ensure_push_profile.py
 
       - name: Archive iPhone app
         shell: bash
