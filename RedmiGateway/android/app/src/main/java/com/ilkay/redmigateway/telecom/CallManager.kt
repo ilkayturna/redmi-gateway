@@ -204,7 +204,7 @@ object CallManager {
             currentCallState = "disconnected"
             notifyStateChanged()
 
-            IncomingCallPresenter.onCallEnded()
+            IncomingCallPresenter.onCallEnded(finalId)
             if (activeSinceMillis != 0L) {
                 // Recents on both phones show which one carried the conversation.
                 val device = if (com.ilkay.redmigateway.audio.CallAudioRelay.carriedCallId == finalId) "iphone" else "redmi"

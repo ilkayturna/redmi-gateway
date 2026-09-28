@@ -37,6 +37,12 @@ object IncomingCallPresenter {
         }
 
     fun onIPhonePresented(callId: String) {
+        if (callId.isNotEmpty() && callId == CallManager.waitingCallId) {
+            // A waiting call already shows on the iPhone; no push is needed once it is current.
+            presentedOnIPhoneCallId = callId
+            onChanged?.invoke()
+            return
+        }
         if (CallManager.currentCallState != "ringing" || callId != CallManager.currentCallId) return
         presentedOnIPhoneCallId = callId
         CallManager.log("Incoming call is showing on the iPhone")
@@ -48,7 +54,9 @@ object IncomingCallPresenter {
         }.onFailure { Log.w(TAG, "Could not silence the Redmi ringer: ${it.javaClass.simpleName}") }
     }
 
-    fun onCallEnded() {
+    /** [callId] is the call that ended; a waiting call's confirmation survives it. */
+    fun onCallEnded(callId: String? = null) {
+        if (callId != null && presentedOnIPhoneCallId != callId && presentedOnIPhoneCallId == CallManager.waitingCallId) return
         presentedOnIPhoneCallId = null
         onChanged?.invoke()
     }

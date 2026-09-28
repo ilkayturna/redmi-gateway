@@ -398,8 +398,12 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     /// a CallKit call for every such push, reported before the handler returns.
     func reportPushedCall(callId: String?, number: String?, completion: @escaping () -> Void) {
         let rawId = callId ?? ""
-        if !rawId.isEmpty, let existing = uuidByCallId[rawId], incoming.contains(existing) {
-            completion()
+        if !rawId.isEmpty, let existing = uuidByCallId[rawId] {
+            // Bluetooth or the network showed it first. iOS still expects a report for every VoIP
+            // push; it answers "already exists" and the call stays as it is.
+            provider.reportNewIncomingCall(with: existing, update: callUpdate(number: number ?? numbers[existing])) { _ in
+                completion()
+            }
             return
         }
         let uuid = UUID()
