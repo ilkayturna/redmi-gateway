@@ -51,6 +51,8 @@ public final class GatewayConnection: ObservableObject {
     @Published private(set) var isWiFiConnected = false
     @Published private(set) var isNetworkViable = false
     @Published private(set) var pairing: GatewayPairing?
+    /// A second call ringing during the current one.
+    @Published private(set) var waitingCall: GSMCall?
 
     public var onCallEvent: ((CallEventMessage) -> Void)?
     public var connectedHost: String { currentHost }
@@ -101,6 +103,10 @@ public final class GatewayConnection: ObservableObject {
     private var syncCallsHasMore = false
     private var smsTimeouts: [String: Task<Void, Never>] = [:]
     private var lastPathSignature = ""
+    private var catchUpTask: UIBackgroundTaskIdentifier = .invalid
+    private var closeAfterCatchUp = false
+    /// VoIP push token (PushKit); sent to the Redmi for calls while this iPhone is away.
+    private var pushToken: String?
 
     let discovery = NWGatewayDiscovery()
     private let pathMonitor = NWPathMonitor()
@@ -258,8 +264,26 @@ public final class GatewayConnection: ObservableObject {
         cancelReconnect()
         var seen = Set<Endpoint>()
         let unique = list.filter { seen.insert($0).inserted && !ignoredHosts.contains($0.host) }
-        for endpoint in unique.prefix(6) where !attempts.contains(where: { $0.endpoint == endpoint }) {
+        let local = unique.filter { !Self.isVpnAddress($0.host) }
+        let vpn = unique.filter { Self.isVpnAddress($0.host) }
+        for endpoint in local.prefix(6) where !attempts.contains(where: { $0.endpoint == endpoint }) {
             startAttempt(endpoint)
+        }
+        // Away from home the Redmi is reached through the VPN (Tailscale); at home the direct
+        // path should win, so VPN addresses start a moment later.
+        for endpoint in vpn.prefix(2) where !attempts.contains(where: { $0.endpoint == endpoint }) {
+            if attempts.isEmpty {
+                startAttempt(endpoint)
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    Task { @MainActor in
+                        let connection = GatewayConnection.shared
+                        guard connection.webSocketTask == nil, connection.state != .authenticated,
+                              !connection.attempts.contains(where: { $0.endpoint == endpoint }) else { return }
+                        connection.startAttempt(endpoint)
+                    }
+                }
+            }
         }
         state = .connecting
         if attempts.isEmpty {
@@ -268,6 +292,12 @@ public final class GatewayConnection: ObservableObject {
             return
         }
         if link != .pairing { link = .connecting }
+    }
+
+    /// Tailscale and similar VPNs use the shared address space 100.64.0.0/10.
+    private static func isVpnAddress(_ host: String) -> Bool {
+        let parts = host.split(separator: ".").compactMap { Int($0) }
+        return parts.count == 4 && parts[0] == 100 && (64...127).contains(parts[1])
     }
 
     private func startAttempt(_ endpoint: Endpoint) {
@@ -461,18 +491,24 @@ public final class GatewayConnection: ObservableObject {
             if let audio = decode(AudioStateMessage.self, data) { handleAudioState(audio) }
         case "sync_calls":
             if let sync = decode(SyncCallsMessage.self, data) {
-                history.applyCallSync(sync.items, lastSeq: sync.lastSeq)
+                Notifier.shared.post(missed: history.applyCallSync(sync.items, lastSeq: sync.lastSeq))
                 syncCallsHasMore = sync.hasMore
             }
         case "sync_sms":
             if let sync = decode(SyncSmsMessage.self, data) {
-                history.applySmsSync(sync.items, lastSeq: sync.lastSeq)
-                if sync.hasMore || syncCallsHasMore { requestSync() }
+                Notifier.shared.post(sms: history.applySmsSync(sync.items, lastSeq: sync.lastSeq))
+                if sync.hasMore || syncCallsHasMore {
+                    requestSync()
+                } else {
+                    finishCatchUp()
+                }
             }
         case "call_log":
-            if let push = decode(CallLogPush.self, data) { history.applyCallPush(push.item) }
+            if let push = decode(CallLogPush.self, data) { Notifier.shared.post(missed: history.applyCallPush(push.item)) }
         case "sms":
-            if let push = decode(SmsPush.self, data) { history.applySmsPush(push.item) }
+            if let push = decode(SmsPush.self, data) { Notifier.shared.post(sms: history.applySmsPush(push.item)) }
+        case "call_waiting":
+            if let waiting = decode(CallWaitingMessage.self, data) { handleWaiting(waiting) }
         case "sms_send_result":
             if let result = decode(SmsSendResultMessage.self, data), let requestId = result.requestId {
                 smsTimeouts.removeValue(forKey: requestId)?.cancel()
@@ -683,6 +719,7 @@ public final class GatewayConnection: ObservableObject {
         defaults.set(currentPort, forKey: kLastPort)
         log("Connected to the Redmi")
         CallKitManager.shared.handleGatewayLinkRestored()
+        sendPushToken()
         startPing()
         send(["type": "get_state"])
         requestSync()
@@ -731,6 +768,9 @@ public final class GatewayConnection: ObservableObject {
     private func applyBluetoothCallState(_ update: BLECallState) {
         log("Bluetooth call state: \(update.state)")
         guard !(state == .authenticated && UIApplication.shared.applicationState == .active) else { return }
+        if (update.smsSeq ?? 0) > history.smsSeq || (update.callsSeq ?? 0) > history.callsSeq {
+            catchUp(reason: "new messages or calls")
+        }
         if update.state == "idle" {
             // Notifications can coalesce; "idle" alone still means the call is over.
             if let previous = currentCall {
@@ -932,6 +972,68 @@ public final class GatewayConnection: ObservableObject {
             log("Network link closed in the background; Bluetooth stays connected")
         }
         if pairing != nil { link = .searching }
+    }
+
+    /// Bluetooth announced new SMS or calls while the app sleeps: connect, fetch, notify, sleep.
+    private func catchUp(reason: String) {
+        guard pairing != nil else { return }
+        if catchUpTask == .invalid {
+            catchUpTask = UIApplication.shared.beginBackgroundTask(withName: "catch-up") {
+                Task { @MainActor in GatewayConnection.shared.endCatchUpTask() }
+            }
+        }
+        closeAfterCatchUp = UIApplication.shared.applicationState == .background && currentCall == nil
+        if state == .authenticated {
+            if UIApplication.shared.applicationState == .active {
+                requestSync()
+                return
+            }
+            // A socket kept from before suspension may be dead; start clean.
+            closeSocket()
+        }
+        reconnectNow(reason: reason)
+    }
+
+    private func finishCatchUp() {
+        Notifier.shared.updateBadge()
+        guard catchUpTask != .invalid else { return }
+        if closeAfterCatchUp, UIApplication.shared.applicationState == .background, currentCall == nil {
+            closeSocket()
+            if pairing != nil { link = .searching }
+        }
+        closeAfterCatchUp = false
+        endCatchUpTask()
+    }
+
+    private func endCatchUpTask() {
+        guard catchUpTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(catchUpTask)
+        catchUpTask = .invalid
+    }
+
+    // MARK: - Call waiting
+
+    private func handleWaiting(_ message: CallWaitingMessage) {
+        if message.state == "ringing", let callId = message.callId, !callId.isEmpty {
+            waitingCall = GSMCall(rawCallId: callId, number: message.number ?? "", state: .ringing, isIncoming: true)
+        } else {
+            waitingCall = nil
+        }
+        CallKitManager.shared.handleWaitingCall(callId: message.callId ?? "", number: message.number,
+                                                ringing: message.state == "ringing")
+    }
+
+    // MARK: - Away from home
+
+    /// PushKit token for this iPhone; the Redmi uses it to ring the iPhone through Apple.
+    func setPushToken(_ token: String) {
+        pushToken = token
+        sendPushToken()
+    }
+
+    private func sendPushToken() {
+        guard let pushToken, state == .authenticated else { return }
+        send(["type": "push_token", "token": pushToken, "environment": "production"])
     }
 
     /// Technical log for Advanced > Diagnostics. Never contains numbers, message text or keys.

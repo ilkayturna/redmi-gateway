@@ -61,6 +61,7 @@ object PairingStore {
     /** Forgets the paired iPhone; call history, SMS and contacts are untouched. */
     @Synchronized
     fun forget() {
+        com.ilkay.redmigateway.push.ApnsSender.clearDeviceToken()
         prefs.edit()
             .remove(KEY_CLIENT_ID).remove(KEY_CLIENT_NAME).remove(KEY_SECRET).remove(KEY_PAIRED_AT)
             .putString(KEY_CODE, newCode())

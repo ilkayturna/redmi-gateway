@@ -49,6 +49,9 @@ final class HistoryStore: ObservableObject {
     @Published private(set) var missedSeenAt: Date = Date()
     @Published private(set) var threadSeen: [String: Date] = [:]
 
+    /// Conversation currently on screen; its new messages need no banner.
+    var openThreadKey: String?
+
     private(set) var callsSeq: Int64 = 0
     private(set) var smsSeq: Int64 = 0
     private var gatewayId: String?
@@ -115,25 +118,35 @@ final class HistoryStore: ObservableObject {
 
     // MARK: - Calls
 
-    func applyCallSync(_ items: [CallLogEntry], lastSeq: Int64) {
-        for item in items { upsertCall(item) }
+    /// Returns calls that are new to this iPhone and worth a notification (recent missed calls).
+    @discardableResult
+    func applyCallSync(_ items: [CallLogEntry], lastSeq: Int64) -> [CallRecord] {
+        let news = items.compactMap { upsertCall($0) }
         callsSeq = max(callsSeq, lastSeq)
         finishCalls()
+        return news
     }
 
-    func applyCallPush(_ item: CallLogEntry) {
-        upsertCall(item)
+    @discardableResult
+    func applyCallPush(_ item: CallLogEntry) -> [CallRecord] {
+        let news = [upsertCall(item)].compactMap { $0 }
         if item.seq == callsSeq + 1 { callsSeq = item.seq }
         finishCalls()
+        return news
     }
 
-    private func upsertCall(_ item: CallLogEntry) {
+    private func upsertCall(_ item: CallLogEntry) -> CallRecord? {
+        let known = calls.contains { $0.logId == item.id }
         calls.removeAll { $0.logId == item.id }
-        calls.append(CallRecord(
+        let record = CallRecord(
             logId: item.id, seq: item.seq, number: item.number, type: item.type,
             date: Date(timeIntervalSince1970: Double(item.date) / 1000), duration: item.duration,
             answeredOn: item.answeredOn
-        ))
+        )
+        calls.append(record)
+        guard !known, record.isMissed, record.date > readBaseline,
+              Date().timeIntervalSince(record.date) < 86_400 else { return nil }
+        return record
     }
 
     private func finishCalls() {
@@ -154,19 +167,25 @@ final class HistoryStore: ObservableObject {
 
     // MARK: - Messages
 
-    func applySmsSync(_ items: [SmsEntry], lastSeq: Int64) {
-        for item in items { upsertSms(item) }
+    /// Returns received messages that are new to this iPhone and worth a notification.
+    @discardableResult
+    func applySmsSync(_ items: [SmsEntry], lastSeq: Int64) -> [SmsRecord] {
+        let news = items.compactMap { upsertSms($0) }
         smsSeq = max(smsSeq, lastSeq)
         finishMessages()
+        return news
     }
 
-    func applySmsPush(_ item: SmsEntry) {
-        upsertSms(item)
+    @discardableResult
+    func applySmsPush(_ item: SmsEntry) -> [SmsRecord] {
+        let news = [upsertSms(item)].compactMap { $0 }
         if item.seq == smsSeq + 1 { smsSeq = item.seq }
         finishMessages()
+        return news
     }
 
-    private func upsertSms(_ item: SmsEntry) {
+    private func upsertSms(_ item: SmsEntry) -> SmsRecord? {
+        let known = messages.contains { $0.gatewayId == item.id }
         let status: SmsStatus
         switch item.box {
         case "inbox": status = .received
@@ -184,10 +203,14 @@ final class HistoryStore: ObservableObject {
                     && abs($0.date.timeIntervalSince(date)) < 600
             }
         }
-        messages.append(SmsRecord(
+        let record = SmsRecord(
             id: "g\(item.id)", gatewayId: item.id, requestId: nil, address: item.address, body: item.body,
             date: date, status: status, read: item.read
-        ))
+        )
+        messages.append(record)
+        guard !known, record.isIncoming, !record.read, record.date > readBaseline,
+              Date().timeIntervalSince(record.date) < 86_400 else { return nil }
+        return record
     }
 
     private func finishMessages() {

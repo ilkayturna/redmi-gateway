@@ -46,7 +46,8 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         let config = CXProviderConfiguration(localizedName: "Telefon Geçidi")
         config.supportsVideo = false
         config.maximumCallsPerCallGroup = 1
-        config.maximumCallGroups = 1
+        // A second group lets iOS show a waiting call during the current one.
+        config.maximumCallGroups = 2
         config.supportedHandleTypes = [.phoneNumber, .generic]
         config.includesCallsInRecents = true
         provider = CXProvider(configuration: config)
@@ -340,6 +341,89 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     func handleGatewayLinkRestored() {
         linkLostTask?.cancel()
         linkLostTask = nil
+        if let pending = pendingDial {
+            pendingDial = nil
+            if Date().timeIntervalSince(pending.at) < 20 { startOutgoingCall(phoneNumber: pending.number) }
+        }
+    }
+
+    // MARK: - Call waiting
+
+    /// A second call rings during the current one; iOS shows its own call-waiting choices.
+    func handleWaitingCall(callId: String, number: String?, ringing: Bool) {
+        if ringing {
+            guard !callId.isEmpty, uuidByCallId[callId] == nil else { return }
+            let uuid = UUID()
+            uuidByCallId[callId] = uuid
+            callIdByUuid[uuid] = callId
+            states[uuid] = "ringing"
+            if let number, !number.isEmpty { numbers[uuid] = number }
+            incoming.insert(uuid)
+            reportIncoming(uuid: uuid, rawId: callId, number: number)
+        } else if let uuid = uuidByCallId[callId], states[uuid] == "ringing", !answeredHere.contains(uuid) {
+            // It stopped waiting without being answered (declined or the caller hung up).
+            end(uuid, reason: .unanswered)
+        }
+    }
+
+    /// In-app buttons for the waiting call.
+    func declineWaiting() {
+        guard let callId = GatewayConnection.shared.waitingCall?.rawCallId, let uuid = uuidByCallId[callId] else { return }
+        callController.request(CXTransaction(action: CXEndCallAction(call: uuid))) { _ in }
+    }
+
+    func answerWaitingEndingCurrent() {
+        guard let callId = GatewayConnection.shared.waitingCall?.rawCallId, let waiting = uuidByCallId[callId] else { return }
+        var actions: [CXAction] = []
+        if let current = currentCallUuid, current != waiting { actions.append(CXEndCallAction(call: current)) }
+        actions.append(CXAnswerCallAction(call: waiting))
+        callController.request(CXTransaction(actions: actions)) { _ in }
+    }
+
+    // MARK: - Calls started outside the app
+
+    /// A call from iOS Recents or Contacts arrives before the link is up: dial once connected.
+    private var pendingDial: (number: String, at: Date)?
+
+    func dialFromSystem(_ number: String) {
+        if GatewayConnection.shared.isAuthenticated {
+            startOutgoingCall(phoneNumber: number)
+        } else {
+            pendingDial = (number, Date())
+            GatewayConnection.shared.reconnectNow(reason: "call from iOS")
+        }
+    }
+
+    /// An Apple VoIP push for an incoming call (the iPhone is away from the Redmi). iOS requires
+    /// a CallKit call for every such push, reported before the handler returns.
+    func reportPushedCall(callId: String?, number: String?, completion: @escaping () -> Void) {
+        let rawId = callId ?? ""
+        if !rawId.isEmpty, let existing = uuidByCallId[rawId], incoming.contains(existing) {
+            completion()
+            return
+        }
+        let uuid = UUID()
+        if !rawId.isEmpty {
+            uuidByCallId[rawId] = uuid
+            callIdByUuid[uuid] = rawId
+        }
+        states[uuid] = "ringing"
+        if let number, !number.isEmpty { numbers[uuid] = number }
+        incoming.insert(uuid)
+        AudioEngine.shared.prepareSession()
+        provider.reportNewIncomingCall(with: uuid, update: callUpdate(number: number)) { error in
+            Task { @MainActor in
+                let manager = CallKitManager.shared
+                if error != nil || rawId.isEmpty {
+                    // Unreadable push or a call that already ended: close it again.
+                    manager.end(uuid, reason: .failed)
+                } else {
+                    GatewayConnection.shared.sendRingingAck(callId: rawId)
+                }
+                completion()
+            }
+        }
+        GatewayConnection.shared.reconnectNow(reason: "incoming call push")
     }
 
     func handleDialFailed() {

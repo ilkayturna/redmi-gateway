@@ -43,6 +43,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var codeView: TextView
     private lateinit var pairedView: TextView
     private lateinit var statusList: LinearLayout
+    private lateinit var remoteStatus: TextView
+    private val pickKey = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) importKey(uri)
+    }
     private val refresher = object : Runnable {
         override fun run() {
             refresh()
@@ -105,6 +109,28 @@ class MainActivity : AppCompatActivity() {
         })
         calls.addView(body("iPhone bağlı değilse veya çağrıyı göstermezse Redmi her zaman normal çalar."))
 
+        // Away from home: Apple push for calls and messages; Tailscale carries the connection.
+        val remote = section("Uzaktan kullanım")
+        remote.addView(body("Redmi evdeyken ve sen dışarıdayken aramaların ve mesajların iPhone'a gelmesi için:\n" +
+            "1) İki telefona Tailscale kur ve aynı hesapla giriş yap.\n" +
+            "2) Apple Developer › Keys bölümünde \"Apple Push Notifications service\" işaretli bir anahtar oluştur, " +
+            "AuthKey_XXXXXXXXXX.p8 dosyasını bu telefona kopyala ve aşağıdan seç."))
+        remoteStatus = body("")
+        remote.addView(remoteStatus)
+        remote.addView(button("Anahtar dosyasını seç (.p8)", outlined = true) {
+            runCatching { pickKey.launch(arrayOf("*/*")) }
+        })
+        remote.addView(SwitchMaterial(this).apply {
+            text = "Uzaktayken SMS metni bildirimde görünsün"
+            isChecked = com.ilkay.redmigateway.push.PushNotifier.smsContentInPush
+            setOnCheckedChangeListener { _, checked -> com.ilkay.redmigateway.push.PushNotifier.smsContentInPush = checked }
+            minHeight = dp(48)
+        })
+        remote.addView(button("Anahtarı kaldır", outlined = true) {
+            com.ilkay.redmigateway.push.ApnsSender.removeKey()
+            refresh()
+        })
+
         // Status
         val status = section("Durum")
         statusList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -128,8 +154,28 @@ class MainActivity : AppCompatActivity() {
         super.onPause()
     }
 
+    private fun importKey(uri: Uri) {
+        val name = runCatching {
+            contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        }.getOrNull().orEmpty()
+        val keyId = Regex("AuthKey_([A-Z0-9]{10})").find(name)?.groupValues?.get(1)
+        val pem = runCatching { contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) } }.getOrNull()
+        val ok = keyId != null && pem != null && com.ilkay.redmigateway.push.ApnsSender.importKey(pem, keyId)
+        Toast.makeText(this, if (ok) "Apple bildirim anahtarı yüklendi" else
+            "Dosya okunamadı. Apple'dan indirilen AuthKey_XXXXXXXXXX.p8 dosyasını seç.", Toast.LENGTH_LONG).show()
+        refresh()
+    }
+
     private fun refresh() {
         codeView.text = PairingStore.pairingCode()
+        val apns = com.ilkay.redmigateway.push.ApnsSender
+        remoteStatus.text = when {
+            apns.isReady -> "Hazır: aramalar ve mesajlar iPhone uzaktayken Apple üzerinden iletilir (anahtar ${apns.keyId})."
+            apns.hasKey -> "Anahtar yüklü (${apns.keyId}). iPhone uygulaması bir kez bağlanınca hazır olur."
+            else -> "Apple bildirim anahtarı yok."
+        }
         val paired = PairingStore.pairedClient()
         pairedView.text = if (paired == null) "Eşleşmiş iPhone yok." else
             "Eşleşmiş: ${paired.name} · ${DateFormat.format("d MMM yyyy HH:mm", Date(paired.pairedAt))}"

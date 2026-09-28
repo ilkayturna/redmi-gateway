@@ -70,6 +70,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
         super.onStart()
         CallManager.addListener(this)
         CallAudioRelay.addListener(this)
+        CallManager.addWaitingListener(waitingListener)
         IncomingCallPresenter.onChanged = {
             runOnUiThread { onCallStateChanged(CallManager.currentCallId ?: "none", CallManager.currentCallState, CallManager.currentPhoneNumber) }
         }
@@ -84,6 +85,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
         CallManager.removeListener(this)
         CallAudioRelay.removeListener(this)
         IncomingCallPresenter.onChanged = null
+        CallManager.removeWaitingListener(waitingListener)
         sensorManager?.unregisterListener(this)
         if (proximityWakeLock?.isHeld == true) {
             proximityWakeLock?.release()
@@ -223,6 +225,34 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
                 CallManager.playDtmf(digit)
             }
         }
+    }
+
+    private val waitingListener = object : CallManager.WaitingListener {
+        override fun onWaitingCallChanged(callId: String?, number: String?) {
+            runOnUiThread { showWaiting(callId, number) }
+        }
+    }
+
+    /** A second call is ringing during this one: decline it, or end this call and answer it. */
+    private fun showWaiting(callId: String?, number: String?) {
+        if (callId == null) {
+            binding.waitingCard.visibility = View.GONE
+            return
+        }
+        binding.waitingTitle.text = "Bekleyen arama: ${lookupName(number) ?: number?.takeIf { it.isNotBlank() } ?: "Gizli numara"}"
+        binding.waitingCard.visibility = View.VISIBLE
+        binding.waitingReject.setOnClickListener { CallManager.rejectWaiting() }
+        binding.waitingAnswer.setOnClickListener { CallManager.answer(callId) }
+    }
+
+    private fun lookupName(number: String?): String? {
+        if (number.isNullOrBlank() || checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return null
+        return runCatching {
+            val lookup = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))
+            contentResolver.query(lookup, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        }.getOrNull()
     }
 
     private fun setupAudioTransfer() {

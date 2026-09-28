@@ -53,6 +53,9 @@ object DiagnosticsReport {
             .put("audio", JSONObject(CallAudioRelay.diagnostics())
                 .put("vendorFix", vendorAudioFixPresent()))
             .put("ble", BleServerManager.diagnostics())
+            .put("push", JSONObject()
+                .put("key", com.ilkay.redmigateway.push.ApnsSender.hasKey)
+                .put("iphoneRegistered", com.ilkay.redmigateway.push.ApnsSender.hasDeviceToken))
             .put("permissions", JSONObject().apply {
                 for (p in permissions) put(p.substringAfterLast('.'), context.checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED)
             })

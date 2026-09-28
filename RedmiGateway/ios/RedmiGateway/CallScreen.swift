@@ -54,6 +54,9 @@ struct CallScreen: View {
                     .font(.title3)
                     .foregroundColor(.secondary)
                 AudioLocationChip(location: connection.audioLocation, call: call)
+                if let waiting = connection.waitingCall {
+                    WaitingCallBanner(name: directory.displayName(for: waiting.number))
+                }
                 if let notice = connection.audioNotice {
                     Text(notice)
                         .font(.footnote)
@@ -152,6 +155,28 @@ struct CallScreen: View {
     private func updateProximity(call: GSMCall?) {
         UIDevice.current.isProximityMonitoringEnabled =
             call?.state == .active && connection.audioLocation == .iphone && !speaker
+    }
+}
+
+/// A second call ringing during this one: decline it, or end this call and answer it.
+private struct WaitingCallBanner: View {
+    let name: String
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Text("Bekleyen arama: \(name)")
+                .font(.subheadline.weight(.semibold))
+                .multilineTextAlignment(.center)
+            HStack(spacing: 12) {
+                Button("Reddet") { CallKitManager.shared.declineWaiting() }
+                    .buttonStyle(.bordered)
+                Button("Kapat ve yanıtla") { CallKitManager.shared.answerWaitingEndingCurrent() }
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color(UIColor.secondarySystemFill)))
     }
 }
 

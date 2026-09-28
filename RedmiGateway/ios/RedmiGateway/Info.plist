@@ -41,6 +41,11 @@
     <array>
         <string>_redmigateway._tcp</string>
     </array>
+    <key>NSUserActivityTypes</key>
+    <array>
+        <string>INStartCallIntent</string>
+        <string>INStartAudioCallIntent</string>
+    </array>
     <key>UIBackgroundModes</key>
     <array>
         <string>voip</string>

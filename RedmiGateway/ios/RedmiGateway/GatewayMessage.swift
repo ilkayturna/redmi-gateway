@@ -138,6 +138,13 @@ struct SmsPush: Decodable {
     let item: SmsEntry
 }
 
+/// A second incoming call during the current one (call waiting).
+struct CallWaitingMessage: Decodable {
+    let state: String
+    let callId: String?
+    let number: String?
+}
+
 struct SmsSendResultMessage: Decodable {
     let recipient: String?
     let success: Bool

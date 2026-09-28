@@ -21,6 +21,7 @@ import com.ilkay.redmigateway.telecom.IncomingCallPresenter
 import org.java_websocket.WebSocket
 import org.java_websocket.handshake.ClientHandshake
 import org.java_websocket.server.WebSocketServer
+import com.ilkay.redmigateway.push.PushNotifier
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.InetSocketAddress
@@ -37,7 +38,7 @@ class GatewayWebSocketServer(
     private val context: Context,
     port: Int = 8787
 ) : WebSocketServer(InetSocketAddress("0.0.0.0", port)), CallManager.CallListener,
-    CallAudioRelay.Listener, CallJournal.Listener, SmsJournal.Listener {
+    CallAudioRelay.Listener, CallJournal.Listener, SmsJournal.Listener, CallManager.WaitingListener {
 
     companion object {
         private const val TAG = "GatewayWSServer"
@@ -77,6 +78,7 @@ class GatewayWebSocketServer(
     override fun onStart() {
         Log.i(TAG, "WebSocket server started on port $port")
         CallManager.addListener(this)
+        CallManager.addWaitingListener(this)
         CallAudioRelay.addListener(this)
         CallJournal.get(context).addListener(this)
         SmsJournal.get(context).addListener(this)
@@ -274,6 +276,8 @@ class GatewayWebSocketServer(
         val state = CallManager.currentCallState
         if (state != "idle") send(peer, callEvent(CallManager.currentCallId ?: "", state, CallManager.currentPhoneNumber))
         if (peer.protocol >= 2) sendAudioState(peer, CallAudioRelay.owner, CallAudioRelay.lastReason)
+        val waiting = CallManager.waitingCallId
+        if (peer.protocol >= 2 && waiting != null) send(peer, waitingMessage(waiting, CallManager.waitingNumber))
     }
 
     // ---- Commands ----
@@ -314,6 +318,10 @@ class GatewayWebSocketServer(
             "sync" -> sync(peer, json.optLong("callsAfter", 0), json.optLong("smsAfter", 0))
             "get_sms_history" -> legacySmsHistory(peer, json.optLong("afterId", 0))
             "diagnostics" -> send(peer, DiagnosticsReport.build(context).put("type", "diagnostics_result"))
+            "push_token" -> {
+                // For calls and messages while the iPhone is away (Apple push); protocol 2 only.
+                if (peer.protocol >= 2) com.ilkay.redmigateway.push.ApnsSender.setDeviceToken(json.optString("token"))
+            }
             "unpair" -> {
                 if (peer.protocol >= 2) {
                     PairingStore.forget()
@@ -388,12 +396,14 @@ class GatewayWebSocketServer(
             .put("items", JSONArray().apply { calls.forEach { put(it.toJson()) } })
             .put("hasMore", moreCalls)
             .put("lastSeq", calls.lastOrNull()?.seq ?: callsAfter))
+        calls.lastOrNull()?.let { PushNotifier.deliveredCallSeq = maxOf(PushNotifier.deliveredCallSeq, it.seq) }
         val (sms, moreSms) = SmsJournal.get(context).readAfter(smsAfter)
         send(peer, JSONObject()
             .put("type", "sync_sms")
             .put("items", JSONArray().apply { sms.forEach { put(it.toJson()) } })
             .put("hasMore", moreSms)
             .put("lastSeq", sms.lastOrNull()?.seq ?: smsAfter))
+        sms.lastOrNull()?.let { PushNotifier.deliveredSmsSeq = maxOf(PushNotifier.deliveredSmsSeq, it.seq) }
     }
 
     /** Protocol 1 only: the incoming SMS list older iPhone builds understand. */
@@ -453,14 +463,41 @@ class GatewayWebSocketServer(
             .put("detail", reason))
     }
 
+    private fun waitingMessage(callId: String?, number: String?) = JSONObject()
+        .put("type", "call_waiting")
+        .put("state", if (callId != null) "ringing" else "ended")
+        .apply {
+            if (callId != null) put("callId", callId)
+            if (!number.isNullOrBlank()) put("number", number)
+        }
+
+    @Volatile private var lastWaitingId: String? = null
+
+    override fun onWaitingCallChanged(callId: String?, number: String?) {
+        // "ended" names the call that stopped waiting, so the iPhone can close exactly that one.
+        val message = if (callId == null) waitingMessage(null, null).put("callId", lastWaitingId ?: "") else waitingMessage(callId, number)
+        if (callId != null) lastWaitingId = callId
+        for (peer in peers.values) if (peer.authenticated && peer.protocol >= 2) send(peer, message)
+    }
+
     override fun onCallJournalEntry(entry: CallJournal.Entry) {
         val payload = JSONObject().put("type", "call_log").put("item", entry.toJson())
-        for (peer in peers.values) if (peer.authenticated && peer.protocol >= 2) send(peer, payload)
+        var delivered = false
+        for (peer in peers.values) if (peer.authenticated && peer.protocol >= 2) {
+            send(peer, payload)
+            delivered = true
+        }
+        if (delivered) PushNotifier.deliveredCallSeq = maxOf(PushNotifier.deliveredCallSeq, entry.seq)
     }
 
     override fun onSmsJournalEntry(entry: SmsJournal.Entry) {
         val payload = JSONObject().put("type", "sms").put("item", entry.toJson())
-        for (peer in peers.values) if (peer.authenticated && peer.protocol >= 2) send(peer, payload)
+        var delivered = false
+        for (peer in peers.values) if (peer.authenticated && peer.protocol >= 2) {
+            send(peer, payload)
+            delivered = true
+        }
+        if (delivered) PushNotifier.deliveredSmsSeq = maxOf(PushNotifier.deliveredSmsSeq, entry.seq)
     }
 
     /** Protocol 1 only; protocol 2 clients receive the journal entry instead. */
@@ -497,6 +534,7 @@ class GatewayWebSocketServer(
     fun stopServer() {
         try {
             CallManager.removeListener(this)
+            CallManager.removeWaitingListener(this)
             CallAudioRelay.removeListener(this)
             CallJournal.get(context).removeListener(this)
             SmsJournal.get(context).removeListener(this)

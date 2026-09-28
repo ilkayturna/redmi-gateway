@@ -127,6 +127,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
             }
             CallJournal.get(this).start()
             SmsJournal.get(this).start()
+            com.ilkay.redmigateway.push.PushNotifier.start(this)
             isRunning = true
             CallManager.log("Gateway Foreground Service started on port 8787")
         } catch (e: Exception) {

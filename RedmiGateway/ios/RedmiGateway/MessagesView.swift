@@ -203,7 +203,15 @@ struct ConversationView: View {
                 .accessibilityLabel("Ara")
             }
         }
-        .onAppear { history.markThreadSeen(key) }
+        .onAppear {
+            history.markThreadSeen(key)
+            history.openThreadKey = key
+            Notifier.shared.clearConversation(address)
+        }
+        .onDisappear {
+            if history.openThreadKey == key { history.openThreadKey = nil }
+            Notifier.shared.updateBadge()
+        }
     }
 
     private var composer: some View {

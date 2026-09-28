@@ -1,0 +1,107 @@
+package com.ilkay.redmigateway.push
+
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.provider.ContactsContract
+import com.ilkay.redmigateway.RedmiGatewayApp
+import com.ilkay.redmigateway.journal.CallJournal
+import com.ilkay.redmigateway.journal.SmsJournal
+import com.ilkay.redmigateway.security.BridgeCrypto
+import com.ilkay.redmigateway.security.PairingStore
+import com.ilkay.redmigateway.telecom.CallManager
+import com.ilkay.redmigateway.telecom.IncomingCallPresenter
+import org.json.JSONObject
+
+/**
+ * Decides when the Redmi pushes through Apple instead of relying on the local link.
+ *
+ * - Incoming call: if the iPhone has not confirmed showing it within 1.5 s (it is away, or the
+ *   app was swiped away), a VoIP push rings it. The call id and number are sealed with a key
+ *   derived from the pairing; Apple relays only ciphertext.
+ * - New SMS or missed call: if no connected iPhone received the journal entry within 8 s, an
+ *   ordinary notification is pushed. At home the iPhone fetches entries itself (Bluetooth wake),
+ *   so nothing is sent twice.
+ */
+object PushNotifier : CallManager.CallListener, CallJournal.Listener, SmsJournal.Listener {
+    private const val PREFS = "phonebridge_push"
+    private const val KEY_SMS_CONTENT = "sms_content_in_push"
+    private val PUSH_AAD = "phonebridge-push".toByteArray(Charsets.UTF_8)
+    private val handler = Handler(Looper.getMainLooper())
+    private var started = false
+    private var pushedCallId: String? = null
+
+    /** Highest journal entries a connected iPhone has received (set by the WebSocket server). */
+    @Volatile var deliveredCallSeq = 0L
+    @Volatile var deliveredSmsSeq = 0L
+
+    private val prefs get() = RedmiGatewayApp.instance.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /** Owner setting, default on: pushed SMS notifications show the text (like any SMS app). */
+    var smsContentInPush: Boolean
+        get() = prefs.getBoolean(KEY_SMS_CONTENT, true)
+        set(value) { prefs.edit().putBoolean(KEY_SMS_CONTENT, value).apply() }
+
+    fun start(context: Context) {
+        if (started) return
+        started = true
+        CallManager.addListener(this)
+        CallJournal.get(context).addListener(this)
+        SmsJournal.get(context).addListener(this)
+    }
+
+    override fun onCallStateChanged(callId: String, state: String, number: String?) {
+        if (state != "ringing" || CallManager.currentDirection != "incoming" || callId == pushedCallId) return
+        handler.postDelayed({ maybePushCall(callId) }, 1500)
+    }
+
+    override fun onLogMessage(message: String) = Unit
+
+    private fun maybePushCall(callId: String) {
+        if (!ApnsSender.isReady || callId == pushedCallId) return
+        if (CallManager.currentCallId != callId || CallManager.currentCallState != "ringing") return
+        if (IncomingCallPresenter.presentedOnIPhoneCallId == callId) return
+        val key = PairingStore.pairedClient()?.key ?: return
+        pushedCallId = callId
+        val body = JSONObject()
+            .put("id", callId)
+            .put("n", CallManager.currentPhoneNumber ?: "")
+            .put("t", System.currentTimeMillis())
+        val sealed = BridgeCrypto.seal(BridgeCrypto.derive(key, "push"), body.toString().toByteArray(Charsets.UTF_8), PUSH_AAD)
+        ApnsSender.sendVoip(JSONObject().put("p", BridgeCrypto.b64(sealed)))
+        CallManager.log("Incoming call pushed to the iPhone through Apple")
+    }
+
+    override fun onSmsJournalEntry(entry: SmsJournal.Entry) {
+        if (entry.box != "inbox" || entry.read) return
+        handler.postDelayed({
+            if (deliveredSmsSeq >= entry.seq || !ApnsSender.isReady) return@postDelayed
+            val sender = contactName(entry.address) ?: entry.address.ifBlank { "Bilinmeyen" }
+            val text = if (smsContentInPush) entry.body.take(400) else "Yeni mesaj"
+            ApnsSender.sendAlert(sender, text, "sms-${entry.address.filter(Char::isDigit).takeLast(10)}", "sms-${entry.id}")
+        }, 8000)
+    }
+
+    override fun onCallJournalEntry(entry: CallJournal.Entry) {
+        if (entry.type != "missed") return
+        handler.postDelayed({
+            if (deliveredCallSeq >= entry.seq || !ApnsSender.isReady) return@postDelayed
+            val caller = contactName(entry.number) ?: entry.number.ifBlank { "Gizli numara" }
+            ApnsSender.sendAlert("Cevapsız arama", caller, "missed", "call-${entry.logId}")
+        }, 8000)
+    }
+
+    private fun contactName(number: String): String? {
+        val context = RedmiGatewayApp.instance
+        if (number.isBlank() || context.checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return null
+        return runCatching {
+            val uri = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))
+            context.contentResolver.query(uri, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        }.getOrNull()
+    }
+}

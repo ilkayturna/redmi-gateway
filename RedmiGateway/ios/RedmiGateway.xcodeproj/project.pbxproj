@@ -26,6 +26,8 @@
 		1017 /* CallScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2018 /* CallScreen.swift */; };
 		1018 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2019 /* SettingsView.swift */; };
 		1019 /* CallWakeMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2020 /* CallWakeMonitor.swift */; };
+		1020 /* Notifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2021 /* Notifier.swift */; };
+		1021 /* VoipPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2022 /* VoipPush.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -50,6 +52,8 @@
 		2018 /* CallScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallScreen.swift; sourceTree = "<group>"; };
 		2019 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		2020 /* CallWakeMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallWakeMonitor.swift; sourceTree = "<group>"; };
+		2021 /* Notifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notifier.swift; sourceTree = "<group>"; };
+		2022 /* VoipPush.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoipPush.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -94,6 +98,8 @@
 				2018 /* CallScreen.swift */,
 				2019 /* SettingsView.swift */,
 				2020 /* CallWakeMonitor.swift */,
+				2021 /* Notifier.swift */,
+				2022 /* VoipPush.swift */,
 				2009 /* Info.plist */,
 			);
 			path = RedmiGateway;
@@ -201,6 +207,8 @@
 				1017 /* CallScreen.swift in Sources */,
 				1018 /* SettingsView.swift in Sources */,
 				1019 /* CallWakeMonitor.swift in Sources */,
+				1020 /* Notifier.swift in Sources */,
+				1021 /* VoipPush.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

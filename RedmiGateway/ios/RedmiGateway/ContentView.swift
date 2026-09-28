@@ -1,3 +1,4 @@
+import Intents
 import SwiftUI
 
 enum AppTab: Int {
@@ -7,6 +8,7 @@ enum AppTab: Int {
 struct ContentView: View {
     @ObservedObject private var connection = GatewayConnection.shared
     @ObservedObject private var history = HistoryStore.shared
+    @ObservedObject private var router = AppRouter.shared
     @AppStorage("selected_tab") private var selectedTabRaw = AppTab.keypad.rawValue
     @State private var showingSettings = false
     @State private var callMinimized = false
@@ -33,6 +35,25 @@ struct ContentView: View {
             offerCallWake()
         }
         .onChange(of: connection.isPaired) { _ in offerCallWake() }
+        .onChange(of: router.pending) { route in
+            guard let route else { return }
+            router.pending = nil
+            switch route {
+            case .messages(let address): openMessages(address)
+            case .recents: selectedTabRaw = AppTab.recents.rawValue
+            }
+        }
+        // A call chosen in iOS Recents or Contacts for this app.
+        .onContinueUserActivity("INStartCallIntent") { activity in
+            if let number = (activity.interaction?.intent as? INStartCallIntent)?.contacts?.first?.personHandle?.value {
+                CallKitManager.shared.dialFromSystem(number)
+            }
+        }
+        .onContinueUserActivity("INStartAudioCallIntent") { activity in
+            if let number = (activity.interaction?.intent as? INStartAudioCallIntent)?.contacts?.first?.personHandle?.value {
+                CallKitManager.shared.dialFromSystem(number)
+            }
+        }
         .alert("Uygulama kapalıyken de aramalar", isPresented: $showingWakePrompt) {
             Button("Şimdi değil", role: .cancel) {}
             Button("İzin ver") { CallWakeMonitor.shared.requestPermission() }
@@ -96,7 +117,9 @@ struct ContentView: View {
 
     /// Asked once after pairing; Settings shows the state afterwards.
     private func offerCallWake() {
-        guard connection.isPaired, !callWakePrompted, !CallWakeMonitor.shared.isEnabled else { return }
+        guard connection.isPaired else { return }
+        Notifier.shared.requestPermission()
+        guard !callWakePrompted, !CallWakeMonitor.shared.isEnabled else { return }
         callWakePrompted = true
         showingWakePrompt = true
     }

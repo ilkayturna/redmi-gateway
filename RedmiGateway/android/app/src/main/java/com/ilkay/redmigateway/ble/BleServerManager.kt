@@ -68,6 +68,19 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     }
 
     private var lastControlSeq = 0L
+
+    // New journal entries change the "k"/"m" fields of the call state, so a sleeping iPhone
+    // wakes up for a new SMS or missed call and fetches it.
+    private val callJournalListener = object : com.ilkay.redmigateway.journal.CallJournal.Listener {
+        override fun onCallJournalEntry(entry: com.ilkay.redmigateway.journal.CallJournal.Entry) = notifyJournalChange()
+    }
+    private val smsJournalListener = object : com.ilkay.redmigateway.journal.SmsJournal.Listener {
+        override fun onSmsJournalEntry(entry: com.ilkay.redmigateway.journal.SmsJournal.Entry) = notifyJournalChange()
+    }
+
+    private fun notifyJournalChange() {
+        mainHandler.post { charState?.let { notifyCharacteristicToSubscribers(it, buildStateBytes()) } }
+    }
     private val mtuByDevice = java.util.concurrent.ConcurrentHashMap<String, Int>()
     // A long read continues at an offset; it must see the same sealed bytes as its first part.
     @Volatile private var lastStateRead = ByteArray(0)
@@ -438,6 +451,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
             setupGattServer()
             startAdvertising()
             CallManager.addListener(this)
+            com.ilkay.redmigateway.journal.CallJournal.get(context).addListener(callJournalListener)
+            com.ilkay.redmigateway.journal.SmsJournal.get(context).addListener(smsJournalListener)
             isServerRunning = true
             Log.i(TAG, "BleServerManager started for port $activePort")
         } catch (e: Exception) {
@@ -448,6 +463,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     private fun tearDownGattServerAndAdvertiser() {
         stopAdvertising()
         CallManager.removeListener(this)
+        com.ilkay.redmigateway.journal.CallJournal.get(context).removeListener(callJournalListener)
+        com.ilkay.redmigateway.journal.SmsJournal.get(context).removeListener(smsJournalListener)
         try {
             gattServer?.clearServices()
             gattServer?.close()
@@ -728,6 +745,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
             .put("d", CallManager.currentDirection.take(1))
             .put("q", stateSeq.incrementAndGet())
             .put("t", System.currentTimeMillis())
+            .put("k", runCatching { com.ilkay.redmigateway.journal.CallJournal.get(context).latestSeq() }.getOrDefault(0L))
+            .put("m", runCatching { com.ilkay.redmigateway.journal.SmsJournal.get(context).latestSeq() }.getOrDefault(0L))
         CallManager.currentPhoneNumber?.takeIf { it.isNotBlank() }?.let { state.put("n", it) }
         if (key != null) {
             return byteArrayOf(SEALED_VERSION) + BridgeCrypto.seal(key, state.toString().toByteArray(Charsets.UTF_8), BLE_STATE_AAD)

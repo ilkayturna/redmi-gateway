@@ -48,4 +48,6 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("org.java-websocket:Java-WebSocket:1.5.6")
+    // HTTP/2 client for Apple push (APNs) when the iPhone is away from the Redmi.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

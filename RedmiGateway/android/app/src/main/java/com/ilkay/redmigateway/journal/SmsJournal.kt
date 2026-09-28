@@ -234,6 +234,12 @@ class SmsJournal private constructor(context: Context) :
         for (l in listeners) runCatching { l.onSmsJournalEntry(entry) }
     }
 
+    /** Sequence of the newest entry; a paired iPhone compares it with what it has seen. */
+    @Synchronized
+    fun latestSeq(): Long = readableDatabase.rawQuery("SELECT COALESCE(MAX(seq), 0) FROM sms", null).use { c ->
+        if (c.moveToFirst()) c.getLong(0) else 0L
+    }
+
     @Synchronized
     fun readAfter(afterSeq: Long, limit: Int = 200): Pair<List<Entry>, Boolean> {
         val safeLimit = limit.coerceIn(1, 500)
