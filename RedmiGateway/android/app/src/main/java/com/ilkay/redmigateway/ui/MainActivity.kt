@@ -333,6 +333,7 @@ class MainActivity : AppCompatActivity() {
         return MaterialButton(this, null, style).apply {
             this.text = text
             isAllCaps = false
+            letterSpacing = 0f
             minHeight = dp(48)
             setOnClickListener { onClick() }
             layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }

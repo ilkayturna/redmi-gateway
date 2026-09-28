@@ -167,9 +167,11 @@
                 style="@style/Widget.MaterialComponents.Button.TextButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:letterSpacing="0"
                 android:minHeight="48dp"
                 android:textAllCaps="false"
-                android:textColor="@color/status_attention" />
+                android:textColor="@color/status_attention"
+                android:textStyle="bold" />
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
@@ -234,6 +236,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:minHeight="48dp"
+                android:letterSpacing="0"
                 android:text="Aç"
                 android:textAllCaps="false"
                 android:textColor="#FFFFFF"

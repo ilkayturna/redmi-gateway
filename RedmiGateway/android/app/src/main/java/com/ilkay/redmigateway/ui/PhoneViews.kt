@@ -167,7 +167,7 @@ internal class PhoneViews(private val context: Context) {
         root.addView(trailing, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
         val action = ImageButton(context).apply {
             background = selectable(borderless = true)
-            imageTintList = ColorStateList.valueOf(color(R.color.accent))
+            imageTintList = ColorStateList.valueOf(color(R.color.text_secondary))
             isFocusable = false
             visibility = View.GONE
         }

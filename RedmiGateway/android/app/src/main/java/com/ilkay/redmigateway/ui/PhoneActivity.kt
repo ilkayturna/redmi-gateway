@@ -632,9 +632,11 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         row.root.contentDescription = "$name, ${parts.joinToString(", ")}, ${timeLabel(call.time)}"
     }
 
-    private fun duration(seconds: Long): String =
-        if (seconds >= 3600) "%d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60)
-        else "%d:%02d".format(seconds / 60, seconds % 60)
+    private fun duration(seconds: Long): String = when {
+        seconds >= 3600 -> "${seconds / 3600} sa ${seconds / 60 % 60} dk"
+        seconds >= 60 -> if (seconds % 60 == 0L) "${seconds / 60} dk" else "${seconds / 60} dk ${seconds % 60} sn"
+        else -> "$seconds sn"
+    }
 
     // Contacts
 
@@ -773,6 +775,8 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
             val end = number.selectionEnd.coerceAtLeast(start)
             number.text.replace(start, end, text)
         }
+        val keyViews = ArrayList<View>()
+        val rowViews = ArrayList<View>()
         val keys = listOf(
             "1" to "", "2" to "ABC", "3" to "DEF",
             "4" to "GHİ", "5" to "JKL", "6" to "MNO",
@@ -791,16 +795,18 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
                 if (digit == "0") key.setOnLongClickListener { insert("+"); true }
                 val cell = FrameLayout(this)
                 cell.addView(key, FrameLayout.LayoutParams(views.dp(76), views.dp(76), Gravity.CENTER))
-                line.addView(cell, LinearLayout.LayoutParams(0, views.dp(88), 1f))
+                line.addView(cell, LinearLayout.LayoutParams(0, -1, 1f))
+                keyViews.add(key)
             }
-            column.addView(line, LinearLayout.LayoutParams(-1, -2))
+            column.addView(line, LinearLayout.LayoutParams(-1, views.dp(88)))
+            rowViews.add(line)
         }
 
         val bottom = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        bottom.addView(View(this), LinearLayout.LayoutParams(0, views.dp(88), 1f))
+        bottom.addView(View(this), LinearLayout.LayoutParams(0, -1, 1f))
         val call = ImageButton(this).apply {
             background = ContextCompat.getDrawable(this@PhoneActivity, R.drawable.pb_call_button)
             setImageResource(R.drawable.ic_pb_call)
@@ -822,7 +828,7 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         }
         val callCell = FrameLayout(this)
         callCell.addView(call, FrameLayout.LayoutParams(views.dp(72), views.dp(72), Gravity.CENTER))
-        bottom.addView(callCell, LinearLayout.LayoutParams(0, views.dp(88), 1f))
+        bottom.addView(callCell, LinearLayout.LayoutParams(0, -1, 1f))
         val delete = ImageButton(this).apply {
             background = views.selectable(borderless = true)
             setImageResource(R.drawable.ic_pb_backspace)
@@ -841,8 +847,37 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         }
         val deleteCell = FrameLayout(this)
         deleteCell.addView(delete, FrameLayout.LayoutParams(views.dp(56), views.dp(56), Gravity.CENTER))
-        bottom.addView(deleteCell, LinearLayout.LayoutParams(0, views.dp(88), 1f))
-        column.addView(bottom, LinearLayout.LayoutParams(-1, -2))
+        bottom.addView(deleteCell, LinearLayout.LayoutParams(0, -1, 1f))
+        column.addView(bottom, LinearLayout.LayoutParams(-1, views.dp(88)))
+        rowViews.add(bottom)
+
+        // Keys shrink when the screen is short (a notice or a call card above), so the call key
+        // always stays in view.
+        fun fit() {
+            val used = column.paddingTop + column.paddingBottom + number.height + views.dp(8) + match.height
+            val row = ((column.height - used) / rowViews.size).coerceAtMost(views.dp(88))
+            if (row <= 0) return
+            val size = (row - views.dp(10)).coerceIn(views.dp(48), views.dp(76))
+            var changed = false
+            for (line in rowViews) {
+                if (line.layoutParams.height != row) {
+                    line.layoutParams.height = row
+                    changed = true
+                }
+            }
+            for (key in keyViews + call) {
+                val wanted = if (key === call) (size - views.dp(4)).coerceAtLeast(views.dp(48)) else size
+                if (key.layoutParams.width != wanted) {
+                    key.layoutParams.width = wanted
+                    key.layoutParams.height = wanted
+                    changed = true
+                }
+            }
+            if (changed) column.requestLayout()
+        }
+        column.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top != oldBottom - oldTop) column.post { fit() }
+        }
 
         fun update() {
             draftNumber = number.text.toString()

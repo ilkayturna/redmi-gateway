@@ -3,6 +3,8 @@
         <item name="colorPrimary">@color/accent</item>
         <item name="colorPrimaryVariant">@color/bg_void</item>
         <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSecondary">@color/accent</item>
+        <item name="colorOnSecondary">#FFFFFF</item>
         <item name="android:statusBarColor">@color/bg_void</item>
         <item name="android:navigationBarColor">@color/bg_void</item>
         <item name="android:windowBackground">@color/bg_void</item>
