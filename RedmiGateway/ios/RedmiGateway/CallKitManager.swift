@@ -29,7 +29,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     private var pickups: Set<UUID> = []
     private var answeredHere: Set<UUID> = []
     private var connectedOutgoing: Set<UUID> = []
-    private var autoRetried: Set<UUID> = []
+    private var autoRetries: [UUID: Int] = [:]
     private var pendingOutgoing: UUID?
     private var endedCallIds: [String: Date] = [:]
     /// Answered from the app without a CallKit call; its audio moves here once it is active.
@@ -150,7 +150,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         pickups.remove(uuid)
         answeredHere.remove(uuid)
         connectedOutgoing.remove(uuid)
-        autoRetried.remove(uuid)
+        autoRetries.removeValue(forKey: uuid)
         if pendingOutgoing == uuid { pendingOutgoing = nil }
         if audioCallUuid == uuid { stopAudio() }
     }
@@ -245,9 +245,10 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             end(uuid, reason: .answeredElsewhere)
             return
         }
-        // One quiet retry for a network hiccup; after that the person decides.
-        if Self.transientFallbacks.contains(reason), audioActivated, !autoRetried.contains(uuid) {
-            autoRetried.insert(uuid)
+        // Quiet retries for a network hiccup (more over a remote link); after that the person decides.
+        let limit = GatewayConnection.shared.isRemoteLink ? 3 : 1
+        if Self.transientFallbacks.contains(reason), audioActivated, autoRetries[uuid, default: 0] < limit {
+            autoRetries[uuid, default: 0] += 1
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 guard self.states[uuid] == "active", !self.audioRequested,

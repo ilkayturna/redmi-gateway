@@ -295,7 +295,10 @@ public final class GatewayConnection: ObservableObject {
     }
 
     /// Tailscale and similar VPNs use the shared address space 100.64.0.0/10.
-    private static func isVpnAddress(_ host: String) -> Bool {
+    /// The link runs through the VPN (away from home); the audio side is more patient there.
+    var isRemoteLink: Bool { Self.isVpnAddress(currentHost) }
+
+    static func isVpnAddress(_ host: String) -> Bool {
         let parts = host.split(separator: ".").compactMap { Int($0) }
         return parts.count == 4 && parts[0] == 100 && (64...127).contains(parts[1])
     }

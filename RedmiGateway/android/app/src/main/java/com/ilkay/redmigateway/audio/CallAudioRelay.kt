@@ -126,7 +126,7 @@ object CallAudioRelay : CallManager.CallListener {
     @Volatile private var mediaRunning = false
     private var writerThread: Thread? = null
     private var senderThread: Thread? = null
-    private val uplinkQueue = ArrayBlockingQueue<ByteArray>(MAX_QUEUED_FRAMES + 2)
+    private val uplinkQueue = ArrayBlockingQueue<ByteArray>(14)
     private val upsampler = Upsampler3x()
     @Volatile private var isolationApplied = false
     private var listeningToCalls = false
@@ -143,6 +143,39 @@ object CallAudioRelay : CallManager.CallListener {
     @Volatile private var lastIPhoneHearingAt = 0L
     private const val FLAG_IPHONE_HEARING = 0x01
     private const val IPHONE_DEAF_LIMIT_MS = 2000L
+
+    /**
+     * The iPhone reaches this Redmi over the internet (Tailscale, or any non-local address), for
+     * example Redmi at home and iPhone at work. Mobile and VPN paths stall for longer than home
+     * Wi-Fi, and falling back to a Redmi nobody is holding would lose the conversation, so the
+     * limits are wider there. Local links keep the tighter, verified limits.
+     */
+    @Volatile private var remoteLink = false
+    private val silenceLimitMs get() = if (remoteLink) 3_000L else IPHONE_SILENCE_LIMIT_MS
+    private val deafLimitMs get() = if (remoteLink) 5_000L else IPHONE_DEAF_LIMIT_MS
+    private val stallWindows get() = if (remoteLink) 4 else 2
+    private val maxQueuedFrames get() = if (remoteLink) 12 else MAX_QUEUED_FRAMES
+    private val trimAboveFrames get() = if (remoteLink) 6 else TRIM_ABOVE_FRAMES
+
+    private fun isRemoteAddress(address: InetAddress?): Boolean {
+        if (address == null || address.isLoopbackAddress || address.isLinkLocalAddress) return false
+        val bytes = address.address
+        if (address is java.net.Inet4Address) {
+            val first = bytes[0].toInt() and 0xff
+            val second = bytes[1].toInt() and 0xff
+            if (first == 100 && second in 64..127) return true // Tailscale and other CGNAT-range VPNs
+            return !address.isSiteLocalAddress
+        }
+        // Tailscale IPv6 (fd7a:115c:a1e0::/48); other unique-local addresses are this network.
+        if (bytes[0] == 0xfd.toByte() && bytes[1] == 0x7a.toByte()) return true
+        if ((bytes[0].toInt() and 0xfe) == 0xfc) return false
+        // A global IPv6 address in one of this phone's /64 networks is local.
+        val prefixes = runCatching {
+            java.net.NetworkInterface.getNetworkInterfaces().toList().flatMap { it.inetAddresses.toList() }
+                .filterIsInstance<java.net.Inet6Address>().map { it.address.copyOf(8).toList() }
+        }.getOrDefault(emptyList())
+        return bytes.copyOf(8).toList() !in prefixes
+    }
     private val iphoneFrames = AtomicInteger()
     private val uplinkWrites = AtomicInteger()
     private val downlinkReads = AtomicInteger()
@@ -198,6 +231,8 @@ object CallAudioRelay : CallManager.CallListener {
         synchronized(this) {
             appContext = context.applicationContext
             expectedClientAddress = clientAddress
+            remoteLink = isRemoteAddress(clientAddress)
+            if (remoteLink) Log.i(TAG, "iPhone is on a remote link; wider audio limits")
             if (session == 0 || !sameKey(mediaKey, sessionMediaKey)) {
                 if (session != 0) {
                     // A different key means a new authenticated connection; start a fresh session.
@@ -315,10 +350,10 @@ object CallAudioRelay : CallManager.CallListener {
                 "underruns=${underruns.get()} maxWriteMs=$maxWriteMs")
         }
         val live = isLiveCallState(CallManager.currentCallState)
-        val iphoneFresh = lastIPhonePcmAt != 0L && now - lastIPhonePcmAt < IPHONE_SILENCE_LIMIT_MS
+        val iphoneFresh = lastIPhonePcmAt != 0L && now - lastIPhonePcmAt < silenceLimitMs
         // Protocol 1 iPhones cannot report what they receive; for them this stays true.
         val iphoneHearing = mediaKey == null ||
-            (lastIPhoneHearingAt != 0L && now - lastIPhoneHearingAt < IPHONE_SILENCE_LIMIT_MS)
+            (lastIPhoneHearingAt != 0L && now - lastIPhoneHearingAt < silenceLimitMs)
         when (owner) {
             Owner.REDMI -> Unit
             Owner.PREPARING_IPHONE -> {
@@ -362,7 +397,7 @@ object CallAudioRelay : CallManager.CallListener {
                     fallBack("iphone_audio_lost")
                     return
                 }
-                if (mediaKey != null && now - lastIPhoneHearingAt > IPHONE_DEAF_LIMIT_MS) {
+                if (mediaKey != null && now - lastIPhoneHearingAt > deafLimitMs) {
                     fallBack("iphone_not_receiving")
                     return
                 }
@@ -373,7 +408,7 @@ object CallAudioRelay : CallManager.CallListener {
                     else -> null
                 }
                 badWindows = if (slow == null) 0 else badWindows + 1
-                if (slow != null && badWindows >= 2) fallBack(slow)
+                if (slow != null && badWindows >= stallWindows) fallBack(slow)
             }
         }
     }
@@ -476,7 +511,7 @@ object CallAudioRelay : CallManager.CallListener {
             iphoneFrames.incrementAndGet()
             if (!mediaRunning) continue
             // Freshness beats completeness for live voice: drop the oldest when behind.
-            while (uplinkQueue.size >= MAX_QUEUED_FRAMES) {
+            while (uplinkQueue.size >= maxQueuedFrames) {
                 if (uplinkQueue.poll() != null) droppedFrames.incrementAndGet()
             }
             uplinkQueue.offer(pcm)
@@ -535,7 +570,7 @@ object CallAudioRelay : CallManager.CallListener {
         while (mediaRunning && uplink === track) {
             // Trim latency gently: drop one frame only if the queue stays deep for a while.
             val now = SystemClock.elapsedRealtime()
-            if (uplinkQueue.size > TRIM_ABOVE_FRAMES) {
+            if (uplinkQueue.size > trimAboveFrames) {
                 if (highSince == 0L) highSince = now
                 else if (now - highSince > TRIM_AFTER_MS) {
                     if (uplinkQueue.poll() != null) droppedFrames.incrementAndGet()
