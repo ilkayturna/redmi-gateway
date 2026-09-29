@@ -121,7 +121,8 @@ class MainActivity : AppCompatActivity() {
             setOnCheckedChangeListener { _, checked -> IncomingCallPresenter.quietWhenIPhoneRings = checked }
             minHeight = dp(48)
         })
-        calls.addView(body("iPhone bağlı değilse veya çağrıyı göstermezse Redmi her zaman normal çalar."))
+        calls.addView(body("Redmi önce iPhone'un çağrıyı göstermesini bekler ve hiç ses çıkarmaz. iPhone birkaç saniye " +
+            "içinde göstermezse ya da eşleşmiş iPhone yoksa Redmi normal çalar."))
 
         // Hotspot only where there is no known Wi-Fi.
         val hotspot = section("Hotspot")

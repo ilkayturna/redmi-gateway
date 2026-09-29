@@ -107,6 +107,7 @@ object CallManager {
         waitingCall = null
         waitingCallId = null
         waitingNumber = null
+        RedmiRinger.onWaiting(false)
         notifyWaitingChanged()
         return call to id
     }
@@ -142,6 +143,7 @@ object CallManager {
         if (activeCall != null && activeCall !== call) {
             if (waitingCall == null && call.state == Call.STATE_RINGING) {
                 setWaiting(call)
+                RedmiRinger.onWaiting(true)
             } else {
                 log("Additional call ignored: a call is already waiting")
             }
@@ -159,12 +161,18 @@ object CallManager {
         addedAtMillis = call.details?.creationTimeMillis?.takeIf { it > 0 } ?: System.currentTimeMillis()
 
         log("Call Added: ID=$currentCallId, State=$stateStr")
+        if (stateStr == "ringing" && currentDirection == "incoming") {
+            val silent = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                call.details?.extras?.getBoolean(Call.EXTRA_SILENT_RINGING_REQUESTED, false) == true
+            RedmiRinger.onIncoming(currentCallId!!, silent)
+        }
         notifyStateChanged()
 
         val callback = object : Call.Callback() {
             override fun onStateChanged(c: Call, state: Int) {
                 if (activeCall !== c) return
                 val mapped = mapCallState(state)
+                if (mapped != "ringing") RedmiRinger.stop()
                 currentCallState = mapped
                 if (mapped == "active" && activeSinceMillis == 0L) activeSinceMillis = System.currentTimeMillis()
                 val num = extractPhoneNumber(c)
@@ -199,6 +207,7 @@ object CallManager {
         if (activeCall === call) {
             activeCallCallback?.let { call.unregisterCallback(it) }
             activeCallCallback = null
+            RedmiRinger.stop()
             val finalId = currentCallId ?: return
             log("Call Removed / Terminated: ID=$finalId")
             currentCallState = "disconnected"

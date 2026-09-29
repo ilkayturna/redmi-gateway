@@ -7,10 +7,10 @@ import android.util.Log
 /**
  * Decides where an incoming call rings.
  *
- * The Redmi rings as usual. Once the paired iPhone confirms that its CallKit incoming-call screen
- * is showing this call (ringing_ack over WebSocket or Bluetooth), the Redmi's ringer is silenced
- * so only the iPhone rings. Without that confirmation the Redmi keeps ringing, so a call is never
- * silent on both devices. The call itself stays answerable on the Redmi.
+ * The Redmi waits a few seconds before ringing (RedmiRinger). Once the paired iPhone confirms that
+ * its CallKit incoming-call screen shows this call (ringing_ack over WebSocket or Bluetooth), the
+ * Redmi stays quiet, so only the iPhone rings. Without that confirmation the Redmi rings, so a
+ * call is never silent on both devices. The call itself stays answerable on the Redmi.
  */
 object IncomingCallPresenter {
     private const val TAG = "IncomingCallPresenter"
@@ -48,7 +48,9 @@ object IncomingCallPresenter {
         CallManager.log("Incoming call is showing on the iPhone")
         onChanged?.invoke()
         if (!quietWhenIPhoneRings) return
+        RedmiRinger.onIPhonePresented(callId)
         val context = appContext ?: return
+        // Only matters if Telecom rings anyway (it should leave ringing to RedmiRinger).
         runCatching {
             context.getSystemService(TelecomManager::class.java)?.silenceRinger()
         }.onFailure { Log.w(TAG, "Could not silence the Redmi ringer: ${it.javaClass.simpleName}") }
