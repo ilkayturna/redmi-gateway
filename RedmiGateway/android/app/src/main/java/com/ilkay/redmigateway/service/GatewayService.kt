@@ -60,7 +60,8 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     private var nsdDiscoveryManager: NsdDiscoveryManager? = null
     private var bleServerManager: BleServerManager? = null
     private val handler = Handler(Looper.getMainLooper())
-    private val restoreHotspot = Runnable { if (isRunning) HotspotRestarter.startIfNeeded(this) }
+    // With the smart hotspot on, SmartHotspot decides; otherwise the saved hotspot comes back.
+    private val restoreHotspot = Runnable { if (isRunning && !SmartHotspot.enabled) HotspotRestarter.startIfNeeded(this) }
     @Volatile private var callAudioOnIPhone = false
     private val reachabilityListener: () -> Unit = { if (isRunning) updateNotification(statusText()) }
 
@@ -130,6 +131,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
             CallJournal.get(this).start()
             SmsJournal.get(this).start()
             com.ilkay.redmigateway.push.PushNotifier.start(this)
+            SmartHotspot.start(this)
             IPhoneReachability.addListener(reachabilityListener)
             isRunning = true
             CallManager.log("Gateway Foreground Service started on port 8787")

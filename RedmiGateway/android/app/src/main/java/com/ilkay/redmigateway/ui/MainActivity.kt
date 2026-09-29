@@ -46,6 +46,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var remoteStatus: TextView
     private lateinit var iphoneTitle: TextView
     private lateinit var iphoneDetail: TextView
+    private lateinit var hotspotStatus: TextView
     private val pickKey = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) importKey(uri)
     }
@@ -121,6 +122,20 @@ class MainActivity : AppCompatActivity() {
             minHeight = dp(48)
         })
         calls.addView(body("iPhone bağlı değilse veya çağrıyı göstermezse Redmi her zaman normal çalar."))
+
+        // Hotspot only where there is no known Wi-Fi.
+        val hotspot = section("Hotspot")
+        hotspot.addView(SwitchMaterial(this).apply {
+            text = "Bilinen Wi-Fi'da hotspot'u kapat, dışarıda aç"
+            isChecked = com.ilkay.redmigateway.service.SmartHotspot.enabled
+            setOnCheckedChangeListener { _, checked -> com.ilkay.redmigateway.service.SmartHotspot.enabled = checked }
+            minHeight = dp(48)
+        })
+        hotspot.addView(body("Evde ya da işte kayıtlı Wi-Fi varken Redmi o ağa bağlanır ve hotspot'u kapatır, " +
+            "mobil verin harcanmaz. Ağdan çıkınca hotspot kendiliğinden açılır. Görüşme sırasında hiçbir şey değişmez. " +
+            "Bu ağların iPhone'da da kayıtlı olması gerekir."))
+        hotspotStatus = body("")
+        hotspot.addView(hotspotStatus)
 
         // Away from home: Apple push for calls and messages; Tailscale carries the connection.
         val remote = section("Uzaktan kullanım")
@@ -223,6 +238,11 @@ class MainActivity : AppCompatActivity() {
             apns.hasKey -> "Anahtar yüklü (${apns.keyId}). iPhone uygulaması bir kez bağlanınca hazır olur."
             else -> "Apple bildirim anahtarı yok."
         }
+        val smart = com.ilkay.redmigateway.service.SmartHotspot
+        val known = smart.knownNetworks.sorted()
+        hotspotStatus.text = (if (smart.hotspotOn) "Hotspot açık. " else "Hotspot kapalı. ") +
+            (if (known.isEmpty()) "Henüz bilinen ağ yok; Redmi bir Wi-Fi'a bağlandığında öğrenir."
+            else "Bilinen ağlar: ${known.joinToString(", ")}")
         val paired = PairingStore.pairedClient()
         pairedView.text = if (paired == null) "Eşleşmiş iPhone yok." else
             "Eşleşmiş: ${paired.name} · ${DateFormat.format("d MMM yyyy HH:mm", Date(paired.pairedAt))}"

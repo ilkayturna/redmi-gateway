@@ -80,6 +80,23 @@ gh workflow run build-ios.yml --ref delivery/phone-bridge -f release=false -f pr
 
 The owner approved automated IVR calls to Turkcell 532.
 
+## Smart hotspot
+
+The iPhone goes online through the Redmi. On a known Wi-Fi (one the Redmi has joined before) the
+Redmi joins it and turns its hotspot off, saving mobile data; without one the hotspot comes back
+within about 15 s. This Redmi's Wi-Fi chip cannot join a network while its own hotspot runs, so
+when a known network appears in a scan the hotspot is turned off for up to 30 s to let Android
+join it; if that fails, the hotspot returns and that network is skipped for ten minutes. Nothing
+switches during a call. Settings › Hotspot turns this off. The known list is learned; it can be
+seeded from the Redmi's saved networks over adb:
+
+```bash
+adb shell am broadcast -a com.ilkay.redmigateway.KNOWN_WIFI --esa ssids "Home,Office" -n com.ilkay.redmigateway/.service.KnownWifiReceiver
+```
+
+The Wi-Fi networks must be saved on the iPhone too, or it loses the internet when the hotspot
+goes off.
+
 ## Away from home (Redmi at home, iPhone elsewhere)
 
 Owner steps, done once:
