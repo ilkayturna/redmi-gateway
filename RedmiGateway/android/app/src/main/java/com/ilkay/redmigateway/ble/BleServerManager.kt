@@ -69,8 +69,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
                 .put("reconnectPulses", server.reconnectPulses)
         }
 
-        /** Bluetooth links to this Redmi; in practice only the paired iPhone connects. */
-        fun linkedCentrals(): Int = current?.connectedDevices?.size ?: 0
+        /** Bluetooth links to this Redmi that still listen; in practice only the paired iPhone connects. */
+        fun linkedCentrals(): Int = current?.listeningCentrals() ?: 0
     }
 
     private var lastControlSeq = 0L
@@ -104,6 +104,12 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
 
     private val connectedDevices = ConcurrentHashMap.newKeySet<BluetoothDevice>()
     private val subscribedDevices = ConcurrentHashMap<BluetoothDevice, MutableSet<java.util.UUID>>()
+    // A swiped-away iPhone app turns call-state updates off, but iOS can keep the Bluetooth link
+    // itself up. Such a link reaches nobody. A link kept across a restart of this app has no
+    // record either way and still counts, because the iPhone keeps listening on the same handle.
+    private val stoppedListening = ConcurrentHashMap.newKeySet<BluetoothDevice>()
+
+    private fun listeningCentrals() = connectedDevices.count { it !in stoppedListening }
     private val clientLastSeq = ConcurrentHashMap<String, Long>()
     private val stateSeq = AtomicLong(0)
 
@@ -175,6 +181,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
                 mtuByDevice.remove(device.address)
                 connectedDevices.remove(device)
                 subscribedDevices.remove(device)
+                stoppedListening.remove(device)
                 preparedWrites.remove(device)
                 linkChanged()
             }
@@ -364,6 +371,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
                 }
                 if (charUuid == BleConstants.CHAR_STATE_UUID) {
                     Log.i(TAG, "BLE call-state updates ${if (enabled) "enabled" else "disabled"}")
+                    if (enabled) stoppedListening.remove(device) else stoppedListening.add(device)
+                    linkChanged()
                 }
 
                 if (responseNeeded) {
@@ -488,6 +497,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         gattServer = null
         connectedDevices.clear()
         subscribedDevices.clear()
+        stoppedListening.clear()
         linkChanged()
         clientLastSeq.clear()
         preparedWrites.clear()
@@ -644,7 +654,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     private fun linkChanged() {
         com.ilkay.redmigateway.service.IPhoneReachability.changed()
         mainHandler.post {
-            val linked = connectedDevices.isNotEmpty() || com.ilkay.redmigateway.service.GatewayService.authenticatedClientCount() > 0
+            val linked = listeningCentrals() > 0 || com.ilkay.redmigateway.service.GatewayService.authenticatedClientCount() > 0
             if (linked || !shouldBeRunning || PairingStore.pairedClient() == null) {
                 if (reconnectPulses > 0 || pulseUntil != 0L) Log.i(TAG, "iPhone linked again; reconnect pulses stop")
                 mainHandler.removeCallbacks(reconnectPulse)
@@ -660,7 +670,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     }
 
     private fun pulse() {
-        val linked = connectedDevices.isNotEmpty() || com.ilkay.redmigateway.service.GatewayService.authenticatedClientCount() > 0
+        val linked = listeningCentrals() > 0 || com.ilkay.redmigateway.service.GatewayService.authenticatedClientCount() > 0
         if (linked || !shouldBeRunning || PairingStore.pairedClient() == null) return
         reconnectPulses++
         Log.i(TAG, "iPhone has no link; reconnect pulse $reconnectPulses")
