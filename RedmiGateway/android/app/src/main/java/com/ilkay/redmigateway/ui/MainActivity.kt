@@ -133,6 +133,24 @@ class MainActivity : AppCompatActivity() {
         remote.addView(button("Anahtar dosyasını seç (.p8)", outlined = true) {
             runCatching { pickKey.launch(arrayOf("*/*")) }
         })
+        remote.addView(button("Test bildirimi gönder", outlined = true) {
+            val apns = com.ilkay.redmigateway.push.ApnsSender
+            if (apns.hasKey && !apns.hasAlertToken) {
+                // No notification token yet (older iPhone app): check the key with Apple instead.
+                apns.verifyKey { problem ->
+                    runOnUiThread {
+                        Toast.makeText(this, problem ?: "Apple anahtarı doğruladı. Aramalar Apple üzerinden gelir; " +
+                            "mesaj bildirimi için iPhone uygulamasını güncelleyip bir kez aç.", Toast.LENGTH_LONG).show()
+                    }
+                }
+                return@button
+            }
+            apns.sendTest { problem ->
+                runOnUiThread {
+                    Toast.makeText(this, problem ?: "Gönderildi. iPhone'da bildirim görünmeli.", Toast.LENGTH_LONG).show()
+                }
+            }
+        })
         remote.addView(SwitchMaterial(this).apply {
             text = "Uzaktayken SMS metni bildirimde görünsün"
             isChecked = com.ilkay.redmigateway.push.PushNotifier.smsContentInPush
@@ -176,8 +194,13 @@ class MainActivity : AppCompatActivity() {
         val keyId = Regex("AuthKey_([A-Z0-9]{10})").find(name)?.groupValues?.get(1)
         val pem = runCatching { contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) } }.getOrNull()
         val ok = keyId != null && pem != null && com.ilkay.redmigateway.push.ApnsSender.importKey(pem, keyId)
-        Toast.makeText(this, if (ok) "Apple bildirim anahtarı yüklendi" else
+        Toast.makeText(this, if (ok) "Apple bildirim anahtarı yüklendi. Apple'a soruluyor…" else
             "Dosya okunamadı. Apple'dan indirilen AuthKey_XXXXXXXXXX.p8 dosyasını seç.", Toast.LENGTH_LONG).show()
+        if (ok) com.ilkay.redmigateway.push.ApnsSender.verifyKey { problem ->
+            runOnUiThread {
+                Toast.makeText(this, problem ?: "Apple anahtarı doğruladı.", Toast.LENGTH_LONG).show()
+            }
+        }
         refresh()
     }
 
@@ -195,7 +218,8 @@ class MainActivity : AppCompatActivity() {
         iphoneDetail.text = iphone.detail
         val apns = com.ilkay.redmigateway.push.ApnsSender
         remoteStatus.text = when {
-            apns.isReady -> "Hazır: iPhone uygulaması kapalıyken ya da iPhone uzaktayken aramalar ve mesajlar Apple üzerinden iletilir (anahtar ${apns.keyId})."
+            apns.isReady && apns.alertsReady -> "Hazır: iPhone uygulaması kapalıyken ya da iPhone uzaktayken aramalar ve mesajlar Apple üzerinden iletilir (anahtar ${apns.keyId})."
+            apns.isReady -> "Aramalar hazır (anahtar ${apns.keyId}). Mesaj bildirimleri için iPhone uygulamasını güncelleyip bir kez aç."
             apns.hasKey -> "Anahtar yüklü (${apns.keyId}). iPhone uygulaması bir kez bağlanınca hazır olur."
             else -> "Apple bildirim anahtarı yok."
         }

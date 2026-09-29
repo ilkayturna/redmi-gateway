@@ -78,7 +78,7 @@ object PushNotifier : CallManager.CallListener, CallJournal.Listener, SmsJournal
     override fun onSmsJournalEntry(entry: SmsJournal.Entry) {
         if (entry.box != "inbox" || entry.read) return
         handler.postDelayed({
-            if (deliveredSmsSeq >= entry.seq || !ApnsSender.isReady) return@postDelayed
+            if (deliveredSmsSeq >= entry.seq || !ApnsSender.alertsReady) return@postDelayed
             val sender = contactName(entry.address) ?: entry.address.ifBlank { "Bilinmeyen" }
             val text = if (smsContentInPush) entry.body.take(400) else "Yeni mesaj"
             ApnsSender.sendAlert(sender, text, "sms-${entry.address.filter(Char::isDigit).takeLast(10)}", "sms-${entry.id}")
@@ -88,7 +88,7 @@ object PushNotifier : CallManager.CallListener, CallJournal.Listener, SmsJournal
     override fun onCallJournalEntry(entry: CallJournal.Entry) {
         if (entry.type != "missed") return
         handler.postDelayed({
-            if (deliveredCallSeq >= entry.seq || !ApnsSender.isReady) return@postDelayed
+            if (deliveredCallSeq >= entry.seq || !ApnsSender.alertsReady) return@postDelayed
             val caller = contactName(entry.number) ?: entry.number.ifBlank { "Gizli numara" }
             ApnsSender.sendAlert("Cevapsız arama", caller, "missed", "call-${entry.logId}")
         }, 8000)

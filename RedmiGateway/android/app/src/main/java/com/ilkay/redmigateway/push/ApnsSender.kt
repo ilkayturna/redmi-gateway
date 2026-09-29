@@ -34,6 +34,9 @@ object ApnsSender {
     private const val KEY_PEM = "apns_key_pem"
     private const val KEY_ID = "apns_key_id"
     private const val KEY_TOKEN = "device_token"
+    // Calls use the PushKit (VoIP) token; SMS and missed-call notifications need the app's
+    // ordinary notification token. Apple refuses an alert sent to a VoIP token.
+    private const val KEY_ALERT_TOKEN = "alert_token"
     const val TEAM_ID = "6FR2S79P48"
     const val BUNDLE_ID = "com.ilkay.redmigateway.ios"
     private const val HOST = "https://api.push.apple.com"
@@ -52,6 +55,8 @@ object ApnsSender {
     val keyId: String? get() = prefs.getString(KEY_ID, null)
     val hasDeviceToken: Boolean get() = prefs.getString(KEY_TOKEN, null) != null
     val isReady: Boolean get() = hasKey && hasDeviceToken
+    val hasAlertToken: Boolean get() = prefs.getString(KEY_ALERT_TOKEN, null) != null
+    val alertsReady: Boolean get() = hasKey && hasAlertToken
 
     /** Stores the .p8 key after checking that it is a usable EC private key. */
     fun importKey(pem: String, keyId: String): Boolean {
@@ -76,13 +81,18 @@ object ApnsSender {
         com.ilkay.redmigateway.service.IPhoneReachability.changed()
     }
 
+    fun setAlertToken(token: String) {
+        if (!token.matches(Regex("^[0-9a-f]{32,200}$"))) return
+        prefs.edit().putString(KEY_ALERT_TOKEN, token).apply()
+    }
+
     fun clearDeviceToken() {
-        prefs.edit().remove(KEY_TOKEN).apply()
+        prefs.edit().remove(KEY_TOKEN).remove(KEY_ALERT_TOKEN).apply()
         com.ilkay.redmigateway.service.IPhoneReachability.changed()
     }
 
     /** VoIP push: iOS launches the app, which must show the call with CallKit. */
-    fun sendVoip(payload: JSONObject) = post("voip", "$BUNDLE_ID.voip", payload, collapseId = null)
+    fun sendVoip(payload: JSONObject) = post("voip", "$BUNDLE_ID.voip", KEY_TOKEN, payload, collapseId = null)
 
     /** Ordinary notification (SMS, missed call). */
     fun sendAlert(title: String, body: String, threadId: String, collapseId: String) {
@@ -90,12 +100,65 @@ object ApnsSender {
             .put("alert", JSONObject().put("title", title).put("body", body))
             .put("sound", "default")
             .put("thread-id", threadId))
-        post("alert", BUNDLE_ID, payload, collapseId)
+        post("alert", BUNDLE_ID, KEY_ALERT_TOKEN, payload, collapseId)
     }
 
-    private fun post(type: String, topic: String, payload: JSONObject, collapseId: String?) {
-        val token = prefs.getString(KEY_TOKEN, null) ?: return
-        val jwt = providerToken() ?: return
+    /**
+     * Asks Apple whether the key, key ID and team are accepted, without notifying anyone: the
+     * request goes to a device token that cannot exist. "BadDeviceToken" means Apple accepted the
+     * key and only the made-up token failed; a 403 means the key itself is refused.
+     */
+    fun verifyKey(done: (String?) -> Unit) {
+        val jwt = providerToken() ?: return done("Apple anahtarı okunamadı.")
+        val request = Request.Builder()
+            .url("$HOST/3/device/" + "0".repeat(64))
+            .header("authorization", "bearer $jwt")
+            .header("apns-push-type", "alert")
+            .header("apns-topic", BUNDLE_ID)
+            .header("apns-expiration", "0")
+            .post("{\"aps\":{}}".toRequestBody("application/json".toMediaType()))
+            .build()
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                done("Apple'a ulaşılamadı (${e.javaClass.simpleName}).")
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use {
+                    val reason = runCatching { JSONObject(it.body?.string().orEmpty()).optString("reason") }.getOrDefault("")
+                    Log.i(TAG, "APNs key check: ${it.code} $reason")
+                    when {
+                        it.code == 400 && reason == "BadDeviceToken" -> done(null)
+                        it.code == 403 -> {
+                            cachedToken = null
+                            done("Apple anahtarı kabul etmedi: $reason")
+                        }
+                        else -> done("Apple yanıtı: ${it.code} $reason")
+                    }
+                }
+            }
+        })
+    }
+
+    /** Settings › "Test bildirimi gönder": a visible notification; [done] gets null or the problem. */
+    fun sendTest(done: (String?) -> Unit) {
+        when {
+            !hasKey -> return done("Apple anahtarı yüklü değil.")
+            !hasAlertToken -> return done("iPhone bildirim kaydı yok. iPhone uygulamasını bir kez aç.")
+        }
+        val payload = JSONObject().put("aps", JSONObject()
+            .put("alert", JSONObject().put("title", "Telefon Geçidi")
+                .put("body", "Apple bildirimi çalışıyor. Uygulama kapalıyken de aramalar ve mesajlar gelir."))
+            .put("sound", "default"))
+        post("alert", BUNDLE_ID, KEY_ALERT_TOKEN, payload, "setup-test", done)
+    }
+
+    private fun post(
+        type: String, topic: String, tokenKey: String, payload: JSONObject, collapseId: String?,
+        done: ((String?) -> Unit)? = null
+    ) {
+        val token = prefs.getString(tokenKey, null) ?: return done?.invoke("iPhone bildirim kaydı yok.") ?: Unit
+        val jwt = providerToken() ?: return done?.invoke("Apple anahtarı okunamadı.") ?: Unit
         val request = Request.Builder()
             .url("$HOST/3/device/$token")
             .header("authorization", "bearer $jwt")
@@ -110,17 +173,20 @@ object ApnsSender {
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 Log.w(TAG, "APNs $type push failed: ${e.javaClass.simpleName}")
+                done?.invoke("Apple'a ulaşılamadı (${e.javaClass.simpleName}).")
             }
 
             override fun onResponse(call: Call, response: Response) {
                 response.use {
                     if (it.isSuccessful) {
                         Log.i(TAG, "APNs $type push accepted")
+                        done?.invoke(null)
                     } else {
                         val reason = runCatching { JSONObject(it.body?.string().orEmpty()).optString("reason") }.getOrDefault("")
                         Log.w(TAG, "APNs $type push refused: ${it.code} $reason")
-                        if (reason == "BadDeviceToken" || reason == "Unregistered") clearDeviceToken()
+                        if (reason == "BadDeviceToken" || reason == "Unregistered") prefs.edit().remove(tokenKey).apply()
                         if (it.code == 403) cachedToken = null
+                        done?.invoke("Apple reddetti: ${it.code} $reason")
                     }
                 }
             }

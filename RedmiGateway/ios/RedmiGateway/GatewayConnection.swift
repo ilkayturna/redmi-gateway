@@ -107,6 +107,7 @@ public final class GatewayConnection: ObservableObject {
     private var closeAfterCatchUp = false
     /// VoIP push token (PushKit); sent to the Redmi for calls while this iPhone is away.
     private var pushToken: String?
+    private var alertPushToken: String?
 
     let discovery = NWGatewayDiscovery()
     private let pathMonitor = NWPathMonitor()
@@ -1041,9 +1042,20 @@ public final class GatewayConnection: ObservableObject {
         sendPushToken()
     }
 
+    /// Ordinary notification token; the Redmi sends SMS and missed-call alerts through Apple with it.
+    func setAlertPushToken(_ token: String) {
+        alertPushToken = token
+        sendPushToken()
+    }
+
     private func sendPushToken() {
-        guard let pushToken, state == .authenticated else { return }
-        send(["type": "push_token", "token": pushToken, "environment": "production"])
+        guard state == .authenticated else { return }
+        if let pushToken {
+            send(["type": "push_token", "token": pushToken, "environment": "production"])
+        }
+        if let alertPushToken {
+            send(["type": "push_alert_token", "token": alertPushToken, "environment": "production"])
+        }
     }
 
     /// Technical log for Advanced > Diagnostics. Never contains numbers, message text or keys.

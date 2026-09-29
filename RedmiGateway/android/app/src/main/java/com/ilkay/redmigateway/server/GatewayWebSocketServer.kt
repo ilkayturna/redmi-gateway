@@ -322,6 +322,10 @@ class GatewayWebSocketServer(
                 // For calls and messages while the iPhone is away (Apple push); protocol 2 only.
                 if (peer.protocol >= 2) com.ilkay.redmigateway.push.ApnsSender.setDeviceToken(json.optString("token"))
             }
+            "push_alert_token" -> {
+                // The app's ordinary notification token, for SMS and missed calls through Apple.
+                if (peer.protocol >= 2) com.ilkay.redmigateway.push.ApnsSender.setAlertToken(json.optString("token"))
+            }
             "unpair" -> {
                 if (peer.protocol >= 2) {
                     PairingStore.forget()

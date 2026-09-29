@@ -173,7 +173,8 @@ The Bluetooth key is `derive(K, "ble")`. Sealed values are `0x02 | nonce | ciphe
 | `sync` | `callsAfter`, `smsAfter` | `sync_calls` then `sync_sms` |
 | `diagnostics` | — | `diagnostics_result` (no numbers, message text or keys) |
 | `unpair` | — | `ack`, then the Redmi closes the connection |
-| `push_token` | `token` (hex), `environment` | — (stored for Apple push while the iPhone is away) |
+| `push_token` | `token` (hex), `environment` | — (PushKit token; the Redmi rings the iPhone through Apple when it has no link) |
+| `push_alert_token` | `token` (hex), `environment` | — (ordinary notification token; SMS and missed-call alerts through Apple) |
 
 `audio_start` is accepted up to 10 s after this client's own `dial`, before Telecom has created the
 call.
