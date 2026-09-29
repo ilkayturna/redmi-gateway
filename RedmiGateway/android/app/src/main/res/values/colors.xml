@@ -43,4 +43,7 @@
     <color name="pb_call_green">#1E9E4F</color>
     <color name="pb_ripple">#1F18232C</color>
     <color name="pb_ripple_light">#33FFFFFF</color>
+    <color name="pb_on_accent">#FFFFFF</color>
+    <color name="pb_attention_bg">#FFF6E5</color>
+    <color name="pb_attention_stroke">#F0D9A8</color>
 </resources>

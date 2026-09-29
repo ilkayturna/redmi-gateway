@@ -9,4 +9,11 @@
     <color name="status_good">#6FD9A7</color>
     <color name="status_bad">#FF9A8F</color>
     <color name="status_attention">#F7C36B</color>
+    <color name="text_muted">#8C99A3</color>
+    <!-- Phone screens -->
+    <color name="pb_surface_variant">#243039</color>
+    <color name="pb_ripple">#33FFFFFF</color>
+    <color name="pb_on_accent">#10161B</color>
+    <color name="pb_attention_bg">#2B2517</color>
+    <color name="pb_attention_stroke">#5C4B25</color>
 </resources>

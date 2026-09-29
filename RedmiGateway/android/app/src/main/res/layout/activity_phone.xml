@@ -138,10 +138,10 @@
         android:layout_marginEnd="16dp"
         android:layout_marginBottom="8dp"
         android:visibility="gone"
-        app:cardBackgroundColor="#FFF6E5"
+        app:cardBackgroundColor="@color/pb_attention_bg"
         app:cardCornerRadius="16dp"
         app:cardElevation="0dp"
-        app:strokeColor="#F0D9A8"
+        app:strokeColor="@color/pb_attention_stroke"
         app:strokeWidth="1dp">
 
         <LinearLayout

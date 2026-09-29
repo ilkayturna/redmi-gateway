@@ -979,7 +979,7 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         frame.addView(FloatingActionButton(this).apply {
             setImageResource(R.drawable.ic_pb_add)
             backgroundTintList = ColorStateList.valueOf(views.color(R.color.accent))
-            imageTintList = ColorStateList.valueOf(Color.WHITE)
+            imageTintList = ColorStateList.valueOf(views.color(R.color.pb_on_accent))
             contentDescription = "Yeni mesaj"
             setOnClickListener { showNewMessage() }
         }, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END).apply {
@@ -1114,7 +1114,7 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         val meta = container.getChildAt(1) as TextView
         container.gravity = if (message.sent) Gravity.END else Gravity.START
         text.text = message.body
-        text.setTextColor(if (message.sent) Color.WHITE else views.color(R.color.text_primary))
+        text.setTextColor(views.color(if (message.sent) R.color.pb_on_accent else R.color.text_primary))
         text.background = GradientDrawable().apply {
             cornerRadius = views.dp(18).toFloat()
             setColor(views.color(if (message.sent) R.color.accent else R.color.pb_surface_variant))
@@ -1151,7 +1151,7 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         val send = ImageButton(this).apply {
             background = ContextCompat.getDrawable(this@PhoneActivity, R.drawable.pb_send_button)
             setImageResource(R.drawable.ic_pb_send)
-            imageTintList = ColorStateList.valueOf(Color.WHITE)
+            imageTintList = ColorStateList.valueOf(views.color(R.color.pb_on_accent))
             contentDescription = "Gönder"
         }
         bar.addView(send, LinearLayout.LayoutParams(views.dp(48), views.dp(48)).apply { marginStart = views.dp(8) })
