@@ -169,20 +169,21 @@ object SmartHotspot {
             return
         }
 
-        // A switch would cut the iPhone's link mid-call; wait until the call is over.
-        if (CallManager.currentCallState !in setOf("idle", "disconnected")) return
-
+        // Turning the hotspot off would cut the iPhone's link mid-call, so that waits until the call
+        // is over. Turning it on never hurts: the Wi-Fi is already gone, and the hotspot gives the
+        // iPhone its way back to the call audio.
+        val inCall = CallManager.currentCallState !in setOf("idle", "disconnected")
         when {
-            wifi && hotspot && now - wifiSince >= STABLE_MS -> {
+            wifi && hotspot && !inCall && now - wifiSince >= STABLE_MS -> {
                 Log.i(TAG, "Known Wi-Fi in use; hotspot off to save mobile data")
                 stopHotspot()
             }
             !wifi && !hotspot && now - lostSince >= LOST_MS -> {
-                Log.i(TAG, "No Wi-Fi; hotspot on for the iPhone")
+                Log.i(TAG, "No Wi-Fi; hotspot on for the iPhone${if (inCall) " (during a call)" else ""}")
                 HotspotRestarter.startIfNeeded(context)
                 lostSince = now
             }
-            !wifi && hotspot -> tryKnownNetwork(now)
+            !wifi && hotspot && !inCall -> tryKnownNetwork(now)
         }
     }
 

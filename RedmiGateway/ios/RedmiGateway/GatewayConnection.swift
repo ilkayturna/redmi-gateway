@@ -293,6 +293,31 @@ public final class GatewayConnection: ObservableObject {
             return
         }
         if link != .pairing { link = .connecting }
+        // An address that does not answer can keep "connecting" for a long time. Say what is
+        // wrong while the attempts go on; the first one that answers still wins.
+        connectHint += 1
+        let hint = connectHint
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+            Task { @MainActor in
+                let connection = GatewayConnection.shared
+                guard connection.connectHint == hint, connection.link == .connecting,
+                      connection.state != .authenticated else { return }
+                connection.link = .offline(connection.unreachableReason)
+            }
+        }
+    }
+
+    private var connectHint = 0
+
+    /// Why the Redmi cannot be reached, in terms of what to do. The iPhone has no mobile service of
+    /// its own, so without Wi-Fi it is offline; with Wi-Fi and the Redmi still in Bluetooth range,
+    /// the two phones are almost always on different networks.
+    var unreachableReason: String {
+        guard isNetworkViable else { return "Wi-Fi yok · Redmi'nin hotspot'una bağlan" }
+        if BLECentralManager.shared.isConnected {
+            return "Redmi başka bir ağda · iPhone'u Redmi'nin Wi-Fi'ına ya da hotspot'una bağla"
+        }
+        return "Redmi'ye ulaşılamıyor"
     }
 
     /// Tailscale and similar VPNs use the shared address space 100.64.0.0/10.
@@ -344,7 +369,7 @@ public final class GatewayConnection: ObservableObject {
             state = .failed
             switch link {
             case .unpaired, .incompatible, .pairing: break
-            default: link = .offline(isNetworkViable ? "Redmi'ye ulaşılamıyor" : "Ağ bağlantısı yok")
+            default: link = .offline(unreachableReason)
             }
             scheduleReconnect()
         }
@@ -405,7 +430,7 @@ public final class GatewayConnection: ObservableObject {
         switch link {
         case .unpaired, .incompatible: return
         case .pairing: break
-        default: link = .offline(isNetworkViable ? "Redmi'ye ulaşılamıyor" : "Ağ bağlantısı yok")
+        default: link = .offline(unreachableReason)
         }
         scheduleReconnect()
     }
