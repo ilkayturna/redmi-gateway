@@ -53,6 +53,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         private const val MAX_CONTROL_AGE_MS = 60_000L
         private const val SUBSCRIBE_GRACE_MS = 10_000L
         private const val RECONNECT_GRACE_MS = 20_000L
+        private const val SWIPED_AWAY_GRACE_MS = 3_000L
+        private const val BEACON_MAJORS = 4
         private const val PULSE_MS = 10_000L
         private val BLE_STATE_AAD = "phonebridge-ble-state".toByteArray(Charsets.UTF_8)
         private val BLE_CONTROL_AAD = "phonebridge-ble-control".toByteArray(Charsets.UTF_8)
@@ -78,10 +80,16 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     // New journal entries change the "k"/"m" fields of the call state, so a sleeping iPhone
     // wakes up for a new SMS or missed call and fetches it.
     private val callJournalListener = object : com.ilkay.redmigateway.journal.CallJournal.Listener {
-        override fun onCallJournalEntry(entry: com.ilkay.redmigateway.journal.CallJournal.Entry) = notifyJournalChange()
+        override fun onCallJournalEntry(entry: com.ilkay.redmigateway.journal.CallJournal.Entry) {
+            notifyJournalChange()
+            if (entry.type == "missed") wakeForNews("missed call")
+        }
     }
     private val smsJournalListener = object : com.ilkay.redmigateway.journal.SmsJournal.Listener {
-        override fun onSmsJournalEntry(entry: com.ilkay.redmigateway.journal.SmsJournal.Entry) = notifyJournalChange()
+        override fun onSmsJournalEntry(entry: com.ilkay.redmigateway.journal.SmsJournal.Entry) {
+            notifyJournalChange()
+            if (entry.box == "inbox") wakeForNews("SMS")
+        }
     }
 
     private fun notifyJournalChange() {
@@ -372,7 +380,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
                 if (charUuid == BleConstants.CHAR_STATE_UUID) {
                     Log.i(TAG, "BLE call-state updates ${if (enabled) "enabled" else "disabled"}")
                     if (enabled) stoppedListening.remove(device) else stoppedListening.add(device)
-                    linkChanged()
+                    linkChanged(quick = !enabled)
                 }
 
                 if (responseNeeded) {
@@ -617,6 +625,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     // pairing key; the iPhone monitors that region and wakes up to present the call.
 
     private var beaconCallback: AdvertiseCallback? = null
+    private var beaconMajor = 0
     private val beaconCheck = object : Runnable {
         override fun run() {
             updateCallBeacon()
@@ -651,10 +660,23 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         mainHandler.postDelayed(reconnectPulse, delayMs)
     }
 
-    private fun linkChanged() {
+    private fun iPhoneLinked() =
+        listeningCentrals() > 0 || com.ilkay.redmigateway.service.GatewayService.authenticatedClientCount() > 0
+
+    /** New SMS or missed call while the iPhone has no link: wake it now instead of at the next pulse. */
+    private fun wakeForNews(what: String) {
+        mainHandler.post {
+            if (iPhoneLinked() || !shouldBeRunning || PairingStore.pairedClient() == null) return@post
+            if (android.os.SystemClock.elapsedRealtime() < pulseUntil) return@post
+            Log.i(TAG, "New $what while the iPhone has no link; waking it")
+            schedulePulse(0)
+        }
+    }
+
+    private fun linkChanged(quick: Boolean = false) {
         com.ilkay.redmigateway.service.IPhoneReachability.changed()
         mainHandler.post {
-            val linked = listeningCentrals() > 0 || com.ilkay.redmigateway.service.GatewayService.authenticatedClientCount() > 0
+            val linked = iPhoneLinked()
             if (linked || !shouldBeRunning || PairingStore.pairedClient() == null) {
                 if (reconnectPulses > 0 || pulseUntil != 0L) Log.i(TAG, "iPhone linked again; reconnect pulses stop")
                 mainHandler.removeCallbacks(reconnectPulse)
@@ -662,6 +684,9 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
                 reconnectPulses = 0
                 pulseUntil = 0L
                 updateCallBeacon()
+            } else if (quick) {
+                // The app turned call-state updates off: it was swiped away. Wake it at once.
+                schedulePulse(SWIPED_AWAY_GRACE_MS)
             } else if (!pulseScheduled) {
                 // A short grace first: Bluetooth restarts and range blips reconnect by themselves.
                 schedulePulse(RECONNECT_GRACE_MS)
@@ -670,8 +695,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     }
 
     private fun pulse() {
-        val linked = listeningCentrals() > 0 || com.ilkay.redmigateway.service.GatewayService.authenticatedClientCount() > 0
-        if (linked || !shouldBeRunning || PairingStore.pairedClient() == null) return
+        if (iPhoneLinked() || !shouldBeRunning || PairingStore.pairedClient() == null) return
         reconnectPulses++
         Log.i(TAG, "iPhone has no link; reconnect pulse $reconnectPulses")
         pulseUntil = android.os.SystemClock.elapsedRealtime() + PULSE_MS
@@ -691,7 +715,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         // iBeacon layout after Apple's company id: type 0x02, length 0x15, UUID, major, minor, power.
         val payload = java.nio.ByteBuffer.allocate(23)
             .put(0x02.toByte()).put(0x15.toByte()).put(uuid)
-            .putShort(1).putShort(1).put((-59).toByte()).array()
+            .putShort(nextBeaconMajor().toShort()).putShort(1).put((-59).toByte()).array()
         val data = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .setIncludeTxPowerLevel(false)
@@ -705,7 +729,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
             .build()
         val callback = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-                Log.i(TAG, "Call wake beacon on")
+                Log.i(TAG, "Call wake beacon on (major $beaconMajor)")
             }
 
             override fun onStartFailure(errorCode: Int) {
@@ -722,6 +746,11 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
             beaconCallback = null
             Log.w(TAG, "Call wake beacon failed: ${e.javaClass.simpleName}")
         }
+    }
+
+    private fun nextBeaconMajor(): Int {
+        beaconMajor = beaconMajor % BEACON_MAJORS + 1
+        return beaconMajor
     }
 
     private fun stopCallBeacon() {

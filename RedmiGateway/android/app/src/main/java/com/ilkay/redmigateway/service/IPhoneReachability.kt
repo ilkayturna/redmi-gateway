@@ -47,11 +47,15 @@ object IPhoneReachability {
                 "iPhone uygulaması açık. Aramalar, mesajlar ve ses anında iletilir.")
             Level.BLUETOOTH -> Status(level, "Bağlı · iPhone uykuda", "iPhone bağlı · uykuda",
                 "Bluetooth ile bağlı. Çağrılar iPhone'da çalar; açtığında ses ağ üzerinden hemen bağlanır.")
-            Level.PUSH -> Status(level, "Uzakta · ulaşılabilir", "iPhone uzakta · bildirimle ulaşılabilir",
-                "iPhone yakında değil. Çağrılar ve mesajlar Apple bildirimiyle iPhone'a gider.")
-            Level.OFFLINE -> Status(level, "Bağlı değil", "iPhone bağlı değil · çağrılar Redmi'de", buildString {
-                if (lastSeenAt > 0) append("Son bağlantı ${DateFormat.format("HH:mm", Date(lastSeenAt))}. ")
-                append("iPhone yakına gelince kendiliğinden bağlanır. O zamana kadar çağrılar Redmi'de çalar.")
+            Level.PUSH -> Status(level, "Apple bildirimiyle ulaşılır", "iPhone · Apple bildirimiyle ulaşılır",
+                "iPhone uygulaması kapalı ya da iPhone uzakta. Çağrılar ve mesajlar Apple bildirimiyle iPhone'a gider; " +
+                    "iPhone yakındaysa uygulama kendiliğinden yeniden bağlanır.")
+            Level.OFFLINE -> Status(level, "Bağlantı yok · uyandırılır", "iPhone uyandırılarak ulaşılır", buildString {
+                append("iPhone uygulaması kapalı ya da iPhone uzakta. Çağrı ya da SMS gelince Redmi iPhone'u " +
+                    "Bluetooth işaretiyle uyandırır; iPhone yakındaysa çalar ve bildirim gelir. Uygulama kısa sürede " +
+                    "kendiliğinden yeniden bağlanır.")
+                if (lastSeenAt > 0) append(" Son bağlantı ${DateFormat.format("HH:mm", Date(lastSeenAt))}.")
+                append(" Evden uzaktayken de gelmesi için Uzaktan kullanım bölümündeki Apple anahtarını yükle.")
             })
         }
     }

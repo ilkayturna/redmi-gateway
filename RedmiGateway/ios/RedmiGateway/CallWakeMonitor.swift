@@ -3,16 +3,24 @@ import Foundation
 import UIKit
 
 private let callWakeRegionIdentifier = "com.ilkay.redmigateway.call-wake"
+/// The Redmi cycles its beacon through these majors. iOS reports an entry only after it saw a
+/// region empty, so one region per major means a new wake never waits for the last one to end.
+private let callWakeMajors: [CLBeaconMajorValue] = [1, 2, 3, 4]
+
+private func isCallWakeRegion(_ region: CLRegion) -> Bool {
+    region.identifier == callWakeRegionIdentifier || region.identifier.hasPrefix(callWakeRegionIdentifier + ".")
+}
 
 /// Wakes the app for an incoming call, and brings back its Bluetooth link, even after the
 /// person swiped it away.
 ///
 /// iOS does not relaunch a swiped-away app for Bluetooth, but it does for iBeacon region
 /// monitoring. The Redmi advertises an iBeacon whose UUID is derived from the pairing key while
-/// a call rings that this iPhone has not yet shown, and for a few seconds now and then while
-/// this iPhone has no link at all. Entering that region launches the app in the background; it
-/// reconnects over Bluetooth, and a ringing call arrives as usual. Only proximity to the paired
-/// Redmi is observed; no location is read, stored or sent.
+/// a call rings that this iPhone has not yet shown, when an SMS or missed call arrives while this
+/// iPhone has no link, and for a few seconds now and then until the link is back. Entering the
+/// region launches the app in the background; it reconnects over Bluetooth, fetches new messages
+/// and calls, and a ringing call arrives as usual. Only proximity to the paired Redmi is
+/// observed; no location is read, stored or sent.
 @MainActor
 final class CallWakeMonitor: NSObject, ObservableObject {
     static let shared = CallWakeMonitor()
@@ -30,25 +38,34 @@ final class CallWakeMonitor: NSObject, ObservableObject {
 
     var isEnabled: Bool { authorization == .authorizedAlways }
 
-    /// Monitors the beacon of the current pairing, or nothing when unpaired or not allowed.
+    /// Monitors the beacons of the current pairing, or nothing when unpaired or not allowed.
     func refresh() {
         let wanted: UUID? = {
             guard let pairing = GatewayConnection.shared.pairing, authorization == .authorizedAlways,
                   CLLocationManager.isMonitoringAvailable(for: CLBeaconRegion.self) else { return nil }
             return Self.beaconUUID(for: pairing)
         }()
-        for region in manager.monitoredRegions where region.identifier == callWakeRegionIdentifier {
-            // Leave a correct region alone: a relaunch for its event must not lose that event.
-            if let beacon = region as? CLBeaconRegion, beacon.uuid == wanted { return }
-            manager.stopMonitoring(for: region)
+        var present = Set<CLBeaconMajorValue>()
+        for region in manager.monitoredRegions where isCallWakeRegion(region) {
+            // Leave correct regions alone: a relaunch for their event must not lose that event.
+            if let beacon = region as? CLBeaconRegion, let wanted, beacon.uuid == wanted,
+               let major = beacon.major?.uint16Value, callWakeMajors.contains(major),
+               beacon.identifier == "\(callWakeRegionIdentifier).\(major)" {
+                present.insert(major)
+            } else {
+                manager.stopMonitoring(for: region)
+            }
         }
         guard let wanted else { return }
-        let region = CLBeaconRegion(uuid: wanted, identifier: callWakeRegionIdentifier)
-        region.notifyOnEntry = true
-        region.notifyOnExit = true
-        region.notifyEntryStateOnDisplay = true
-        manager.startMonitoring(for: region)
-        GatewayConnection.shared.log("Call wake monitoring on")
+        let missing = callWakeMajors.filter { !present.contains($0) }
+        for major in missing {
+            let region = CLBeaconRegion(uuid: wanted, major: major, identifier: "\(callWakeRegionIdentifier).\(major)")
+            region.notifyOnEntry = true
+            region.notifyOnExit = true
+            region.notifyEntryStateOnDisplay = true
+            manager.startMonitoring(for: region)
+        }
+        if !missing.isEmpty { GatewayConnection.shared.log("Call wake monitoring on (\(callWakeMajors.count) regions)") }
     }
 
     /// Asks for "Always" location access, or opens Settings when iOS no longer asks.
@@ -99,12 +116,12 @@ extension CallWakeMonitor: CLLocationManagerDelegate {
     }
 
     nonisolated func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
-        guard region.identifier == callWakeRegionIdentifier else { return }
+        guard isCallWakeRegion(region) else { return }
         Task { @MainActor in CallWakeMonitor.shared.wake("entered") }
     }
 
     nonisolated func locationManager(_ manager: CLLocationManager, didDetermineState state: CLRegionState, for region: CLRegion) {
-        guard region.identifier == callWakeRegionIdentifier, state == .inside else { return }
+        guard isCallWakeRegion(region), state == .inside else { return }
         Task { @MainActor in CallWakeMonitor.shared.wake("inside") }
     }
 

@@ -195,7 +195,7 @@ class MainActivity : AppCompatActivity() {
         iphoneDetail.text = iphone.detail
         val apns = com.ilkay.redmigateway.push.ApnsSender
         remoteStatus.text = when {
-            apns.isReady -> "Hazır: aramalar ve mesajlar iPhone uzaktayken Apple üzerinden iletilir (anahtar ${apns.keyId})."
+            apns.isReady -> "Hazır: iPhone uygulaması kapalıyken ya da iPhone uzaktayken aramalar ve mesajlar Apple üzerinden iletilir (anahtar ${apns.keyId})."
             apns.hasKey -> "Anahtar yüklü (${apns.keyId}). iPhone uygulaması bir kez bağlanınca hazır olur."
             else -> "Apple bildirim anahtarı yok."
         }
