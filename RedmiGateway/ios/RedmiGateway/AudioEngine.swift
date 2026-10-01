@@ -14,18 +14,17 @@ final class AudioEngine {
     /// Technical events for the diagnostics log; never shown as call UI.
     var onLog: ((String) -> Void)?
     var onNeedsRestart: (() -> Void)?
-    private let muteLock = NSLock()
-    private var muted = false
+    private var captureMute = CallAudioCaptureMute()
     var isMuted: Bool {
         get {
-            muteLock.lock()
-            defer { muteLock.unlock() }
-            return muted
+            captureLock.lock()
+            defer { captureLock.unlock() }
+            return captureMute.isMuted
         }
         set {
-            muteLock.lock()
-            muted = newValue
-            muteLock.unlock()
+            captureLock.lock()
+            if captureMute.setMuted(newValue) { capturePacer.discardPending() }
+            captureLock.unlock()
         }
     }
     private(set) var isSpeakerEnabled = false
@@ -178,9 +177,11 @@ final class AudioEngine {
             engine.connect(player, to: engine.mainMixerNode, format: monoFormat)
 
             var pending: [Int16] = []
+            var pendingMuteGeneration: UInt64?
             let tapFrames = AVAudioFrameCount(max(256, Int(inputFormat.sampleRate / 50)))
             input.installTap(onBus: 0, bufferSize: tapFrames, format: inputFormat) { [weak self] buffer, when in
                 guard let self else { return }
+                let captureMute = self.captureMuteSnapshot()
                 let now = Self.monotonicNow()
                 let capturedAt = when.isHostTimeValid
                     ? min(now, AVAudioTime.seconds(forHostTime: when.hostTime)
@@ -201,6 +202,8 @@ final class AudioEngine {
                 }
                 guard conversionError == nil, converted.frameLength > 0,
                       let channel = converted.floatChannelData?[0] else { return }
+                if pendingMuteGeneration != captureMute.generation { pending.removeAll() }
+                pendingMuteGeneration = captureMute.generation
                 for index in 0..<Int(converted.frameLength) {
                     pending.append(Int16(max(-1, min(1, channel[index])) * 32767))
                 }
@@ -211,7 +214,7 @@ final class AudioEngine {
                     frames.append(frame)
                 }
                 self.enqueueCapture(frames, capturedAt: capturedAt - Double(pending.count) / self.sampleRate,
-                                    generation: generation)
+                                    generation: generation, captureMute: captureMute)
             }
             tapInstalled = true
             engine.prepare()
@@ -275,7 +278,12 @@ final class AudioEngine {
                     self.captureLock.unlock()
                     if let frame { self.sendPcm(frame) }
                 }
-                self.captureTimer?.schedule(deadline: .now() + .milliseconds(20), leeway: .milliseconds(1))
+                self.captureLock.lock()
+                let wakeUp = self.capturePacer.nextWakeUp(now: Self.monotonicNow())
+                self.captureLock.unlock()
+                let delay = max(0, wakeUp - Self.monotonicNow())
+                self.captureTimer?.schedule(deadline: .now() + .nanoseconds(Int(ceil(delay * 1_000_000_000))),
+                                            leeway: .milliseconds(1))
             }
             self.captureTimer = captureTimer
             captureTimer.resume()
@@ -349,9 +357,18 @@ final class AudioEngine {
         AVAudioTime.seconds(forHostTime: mach_absolute_time())
     }
 
-    private func enqueueCapture(_ frames: [[Int16]], capturedAt: TimeInterval, generation: UInt64) {
+    private func captureMuteSnapshot() -> CallAudioCaptureMute {
         captureLock.lock()
-        capturePacer.enqueue(frames, capturedAt: capturedAt,
+        defer { captureLock.unlock() }
+        return captureMute
+    }
+
+    private func enqueueCapture(_ frames: [[Int16]], capturedAt: TimeInterval, generation: UInt64,
+                                captureMute snapshot: CallAudioCaptureMute) {
+        captureLock.lock()
+        let protectedFrames = captureMute.filter(frames, capturedGeneration: snapshot.generation,
+                                                capturedWhileMuted: snapshot.isMuted)
+        capturePacer.enqueue(protectedFrames, capturedAt: capturedAt,
                              now: Self.monotonicNow(), generation: generation)
         captureLock.unlock()
     }

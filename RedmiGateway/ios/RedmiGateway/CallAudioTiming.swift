@@ -22,6 +22,15 @@ struct CallAudioPacer<Frame> {
         generation &+= 1
     }
 
+    mutating func discardPending() {
+        // Existing queued speech is retained until the mute regression proves the leak.
+    }
+
+    func nextWakeUp(now: TimeInterval) -> TimeInterval {
+        // This first preserves AudioEngine's relative one-shot timer for the cadence test.
+        now + interval
+    }
+
     mutating func enqueue(_ batch: [Frame], capturedAt: TimeInterval,
                           now: TimeInterval, generation: UInt64) {
         guard generation == self.generation else { return }
@@ -60,6 +69,24 @@ struct CallAudioPacer<Frame> {
         if frames.isEmpty {
             primed = false
         }
+    }
+}
+
+/// The capture tap takes a snapshot; an intervening mute toggle invalidates that PCM.
+struct CallAudioCaptureMute {
+    private(set) var isMuted = false
+    private(set) var generation: UInt64 = 0
+
+    mutating func setMuted(_ value: Bool) -> Bool {
+        guard isMuted != value else { return false }
+        isMuted = value
+        generation &+= 1
+        return true
+    }
+
+    func filter(_ frames: [[Int16]], capturedGeneration: UInt64,
+                capturedWhileMuted: Bool) -> [[Int16]] {
+        frames
     }
 }
 

@@ -15,13 +15,17 @@ struct CallAudioTimingTests {
         schedulerStallDoesNotCatchUp()
         microphoneReprimesAfterStarvation()
         reloadedReserveCannotBypassPacing()
+        timerCadenceSurvivesHandlerCostAndWakeJitter()
+        midIntervalStallCannotEmitCloseCatchUp()
+        discardedReserveCannotReplaySpeech()
+        mutedCaptureCannotReplayAfterUnmute()
         staleAndOverflowingCaptureIsDiscarded()
         staleCaptureCannotEnterRestartedStream()
         playbackReprimesAfterShortGap()
         oldPlaybackCompletionCannotDrainNewStream()
         playbackCapacityStaysBounded()
         if failures != 0 { print("\(failures) audio timing regression(s)"); exit(1) }
-        print("PASS: 9 call audio timing regressions")
+        print("PASS: 13 call audio timing regressions")
     }
 
     // Break caught: emitting every frame from one tap callback at the same instant.
@@ -96,6 +100,77 @@ struct CallAudioTimingTests {
         expect(pacer.next(now: 0.08) == nil, "fresh reserve cannot burst after a drain")
         expect(pacer.next(now: 0.099) == nil, "fresh reserve retains the complete interval")
         expect(pacer.next(now: 0.1) == 4, "fresh reserve resumes at its due time")
+    }
+
+    // Break caught: rearming now+20ms adds every tick's wake jitter and handler
+    // cost to the producer's20ms sample period, filling the queue and dropping speech.
+    static func timerCadenceSurvivesHandlerCostAndWakeJitter() {
+        var pacer = CallAudioPacer<Int>()
+        var captured = 0
+        var captureAt = 0.02
+        var wake = 0.02
+        var sent: [(Int, Double)] = []
+        let wakeDelays = [0.0005, 0.001, 0.0001, 0.0008]
+        while wake < 30 {
+            while captureAt <= wake + 0.000000001 {
+                pacer.enqueue([captured], capturedAt: captureAt, now: wake, generation: pacer.generation)
+                captured += 1
+                captureAt = Double(captured + 1) * 0.02
+            }
+            if let frame = pacer.next(now: wake) { sent.append((frame, wake)) }
+            expect(pacer.next(now: wake) == nil, "jittered wake never emits a second packet")
+            // 0.5ms encryption/handler work, then at most1ms timer wake delay.
+            wake = pacer.nextWakeUp(now: wake + 0.0005) + wakeDelays[sent.count % wakeDelays.count]
+        }
+        expect(sent.count >= 1470, "30-second capture sustains at least49 PCM frames per second")
+        expect(sent.enumerated().allSatisfy { $0.offset == $0.element.0 },
+               "normal timer jitter never overflows or expires ordered speech")
+        expect(zip(sent, sent.dropFirst()).allSatisfy { $0.1.1 - $0.0.1 >= 0.018 },
+               "ordinary timer jitter preserves bounded packet separation")
+    }
+
+    // Break caught: preserving a nominal deadline after a19ms-late wake emits
+    // the next packet1ms later, even though a full catch-up loop was removed.
+    static func midIntervalStallCannotEmitCloseCatchUp() {
+        var pacer = CallAudioPacer<Int>()
+        pacer.enqueue(Array(0..<10), capturedAt: 0.2, now: 0.2, generation: pacer.generation)
+        _ = pacer.next(now: 0.2)
+        expect(pacer.next(now: 0.239) == 1, "late wake emits one frame")
+        expect(pacer.nextWakeUp(now: 0.2395) >= 0.258999, "late wake restores a full paced interval")
+        expect(pacer.next(now: 0.24) == nil, "missed phase cannot cause1ms catch-up packet")
+    }
+
+    // Break caught: mute toggles retain the paced reserve and replay old speech.
+    static func discardedReserveCannotReplaySpeech() {
+        var pacer = CallAudioPacer<Int>()
+        pacer.enqueue([1, 2, 3], capturedAt: 0.1, now: 0.1, generation: pacer.generation)
+        _ = pacer.next(now: 0.1)
+        let generation = pacer.generation
+        pacer.discardPending()
+        expect(pacer.next(now: 0.12) == nil, "discarded reserve contains no retained speech")
+        expect(pacer.generation == generation, "mute discard keeps the live tap generation")
+        pacer.enqueue([4, 5, 6], capturedAt: 0.14, now: 0.14, generation: generation)
+        expect(pacer.next(now: 0.14) == 4, "mute discard accepts a fresh reserve")
+    }
+
+    // Break caught: captured muted speech is held as real PCM and escapes on unmute,
+    // or a tap callback started before a mute toggle enqueues afterwards.
+    static func mutedCaptureCannotReplayAfterUnmute() {
+        var control = CallAudioCaptureMute()
+        let speech: [[Int16]] = [[123, -456, 789]]
+        let silence: [[Int16]] = [[0, 0, 0]]
+        let old = control.generation
+        _ = control.setMuted(true)
+        let muted = control.generation
+        expect(control.filter(speech, capturedGeneration: muted, capturedWhileMuted: true) == silence,
+               "muted microphone PCM becomes silence before buffering")
+        _ = control.setMuted(false)
+        expect(control.filter(speech, capturedGeneration: muted, capturedWhileMuted: true) == silence,
+               "unmute cannot replay captured private speech")
+        expect(control.filter(speech, capturedGeneration: old, capturedWhileMuted: false) == silence,
+               "late tap crossing a mute transition cannot revive old speech")
+        expect(control.filter(speech, capturedGeneration: control.generation, capturedWhileMuted: false) == speech,
+               "fresh unmuted capture retains real speech")
     }
 
     // Break caught: an old input tap closure appending PCM after stop/start.
