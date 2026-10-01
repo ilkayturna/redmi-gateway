@@ -45,6 +45,8 @@ jobs:
             -derivedDataPath derived_data \
             CODE_SIGNING_ALLOWED=NO \
             clean build
+          test -f derived_data/Build/Products/Debug-iphonesimulator/RedmiGateway.app/PrivacyInfo.xcprivacy
+          plutil -lint derived_data/Build/Products/Debug-iphonesimulator/RedmiGateway.app/PrivacyInfo.xcprivacy
       - name: Launch iPhone simulator and capture screen
         shell: bash
         run: |
