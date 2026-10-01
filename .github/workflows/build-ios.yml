@@ -27,6 +27,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Xcode version
         run: xcodebuild -version
+      - name: Test call audio timing
+        shell: bash
+        run: |
+          set -euo pipefail
+          swiftc RedmiGateway/ios/RedmiGateway/CallAudioTiming.swift \
+            RedmiGateway/ios/Tests/CallAudioTimingTests.swift \
+            -o "$RUNNER_TEMP/call-audio-timing-tests"
+          "$RUNNER_TEMP/call-audio-timing-tests"
       - name: Build for iOS Simulator
         run: |
           xcodebuild \

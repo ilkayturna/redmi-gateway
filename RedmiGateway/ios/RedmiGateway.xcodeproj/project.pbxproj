@@ -28,6 +28,7 @@
 		1019 /* CallWakeMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2020 /* CallWakeMonitor.swift */; };
 		1020 /* Notifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2021 /* Notifier.swift */; };
 		1021 /* VoipPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2022 /* VoipPush.swift */; };
+		1022 /* CallAudioTiming.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2023 /* CallAudioTiming.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -54,6 +55,7 @@
 		2020 /* CallWakeMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallWakeMonitor.swift; sourceTree = "<group>"; };
 		2021 /* Notifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notifier.swift; sourceTree = "<group>"; };
 		2022 /* VoipPush.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoipPush.swift; sourceTree = "<group>"; };
+		2023 /* CallAudioTiming.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallAudioTiming.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -100,6 +102,7 @@
 				2020 /* CallWakeMonitor.swift */,
 				2021 /* Notifier.swift */,
 				2022 /* VoipPush.swift */,
+				2023 /* CallAudioTiming.swift */,
 				2009 /* Info.plist */,
 			);
 			path = RedmiGateway;
@@ -209,6 +212,7 @@
 				1019 /* CallWakeMonitor.swift in Sources */,
 				1020 /* Notifier.swift in Sources */,
 				1021 /* VoipPush.swift in Sources */,
+				1022 /* CallAudioTiming.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

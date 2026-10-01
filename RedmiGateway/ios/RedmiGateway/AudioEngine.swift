@@ -31,9 +31,8 @@ final class AudioEngine {
     /// Packet counters live as long as the session: a GCM nonce must never repeat under one key.
     private var txCounter: UInt32 = 0
     private var rxLastCounter: UInt32 = 0
-    private var playbackPrimed = false
-    private var playbackQueue: [Data] = []
-    private var queuedBuffers = 0
+    private var capturePacer = CallAudioPacer<[Int16]>()
+    private var playbackBuffer = CallAudioPlaybackBuffer<Data>()
     private var lastDownlink: Date?
     private var lastPcmSentAt: Date?
     private var recoveryRequested = false
@@ -179,7 +178,7 @@ final class AudioEngine {
                 while pending.count >= self.frameSamples {
                     let frame = Array(pending.prefix(self.frameSamples))
                     pending.removeFirst(self.frameSamples)
-                    self.networkQueue.async { [weak self] in self?.sendPcm(frame) }
+                    self.networkQueue.async { [weak self] in self?.enqueueCapture(frame) }
                 }
             }
             tapInstalled = true
@@ -203,9 +202,8 @@ final class AudioEngine {
             self.lastSession = session
             self.lastKey = key
             self.sealer = MediaSealer(key: key, session: session)
-            self.playbackPrimed = false
-            self.playbackQueue.removeAll()
-            self.queuedBuffers = 0
+            self.capturePacer.reset()
+            self.playbackBuffer.reset()
             self.lastDownlink = nil
             self.lastPcmSentAt = Date()
             self.recoveryRequested = false
@@ -268,8 +266,8 @@ final class AudioEngine {
             self.connection?.cancel()
             self.connection = nil
             self.sealer = nil
-            self.playbackQueue.removeAll()
-            self.playbackPrimed = false
+            self.capturePacer.reset()
+            self.playbackBuffer.reset()
             self.lastPcmSentAt = nil
             self.lastDownlink = nil
         }
@@ -286,6 +284,12 @@ final class AudioEngine {
     }
 
     // MARK: - networkQueue
+
+    private func enqueueCapture(_ samples: [Int16]) {
+        let now = Date.timeIntervalSinceReferenceDate
+        capturePacer.enqueue([samples], capturedAt: now, now: now, generation: capturePacer.generation)
+        while let frame = capturePacer.next(now: now) { sendPcm(frame) }
+    }
 
     private func sendPcm(_ samples: [Int16]) {
         guard sealer != nil else { return }
@@ -325,21 +329,15 @@ final class AudioEngine {
 
     private func enqueuePlayback(_ pcm: Data) {
         let now = Date()
-        if let last = lastDownlink, now.timeIntervalSince(last) > 0.5 {
-            playbackQueue.removeAll()
-            playbackPrimed = false
-        }
         lastDownlink = now
-        playbackQueue.append(pcm)
-        if !playbackPrimed && playbackQueue.count >= 3 { playbackPrimed = true }
-        if playbackPrimed {
-            while !playbackQueue.isEmpty { schedulePlayback(playbackQueue.removeFirst()) }
+        for frame in playbackBuffer.enqueue(pcm, now: now.timeIntervalSinceReferenceDate) {
+            schedulePlayback(frame)
         }
     }
 
     private func schedulePlayback(_ pcm: Data) {
-        guard queuedBuffers < 12,
-              let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
+        let generation = playbackBuffer.generation
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
                                          channels: 1, interleaved: false),
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(pcm.count / 2)),
               let channel = buffer.floatChannelData?[0] else { return }
@@ -350,11 +348,10 @@ final class AudioEngine {
             let bits = UInt16(bytes[index * 2]) | (UInt16(bytes[index * 2 + 1]) << 8)
             channel[index] = Float(Int16(bitPattern: bits)) / 32768
         }
-        queuedBuffers += 1
         player.scheduleBuffer(buffer) { [weak self] in
             self?.networkQueue.async { [weak self] in
                 guard let self else { return }
-                self.queuedBuffers = max(0, self.queuedBuffers - 1)
+                self.playbackBuffer.completed(generation: generation)
             }
         }
     }
