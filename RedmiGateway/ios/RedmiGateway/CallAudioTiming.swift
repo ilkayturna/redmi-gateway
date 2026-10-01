@@ -1,24 +1,65 @@
 import Foundation
 
-/// The call's PCM queues are owned by AudioEngine.networkQueue.
-/// This extraction first preserves the original immediate-send and playback behavior,
-/// so the timing regressions exercise the same helper used by the real audio graph.
+/// Bounded PCM timing, independent of AVFoundation and the wall clock.
+/// AudioEngine protects capture with a lock; playback belongs to its network queue.
 struct CallAudioPacer<Frame> {
-    private var frames: [Frame] = []
+    private struct Capture {
+        let frame: Frame
+        let capturedAt: TimeInterval
+    }
+    private let interval: TimeInterval = 0.02
+    private let maximumAge: TimeInterval = 0.32
+    private let capacity = 12
+    private var frames: [Capture] = []
+    private var primed = false
+    private var nextSendAt: TimeInterval?
     private(set) var generation: UInt64 = 0
 
     mutating func reset() {
         frames.removeAll()
+        primed = false
+        nextSendAt = nil
         generation &+= 1
     }
 
     mutating func enqueue(_ batch: [Frame], capturedAt: TimeInterval,
                           now: TimeInterval, generation: UInt64) {
-        frames.append(contentsOf: batch)
+        guard generation == self.generation else { return }
+        discardExpired(now: now)
+        for (index, frame) in batch.enumerated() {
+            // capturedAt is the end of the batch, stamped before conversion or dispatch.
+            let timestamp = capturedAt - Double(batch.count - index - 1) * interval
+            if now - timestamp <= maximumAge {
+                frames.append(Capture(frame: frame, capturedAt: timestamp))
+            }
+        }
+        if frames.count > capacity { frames.removeFirst(frames.count - capacity) }
     }
 
     mutating func next(now: TimeInterval) -> Frame? {
-        frames.isEmpty ? nil : frames.removeFirst()
+        discardExpired(now: now)
+        if !primed {
+            guard frames.count >= 3 else { return nil }
+            primed = true
+        }
+        if let nextSendAt, now + 0.000000001 < nextSendAt { return nil }
+        guard !frames.isEmpty else { return nil }
+        let frame = frames.removeFirst().frame
+        // A delayed wake-up advances from real time, never from an obsolete deadline.
+        nextSendAt = now + interval
+        if frames.isEmpty {
+            primed = false
+        }
+        return frame
+    }
+
+    private mutating func discardExpired(now: TimeInterval) {
+        while let first = frames.first, now - first.capturedAt > maximumAge {
+            frames.removeFirst()
+        }
+        if frames.isEmpty {
+            primed = false
+        }
     }
 }
 
@@ -62,6 +103,9 @@ struct CallAudioPlaybackBuffer<Frame> {
     }
 
     mutating func completed(generation: UInt64) {
+        guard generation == self.generation else { return }
         scheduledFrames = max(0, scheduledFrames - 1)
+        // Reserve is restored after the device actually played the last queued frame.
+        if scheduledFrames == 0 { primed = false }
     }
 }

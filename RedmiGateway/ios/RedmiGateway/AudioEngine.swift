@@ -1,4 +1,5 @@
 import AVFoundation
+import Darwin
 import Foundation
 import Network
 
@@ -13,7 +14,20 @@ final class AudioEngine {
     /// Technical events for the diagnostics log; never shown as call UI.
     var onLog: ((String) -> Void)?
     var onNeedsRestart: (() -> Void)?
-    var isMuted = false
+    private let muteLock = NSLock()
+    private var muted = false
+    var isMuted: Bool {
+        get {
+            muteLock.lock()
+            defer { muteLock.unlock() }
+            return muted
+        }
+        set {
+            muteLock.lock()
+            muted = newValue
+            muteLock.unlock()
+        }
+    }
     private(set) var isSpeakerEnabled = false
 
     private let sampleRate: Double = 16_000
@@ -25,17 +39,24 @@ final class AudioEngine {
     // networkQueue state
     private var connection: NWConnection?
     private var heartbeat: DispatchSourceTimer?
+    private var captureTimer: DispatchSourceTimer?
+    private var activeGeneration: UInt64?
+    private var pendingSends = 0
     private var sealer: MediaSealer?
     private var lastSession: UInt32 = 0
     private var lastKey = Data()
     /// Packet counters live as long as the session: a GCM nonce must never repeat under one key.
     private var txCounter: UInt32 = 0
     private var rxLastCounter: UInt32 = 0
-    private var capturePacer = CallAudioPacer<[Int16]>()
     private var playbackBuffer = CallAudioPlaybackBuffer<Data>()
     private var lastDownlink: Date?
     private var lastPcmSentAt: Date?
     private var recoveryRequested = false
+
+    // The tap deposits directly into this bounded queue, so a stalled network queue
+    // cannot retain an unbounded number of async closures containing microphone PCM.
+    private let captureLock = NSLock()
+    private var capturePacer = CallAudioPacer<[Int16]>()
 
     // main queue state
     private var tapInstalled = false
@@ -139,6 +160,9 @@ final class AudioEngine {
             log("Invalid audio endpoint")
             return
         }
+        captureLock.lock()
+        let generation = capturePacer.generation
+        captureLock.unlock()
         do {
             let input = engine.inputNode
             try? input.setVoiceProcessingEnabled(true)
@@ -155,8 +179,13 @@ final class AudioEngine {
 
             var pending: [Int16] = []
             let tapFrames = AVAudioFrameCount(max(256, Int(inputFormat.sampleRate / 50)))
-            input.installTap(onBus: 0, bufferSize: tapFrames, format: inputFormat) { [weak self] buffer, _ in
+            input.installTap(onBus: 0, bufferSize: tapFrames, format: inputFormat) { [weak self] buffer, when in
                 guard let self else { return }
+                let now = Self.monotonicNow()
+                let capturedAt = when.isHostTimeValid
+                    ? min(now, AVAudioTime.seconds(forHostTime: when.hostTime)
+                               + Double(buffer.frameLength) / inputFormat.sampleRate)
+                    : now
                 let capacity = AVAudioFrameCount(Int(ceil(Double(buffer.frameLength) * self.sampleRate / inputFormat.sampleRate)) + 32)
                 guard let converted = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: capacity) else { return }
                 var fed = false
@@ -175,11 +204,14 @@ final class AudioEngine {
                 for index in 0..<Int(converted.frameLength) {
                     pending.append(Int16(max(-1, min(1, channel[index])) * 32767))
                 }
+                var frames: [[Int16]] = []
                 while pending.count >= self.frameSamples {
                     let frame = Array(pending.prefix(self.frameSamples))
                     pending.removeFirst(self.frameSamples)
-                    self.networkQueue.async { [weak self] in self?.enqueueCapture(frame) }
+                    frames.append(frame)
                 }
+                self.enqueueCapture(frames, capturedAt: capturedAt - Double(pending.count) / self.sampleRate,
+                                    generation: generation)
             }
             tapInstalled = true
             engine.prepare()
@@ -202,7 +234,8 @@ final class AudioEngine {
             self.lastSession = session
             self.lastKey = key
             self.sealer = MediaSealer(key: key, session: session)
-            self.capturePacer.reset()
+            self.activeGeneration = generation
+            self.pendingSends = 0
             self.playbackBuffer.reset()
             self.lastDownlink = nil
             self.lastPcmSentAt = Date()
@@ -228,10 +261,29 @@ final class AudioEngine {
             }
             socket.start(queue: self.networkQueue)
 
+            // A one-shot is rearmed after each wake-up. Repeating deadlines can be
+            // early after a late tick and accidentally halve a strict 20 ms pacer's rate.
+            let captureTimer = DispatchSource.makeTimerSource(queue: self.networkQueue)
+            captureTimer.schedule(deadline: .now() + .milliseconds(20), leeway: .milliseconds(1))
+            captureTimer.setEventHandler { [weak self, weak socket] in
+                guard let self, let socket, self.connection === socket,
+                      self.activeGeneration == generation else { return }
+                if self.pendingSends < 3 {
+                    self.captureLock.lock()
+                    let frame = self.capturePacer.generation == generation
+                        ? self.capturePacer.next(now: Self.monotonicNow()) : nil
+                    self.captureLock.unlock()
+                    if let frame { self.sendPcm(frame) }
+                }
+                self.captureTimer?.schedule(deadline: .now() + .milliseconds(20), leeway: .milliseconds(1))
+            }
+            self.captureTimer = captureTimer
+            captureTimer.resume()
+
             let timer = DispatchSource.makeTimerSource(queue: self.networkQueue)
             timer.schedule(deadline: .now() + 1, repeating: 1)
             timer.setEventHandler { [weak self] in
-                guard let self else { return }
+                guard let self, self.activeGeneration == generation else { return }
                 self.sendPacket(type: 0, pcm: Data())
                 if let last = self.lastPcmSentAt, Date().timeIntervalSince(last) > 3, !self.recoveryRequested {
                     self.recoveryRequested = true
@@ -244,6 +296,12 @@ final class AudioEngine {
     }
 
     func stop(preservingControls: Bool = false) {
+        captureLock.lock()
+        capturePacer.reset()
+        // schedulePlayback uses this lock too: no old receive can schedule a buffer
+        // after this stop and leave it waiting for the following player.play().
+        player.stop()
+        captureLock.unlock()
         if !preservingControls {
             isMuted = false
             isSpeakerEnabled = false
@@ -255,7 +313,6 @@ final class AudioEngine {
             tapInstalled = false
         }
         if running {
-            player.stop()
             engine.stop()
             running = false
         }
@@ -263,10 +320,13 @@ final class AudioEngine {
             guard let self else { return }
             self.heartbeat?.cancel()
             self.heartbeat = nil
+            self.captureTimer?.cancel()
+            self.captureTimer = nil
+            self.activeGeneration = nil
+            self.pendingSends = 0
             self.connection?.cancel()
             self.connection = nil
             self.sealer = nil
-            self.capturePacer.reset()
             self.playbackBuffer.reset()
             self.lastPcmSentAt = nil
             self.lastDownlink = nil
@@ -285,10 +345,15 @@ final class AudioEngine {
 
     // MARK: - networkQueue
 
-    private func enqueueCapture(_ samples: [Int16]) {
-        let now = Date.timeIntervalSinceReferenceDate
-        capturePacer.enqueue([samples], capturedAt: now, now: now, generation: capturePacer.generation)
-        while let frame = capturePacer.next(now: now) { sendPcm(frame) }
+    private static func monotonicNow() -> TimeInterval {
+        AVAudioTime.seconds(forHostTime: mach_absolute_time())
+    }
+
+    private func enqueueCapture(_ frames: [[Int16]], capturedAt: TimeInterval, generation: UInt64) {
+        captureLock.lock()
+        capturePacer.enqueue(frames, capturedAt: capturedAt,
+                             now: Self.monotonicNow(), generation: generation)
+        captureLock.unlock()
     }
 
     private func sendPcm(_ samples: [Int16]) {
@@ -301,17 +366,24 @@ final class AudioEngine {
             pcm.append(UInt8(truncatingIfNeeded: bits))
             pcm.append(UInt8(truncatingIfNeeded: bits >> 8))
         }
-        sendPacket(type: 1, pcm: pcm)
-        lastPcmSentAt = Date()
+        if sendPacket(type: 1, pcm: pcm) { lastPcmSentAt = Date() }
     }
 
-    private func sendPacket(type: UInt8, pcm: Data) {
-        guard let sealer, let socket = connection else { return }
+    @discardableResult
+    private func sendPacket(type: UInt8, pcm: Data) -> Bool {
+        guard pendingSends < 3, let sealer, let socket = connection else { return false }
         txCounter &+= 1
         let hearing = lastDownlink.map { Date().timeIntervalSince($0) < 0.5 } ?? false
         guard let packet = sealer.seal(type: type, flags: hearing ? MediaSealer.flagHearing : 0,
-                                       counter: txCounter, payload: pcm) else { return }
-        socket.send(content: packet, completion: .contentProcessed { _ in })
+                                       counter: txCounter, payload: pcm) else { return false }
+        pendingSends += 1
+        socket.send(content: packet, completion: .contentProcessed { [weak self, weak socket] _ in
+            self?.networkQueue.async { [weak self, weak socket] in
+                guard let self, let socket, self.connection === socket else { return }
+                self.pendingSends = max(0, self.pendingSends - 1)
+            }
+        })
+        return true
     }
 
     private func receive(on socket: NWConnection) {
@@ -330,7 +402,7 @@ final class AudioEngine {
     private func enqueuePlayback(_ pcm: Data) {
         let now = Date()
         lastDownlink = now
-        for frame in playbackBuffer.enqueue(pcm, now: now.timeIntervalSinceReferenceDate) {
+        for frame in playbackBuffer.enqueue(pcm, now: Self.monotonicNow()) {
             schedulePlayback(frame)
         }
     }
@@ -340,7 +412,10 @@ final class AudioEngine {
         guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
                                          channels: 1, interleaved: false),
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(pcm.count / 2)),
-              let channel = buffer.floatChannelData?[0] else { return }
+              let channel = buffer.floatChannelData?[0] else {
+            playbackBuffer.completed(generation: generation)
+            return
+        }
         let bytes = [UInt8](pcm)
         let count = bytes.count / 2
         buffer.frameLength = AVAudioFrameCount(count)
@@ -348,7 +423,13 @@ final class AudioEngine {
             let bits = UInt16(bytes[index * 2]) | (UInt16(bytes[index * 2 + 1]) << 8)
             channel[index] = Float(Int16(bitPattern: bits)) / 32768
         }
-        player.scheduleBuffer(buffer) { [weak self] in
+        captureLock.lock()
+        defer { captureLock.unlock() }
+        guard let activeGeneration, capturePacer.generation == activeGeneration else {
+            playbackBuffer.completed(generation: generation)
+            return
+        }
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             self?.networkQueue.async { [weak self] in
                 guard let self else { return }
                 self.playbackBuffer.completed(generation: generation)

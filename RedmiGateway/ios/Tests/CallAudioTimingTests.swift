@@ -14,13 +14,14 @@ struct CallAudioTimingTests {
         captureBatchesArePaced()
         schedulerStallDoesNotCatchUp()
         microphoneReprimesAfterStarvation()
+        reloadedReserveCannotBypassPacing()
         staleAndOverflowingCaptureIsDiscarded()
         staleCaptureCannotEnterRestartedStream()
         playbackReprimesAfterShortGap()
         oldPlaybackCompletionCannotDrainNewStream()
         playbackCapacityStaysBounded()
         if failures != 0 { print("\(failures) audio timing regression(s)"); exit(1) }
-        print("PASS: 8 call audio timing regressions")
+        print("PASS: 9 call audio timing regressions")
     }
 
     // Break caught: emitting every frame from one tap callback at the same instant.
@@ -82,6 +83,19 @@ struct CallAudioTimingTests {
         expect(pacer.next(now: 1.0) == nil, "expired speech cannot leave the sender")
         pacer.enqueue([21, 22, 23], capturedAt: 0.5, now: 1.0, generation: pacer.generation)
         expect(pacer.next(now: 1.0) == nil, "delayed capture work cannot revive stale speech")
+    }
+
+    // Break caught: draining a reserve clears the last send deadline, allowing
+    // another newly captured reserve to emit a packet at the same instant.
+    static func reloadedReserveCannotBypassPacing() {
+        var pacer = CallAudioPacer<Int>()
+        pacer.enqueue([1, 2, 3], capturedAt: 0.04, now: 0.04, generation: pacer.generation)
+        _ = pacer.next(now: 0.04); _ = pacer.next(now: 0.06)
+        expect(pacer.next(now: 0.08) == 3, "old reserve finishes")
+        pacer.enqueue([4, 5, 6], capturedAt: 0.08, now: 0.08, generation: pacer.generation)
+        expect(pacer.next(now: 0.08) == nil, "fresh reserve cannot burst after a drain")
+        expect(pacer.next(now: 0.099) == nil, "fresh reserve retains the complete interval")
+        expect(pacer.next(now: 0.1) == 4, "fresh reserve resumes at its due time")
     }
 
     // Break caught: an old input tap closure appending PCM after stop/start.
