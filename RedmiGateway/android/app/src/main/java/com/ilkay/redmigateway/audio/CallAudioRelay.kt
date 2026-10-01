@@ -24,8 +24,6 @@ import java.net.SocketAddress
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
-import java.util.concurrent.ArrayBlockingQueue
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -92,9 +90,6 @@ object CallAudioRelay : CallManager.CallListener {
     private const val MONITOR_INTERVAL_MS = 250L
     private const val IPHONE_SILENCE_LIMIT_MS = 900L
     private const val MIN_FRAMES_PER_SECOND = 38
-    private const val MAX_QUEUED_FRAMES = 8
-    private const val TRIM_ABOVE_FRAMES = 4
-    private const val TRIM_AFTER_MS = 500L
 
     private val listeners = java.util.concurrent.CopyOnWriteArrayList<Listener>()
     private val random = SecureRandom()
@@ -126,7 +121,7 @@ object CallAudioRelay : CallManager.CallListener {
     @Volatile private var mediaRunning = false
     private var writerThread: Thread? = null
     private var senderThread: Thread? = null
-    private val uplinkQueue = ArrayBlockingQueue<ByteArray>(14)
+    private val uplinkQueue = UplinkJitterBuffer()
     private val upsampler = Upsampler3x()
     @Volatile private var isolationApplied = false
     private var listeningToCalls = false
@@ -154,8 +149,6 @@ object CallAudioRelay : CallManager.CallListener {
     private val silenceLimitMs get() = if (remoteLink) 3_000L else IPHONE_SILENCE_LIMIT_MS
     private val deafLimitMs get() = if (remoteLink) 5_000L else IPHONE_DEAF_LIMIT_MS
     private val stallWindows get() = if (remoteLink) 4 else 2
-    private val maxQueuedFrames get() = if (remoteLink) 12 else MAX_QUEUED_FRAMES
-    private val trimAboveFrames get() = if (remoteLink) 6 else TRIM_ABOVE_FRAMES
 
     private fun isRemoteAddress(address: InetAddress?): Boolean {
         if (address == null || address.isLoopbackAddress || address.isLinkLocalAddress) return false
@@ -178,13 +171,17 @@ object CallAudioRelay : CallManager.CallListener {
     }
     private val iphoneFrames = AtomicInteger()
     private val uplinkWrites = AtomicInteger()
+    private val uplinkPcmWrites = AtomicInteger()
+    private val insertedSilenceWrites = AtomicInteger()
+    private val partialUplinkWrites = AtomicInteger()
     private val downlinkReads = AtomicInteger()
-    private val droppedFrames = AtomicInteger()
-    private val underruns = AtomicInteger()
     private var lastHealthLogAt = 0L
     @Volatile private var maxWriteMs = 0L
     private var windowIPhone = 0
     private var windowWrites = 0
+    private var windowPcmWrites = 0
+    private var windowSilenceWrites = 0
+    private var windowPartialWrites = 0
     private var windowReads = 0
     private var windowStartedAt = 0L
 
@@ -200,21 +197,30 @@ object CallAudioRelay : CallManager.CallListener {
     }
 
     /** Snapshot for Diagnostics; no audio content. */
-    fun diagnostics(): Map<String, Any> = mapOf(
-        "owner" to owner.name,
-        "reason" to lastReason,
-        "session" to (session != 0),
-        "mediaRunning" to mediaRunning,
-        "isolation" to isolationApplied,
-        "iphoneFramesPerSecond" to windowIPhone,
-        "uplinkFramesPerSecond" to windowWrites,
-        "downlinkFramesPerSecond" to windowReads,
-        "droppedFrames" to droppedFrames.get(),
-        "sealed" to (mediaKey != null),
-        "rejectedPackets" to rejectedPackets.get(),
-        "underruns" to underruns.get(),
-        "maxWriteMs" to maxWriteMs
-    )
+    fun diagnostics(): Map<String, Any> {
+        val queue = uplinkQueue.snapshot()
+        return mapOf(
+            "owner" to owner.name,
+            "reason" to lastReason,
+            "session" to (session != 0),
+            "mediaRunning" to mediaRunning,
+            "isolation" to isolationApplied,
+            "iphoneFramesPerSecond" to windowIPhone,
+            "uplinkFramesPerSecond" to windowWrites,
+            "uplinkPcmFramesPerSecond" to windowPcmWrites,
+            "insertedSilenceFramesPerSecond" to windowSilenceWrites,
+            "partialUplinkWritesPerSecond" to windowPartialWrites,
+            "downlinkFramesPerSecond" to windowReads,
+            "droppedFrames" to queue.dropped,
+            "expiredFrames" to queue.expired,
+            "maxAuthenticatedArrivalGapMs" to queue.maxAuthenticatedArrivalGapMs,
+            "maxAuthenticatedArrivalBurstFrames" to queue.maxAuthenticatedArrivalBurstFrames,
+            "sealed" to (mediaKey != null),
+            "rejectedPackets" to rejectedPackets.get(),
+            "underruns" to queue.underruns,
+            "maxWriteMs" to maxWriteMs
+        )
+    }
 
     /**
      * Opens (or reuses) a relay session for the authenticated iPhone at [clientAddress] and
@@ -330,6 +336,7 @@ object CallAudioRelay : CallManager.CallListener {
     private fun resetWindow() {
         windowStartedAt = SystemClock.elapsedRealtime()
         iphoneFrames.set(0); uplinkWrites.set(0); downlinkReads.set(0)
+        uplinkPcmWrites.set(0); insertedSilenceWrites.set(0); partialUplinkWrites.set(0)
     }
 
     /** Runs on the worker thread every 250 ms while a session exists. */
@@ -339,15 +346,22 @@ object CallAudioRelay : CallManager.CallListener {
         if (now - windowStartedAt >= 1000L) {
             windowIPhone = iphoneFrames.getAndSet(0)
             windowWrites = uplinkWrites.getAndSet(0)
+            windowPcmWrites = uplinkPcmWrites.getAndSet(0)
+            windowSilenceWrites = insertedSilenceWrites.getAndSet(0)
+            windowPartialWrites = partialUplinkWrites.getAndSet(0)
             windowReads = downlinkReads.getAndSet(0)
             windowStartedAt = now
             windowFresh = true
         }
         if (mediaRunning && now - lastHealthLogAt >= 5000L) {
             lastHealthLogAt = now
+            val queue = uplinkQueue.snapshot()
             Log.i(TAG, "RELAY_HEALTH owner=$owner iphone=$windowIPhone/s uplink=$windowWrites/s " +
-                "downlink=$windowReads/s queued=${uplinkQueue.size} dropped=${droppedFrames.get()} " +
-                "underruns=${underruns.get()} maxWriteMs=$maxWriteMs")
+                "pcm=$windowPcmWrites/s silence=$windowSilenceWrites/s partial=$windowPartialWrites/s " +
+                "downlink=$windowReads/s queued=${queue.queued} dropped=${queue.dropped} " +
+                "expired=${queue.expired} underruns=${queue.underruns} maxWriteMs=$maxWriteMs " +
+                "maxAuthenticatedArrivalGapMs=${queue.maxAuthenticatedArrivalGapMs} " +
+                "maxAuthenticatedArrivalBurstFrames=${queue.maxAuthenticatedArrivalBurstFrames}")
         }
         val live = isLiveCallState(CallManager.currentCallState)
         val iphoneFresh = lastIPhonePcmAt != 0L && now - lastIPhonePcmAt < silenceLimitMs
@@ -507,14 +521,11 @@ object CallAudioRelay : CallManager.CallListener {
             if (type != PAYLOAD_KEEPALIVE && type != PAYLOAD_PCM16) continue
             peer = packet.socketAddress
             if (pcm == null) continue
-            lastIPhonePcmAt = SystemClock.elapsedRealtime()
+            val receivedAt = SystemClock.elapsedRealtime()
+            lastIPhonePcmAt = receivedAt
             iphoneFrames.incrementAndGet()
             if (!mediaRunning) continue
-            // Freshness beats completeness for live voice: drop the oldest when behind.
-            while (uplinkQueue.size >= maxQueuedFrames) {
-                if (uplinkQueue.poll() != null) droppedFrames.incrementAndGet()
-            }
-            uplinkQueue.offer(pcm)
+            uplinkQueue.offer(pcm, receivedAt, authenticated = key != null)
         }
     }
 
@@ -539,11 +550,9 @@ object CallAudioRelay : CallManager.CallListener {
         downlink = record
         uplink = track
         lastIPhoneHearingAt = 0L
-        uplinkQueue.clear()
+        uplinkQueue.reset(remoteLink)
         upsampler.reset()
         maxWriteMs = 0
-        droppedFrames.set(0)
-        underruns.set(0)
         mediaRunning = true
         cutoverStartedAt = SystemClock.elapsedRealtime()
         badWindows = 0
@@ -565,29 +574,11 @@ object CallAudioRelay : CallManager.CallListener {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val silence = ByteArray(FRAME_BYTES)
         val out = ByteArray(UPLINK_FRAME_BYTES)
-        var primed = false
-        var highSince = 0L
         while (mediaRunning && uplink === track) {
-            // Trim latency gently: drop one frame only if the queue stays deep for a while.
-            val now = SystemClock.elapsedRealtime()
-            if (uplinkQueue.size > trimAboveFrames) {
-                if (highSince == 0L) highSince = now
-                else if (now - highSince > TRIM_AFTER_MS) {
-                    if (uplinkQueue.poll() != null) droppedFrames.incrementAndGet()
-                    highSince = now
-                }
-            } else {
-                highSince = 0L
-            }
             // The blocking track write paces this loop at real time; the queue only absorbs
             // network jitter. A missing frame becomes 20 ms of silence rather than a stall,
-            // and after an underrun two frames are buffered again before speech resumes.
-            if (!primed && uplinkQueue.size >= 2) primed = true
-            val frame = if (primed) uplinkQueue.poll() else null
-            if (frame == null) {
-                if (primed) underruns.incrementAndGet()
-                primed = false
-            }
+            // and after an underrun the bounded queue primes again before speech resumes.
+            val frame = uplinkQueue.poll(SystemClock.elapsedRealtime())
             val bytes = upsampler.process(frame ?: silence, 0, FRAME_SAMPLES, out)
             val started = SystemClock.elapsedRealtime()
             val written = track.write(out, 0, bytes, AudioTrack.WRITE_BLOCKING)
@@ -598,7 +589,15 @@ object CallAudioRelay : CallManager.CallListener {
                 continue
             }
             if (ms > maxWriteMs) maxWriteMs = ms
-            uplinkWrites.incrementAndGet()
+            if (written == bytes) {
+                // Ownership still measures a working sink, while diagnostics distinguish real
+                // received PCM (including naturally silent samples) from substituted silence.
+                uplinkWrites.incrementAndGet()
+                if (frame == null) insertedSilenceWrites.incrementAndGet() else uplinkPcmWrites.incrementAndGet()
+            } else {
+                // A positive short write did not deliver a full 20 ms frame.
+                partialUplinkWrites.incrementAndGet()
+            }
         }
     }
 
