@@ -23,7 +23,7 @@ final class AudioEngine {
         }
         set {
             captureLock.lock()
-            if captureMute.setMuted(newValue) { capturePacer.discardPending() }
+            if captureMute.setMuted(newValue, now: Self.monotonicNow()) { capturePacer.discardPending() }
             captureLock.unlock()
         }
     }
@@ -264,8 +264,8 @@ final class AudioEngine {
             }
             socket.start(queue: self.networkQueue)
 
-            // A one-shot is rearmed after each wake-up. Repeating deadlines can be
-            // early after a late tick and accidentally halve a strict 20 ms pacer's rate.
+            // Each one-shot uses the pacer's nominal deadline, accounting for handler
+            // cost. A real stall starts a new phase; it never triggers a catch-up loop.
             let captureTimer = DispatchSource.makeTimerSource(queue: self.networkQueue)
             captureTimer.schedule(deadline: .now() + .milliseconds(20), leeway: .milliseconds(1))
             captureTimer.setEventHandler { [weak self, weak socket] in
@@ -366,7 +366,8 @@ final class AudioEngine {
     private func enqueueCapture(_ frames: [[Int16]], capturedAt: TimeInterval, generation: UInt64,
                                 captureMute snapshot: CallAudioCaptureMute) {
         captureLock.lock()
-        let protectedFrames = captureMute.filter(frames, capturedGeneration: snapshot.generation,
+        let protectedFrames = captureMute.filter(frames, capturedAt: capturedAt,
+                                                capturedGeneration: snapshot.generation,
                                                 capturedWhileMuted: snapshot.isMuted)
         capturePacer.enqueue(protectedFrames, capturedAt: capturedAt,
                              now: Self.monotonicNow(), generation: generation)

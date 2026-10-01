@@ -19,13 +19,14 @@ struct CallAudioTimingTests {
         midIntervalStallCannotEmitCloseCatchUp()
         discardedReserveCannotReplaySpeech()
         mutedCaptureCannotReplayAfterUnmute()
+        delayedCallbackCannotReplayMutedInterval()
         staleAndOverflowingCaptureIsDiscarded()
         staleCaptureCannotEnterRestartedStream()
         playbackReprimesAfterShortGap()
         oldPlaybackCompletionCannotDrainNewStream()
         playbackCapacityStaysBounded()
         if failures != 0 { print("\(failures) audio timing regression(s)"); exit(1) }
-        print("PASS: 13 call audio timing regressions")
+        print("PASS: 14 call audio timing regressions")
     }
 
     // Break caught: emitting every frame from one tap callback at the same instant.
@@ -160,17 +161,32 @@ struct CallAudioTimingTests {
         let speech: [[Int16]] = [[123, -456, 789]]
         let silence: [[Int16]] = [[0, 0, 0]]
         let old = control.generation
-        _ = control.setMuted(true)
+        _ = control.setMuted(true, now: 0.1)
         let muted = control.generation
-        expect(control.filter(speech, capturedGeneration: muted, capturedWhileMuted: true) == silence,
+        expect(control.filter(speech, capturedAt: 0.14, capturedGeneration: muted, capturedWhileMuted: true) == silence,
                "muted microphone PCM becomes silence before buffering")
-        _ = control.setMuted(false)
-        expect(control.filter(speech, capturedGeneration: muted, capturedWhileMuted: true) == silence,
+        _ = control.setMuted(false, now: 0.2)
+        expect(control.filter(speech, capturedAt: 0.14, capturedGeneration: muted, capturedWhileMuted: true) == silence,
                "unmute cannot replay captured private speech")
-        expect(control.filter(speech, capturedGeneration: old, capturedWhileMuted: false) == silence,
+        expect(control.filter(speech, capturedAt: 0.1, capturedGeneration: old, capturedWhileMuted: false) == silence,
                "late tap crossing a mute transition cannot revive old speech")
-        expect(control.filter(speech, capturedGeneration: control.generation, capturedWhileMuted: false) == speech,
+        expect(control.filter(speech, capturedAt: 0.24, capturedGeneration: control.generation, capturedWhileMuted: false) == speech,
                "fresh unmuted capture retains real speech")
+    }
+
+    // Break caught: a200ms hardware callback delivered after unmute has the new
+    // control snapshot but contains PCM that the device captured while muted.
+    static func delayedCallbackCannotReplayMutedInterval() {
+        var control = CallAudioCaptureMute()
+        _ = control.setMuted(true, now: 0.1)
+        _ = control.setMuted(false, now: 0.2)
+        let delayed: [[Int16]] = Array(repeating: [123, -456], count: 10)
+        expect(control.filter(delayed, capturedAt: 0.21, capturedGeneration: control.generation,
+                              capturedWhileMuted: false) == Array(repeating: [0, 0], count: 10),
+               "late200ms callback cannot replay any frame captured during mute")
+        expect(control.filter([[1], [2], [3]], capturedAt: 0.25,
+                              capturedGeneration: control.generation, capturedWhileMuted: false) == [[0], [2], [3]],
+               "only capture safely after unmute may contain real speech")
     }
 
     // Break caught: an old input tap closure appending PCM after stop/start.
