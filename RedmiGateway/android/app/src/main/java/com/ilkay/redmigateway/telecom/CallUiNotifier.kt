@@ -12,6 +12,7 @@ import android.os.Looper
 import android.provider.ContactsContract
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
+import com.ilkay.redmigateway.server.ContactResolver
 import com.ilkay.redmigateway.ui.CallActivity
 import com.ilkay.redmigateway.ui.PhoneActivity
 import java.util.concurrent.ConcurrentHashMap
@@ -86,7 +87,7 @@ object CallUiNotifier : CallManager.CallListener {
             val caller = when {
                 isConf -> number?.takeIf { it.isNotBlank() } ?: "Konferans Görüşme"
                 number.isNullOrBlank() -> "Gizli numara"
-                else -> number
+                else -> ContactResolver.getCached(number) ?: resolveCallerName(context, number)
             }
             val person = Person.Builder().setName(caller).setImportant(true).build()
             val screen = PendingIntent.getActivity(
@@ -140,6 +141,7 @@ object CallUiNotifier : CallManager.CallListener {
 
     private fun resolveCallerName(context: Context, number: String?): String {
         if (number.isNullOrBlank()) return "Gizli numara"
+        ContactResolver.getCached(number)?.let { return it }
         if (context.checkSelfPermission(android.Manifest.permission.READ_CONTACTS) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
             val name = runCatching {
                 val uri = Uri.withAppendedPath(

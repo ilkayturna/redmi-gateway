@@ -39,6 +39,7 @@ class RedmiGatewayApp : Application() {
         // Ensure pairing token and device ID are initialized
         getPairingToken()
         getOpaqueDeviceId()
+        com.ilkay.redmigateway.server.ContactResolver.loadSeedContacts(this)
         com.ilkay.redmigateway.telecom.IncomingCallPresenter.init(this)
     }
 }
