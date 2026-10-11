@@ -98,6 +98,7 @@
             android:exported="false"
             android:launchMode="singleTop"
             android:showWhenLocked="true"
+            android:theme="@style/Theme.RedmiGateway.Call"
             android:turnScreenOn="true" />
 
         <receiver

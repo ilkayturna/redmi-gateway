@@ -46,4 +46,14 @@
     <color name="pb_on_accent">#FFFFFF</color>
     <color name="pb_attention_bg">#FFF6E5</color>
     <color name="pb_attention_stroke">#F0D9A8</color>
+
+    <!-- In-Call Screen Modern Palette -->
+    <color name="call_bg_start">#0B0F19</color>
+    <color name="call_bg_center">#101726</color>
+    <color name="call_bg_end">#161F30</color>
+    <color name="call_decline">#EF4444</color>
+    <color name="call_answer">#22C55E</color>
+    <color name="call_text_slate">#94A3B8</color>
+    <color name="call_glass_bg">#1AFFFFFF</color>
+    <color name="call_glass_stroke">#26FFFFFF</color>
 </resources>

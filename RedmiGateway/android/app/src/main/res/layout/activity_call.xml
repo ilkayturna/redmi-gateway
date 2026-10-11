@@ -1,388 +1,973 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/callRoot"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:fillViewport="true"
-    android:background="?attr/colorSurface">
+    android:background="@drawable/bg_call_gradient"
+    android:fitsSystemWindows="false">
 
+    <!-- ==================== TOP BAR SECTION ==================== -->
     <LinearLayout
-        android:layout_width="match_parent"
+        android:id="@+id/topBarContainer"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
+        android:layout_marginStart="20dp"
+        android:layout_marginTop="48dp"
+        android:layout_marginEnd="20dp"
         android:gravity="center_horizontal"
         android:orientation="vertical"
-        android:padding="20dp">
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
 
-        <!-- Top Call Status Info -->
-        <TextView
-            android:id="@+id/state"
-            android:layout_width="match_parent"
+        <!-- Call State & Duration Pill Badge -->
+        <LinearLayout
+            android:id="@+id/statusPill"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:gravity="center"
-            android:textColor="?android:attr/textColorSecondary"
-            android:textSize="18sp"
-            android:textStyle="bold" />
+            android:background="@drawable/bg_glass_pill"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="16dp"
+            android:paddingTop="6dp"
+            android:paddingEnd="16dp"
+            android:paddingBottom="6dp">
 
-        <ImageView
-            android:id="@+id/contactPhoto"
-            android:layout_width="88dp"
-            android:layout_height="88dp"
-            android:layout_marginTop="16dp"
-            android:contentDescription="Kişi fotoğrafı"
-            android:scaleType="centerCrop"
-            android:visibility="gone" />
+            <TextView
+                android:id="@+id/state"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Arama Bağlanıyor"
+                android:textColor="#E2E8F0"
+                android:textSize="13sp"
+                android:textStyle="bold" />
 
-        <TextView
-            android:id="@+id/contactName"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:gravity="center"
-            android:textColor="?android:attr/textColorPrimary"
-            android:textSize="28sp"
-            android:textStyle="bold"
-            android:visibility="gone" />
+            <TextView
+                android:id="@+id/callDuration"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="00:00"
+                android:textColor="@color/neon_sky"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:visibility="gone"
+                tools:visibility="visible" />
+        </LinearLayout>
 
-        <TextView
-            android:id="@+id/number"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:gravity="center"
-            android:textColor="?android:attr/textColorPrimary"
-            android:textSize="28sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/callDuration"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:gravity="center"
-            android:textColor="?android:attr/textColorSecondary"
-            android:textSize="16sp"
-            android:visibility="gone" />
-
-        <!-- Call waiting: a second incoming call during this one -->
+        <!-- Call Waiting Card (Appears if another call arrives) -->
         <com.google.android.material.card.MaterialCardView
             android:id="@+id/waitingCard"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="12dp"
             android:visibility="gone"
-            app:cardCornerRadius="16dp"
-            app:cardElevation="2dp"
-            app:strokeWidth="2dp"
-            app:strokeColor="@color/status_attention"
-            app:cardBackgroundColor="?attr/colorSurface">
+            app:cardBackgroundColor="#E61E293B"
+            app:cardCornerRadius="18dp"
+            app:cardElevation="6dp"
+            app:strokeColor="@color/neon_amber"
+            app:strokeWidth="1.5dp"
+            tools:visibility="visible">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="16dp">
+                android:padding="14dp">
 
                 <TextView
                     android:id="@+id/waitingTitle"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:textColor="?android:attr/textColorPrimary"
-                    android:textSize="16sp"
+                    android:gravity="center"
+                    android:textColor="#F8FAFC"
+                    android:textSize="14sp"
                     android:textStyle="bold" />
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
+                    android:layout_marginTop="10dp"
                     android:orientation="horizontal">
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/waitingReject"
                         style="@style/Widget.MaterialComponents.Button.OutlinedButton"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
+                        android:layout_height="42dp"
                         android:layout_marginEnd="6dp"
-                        android:minHeight="48dp"
-                        android:text="Reddet" />
+                        android:layout_weight="1"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:text="Reddet"
+                        android:textAllCaps="false"
+                        android:textColor="@color/call_decline"
+                        android:textSize="13sp"
+                        app:cornerRadius="21dp"
+                        app:strokeColor="@color/call_decline" />
 
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/waitingAnswer"
                         android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
+                        android:layout_height="42dp"
                         android:layout_marginStart="6dp"
-                        android:minHeight="48dp"
-                        android:text="Kapat ve yanıtla" />
+                        android:layout_weight="1"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
+                        android:text="Kapat ve yanıtla"
+                        android:textAllCaps="false"
+                        android:textColor="#FFFFFF"
+                        android:textSize="13sp"
+                        app:backgroundTint="@color/call_answer"
+                        app:cornerRadius="21dp" />
                 </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Audio Ownership Status Card -->
+        <!-- Modern Audio Route Chip (Compact capsule / Dynamic Island style) -->
         <com.google.android.material.card.MaterialCardView
             android:id="@+id/audioStatusCard"
-            android:layout_width="match_parent"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
-            app:cardCornerRadius="16dp"
-            app:cardElevation="2dp"
-            app:strokeWidth="2dp"
-            app:strokeColor="@color/border_neon_cyan"
-            app:cardBackgroundColor="?attr/colorSurface">
+            android:layout_marginTop="12dp"
+            android:visibility="gone"
+            app:cardBackgroundColor="#D9162032"
+            app:cardCornerRadius="22dp"
+            app:cardElevation="4dp"
+            app:strokeColor="#3338BDF8"
+            app:strokeWidth="1dp"
+            tools:visibility="visible">
 
             <LinearLayout
-                android:layout_width="match_parent"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp">
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="12dp"
+                android:paddingTop="6dp"
+                android:paddingEnd="8dp"
+                android:paddingBottom="6dp">
 
-                <TextView
-                    android:id="@+id/audioStatusTitle"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="SES iPHONE'DA"
-                    android:textColor="@color/neon_sky"
-                    android:textSize="16sp"
-                    android:textStyle="bold" />
+                <ImageView
+                    android:id="@+id/audioStatusIcon"
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:contentDescription="Ses Rotası"
+                    android:src="@drawable/ic_transfer_iphone"
+                    app:tint="@color/neon_sky" />
 
-                <TextView
-                    android:id="@+id/audioStatusDetail"
-                    android:layout_width="match_parent"
+                <LinearLayout
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:text="Görüşme bağlı iPhone üzerinden yapılıyor. Ahizedeki kısık ses geçit yönlendirmesindedir."
-                    android:textColor="?android:attr/textColorSecondary"
-                    android:textSize="13sp" />
+                    android:layout_marginStart="10dp"
+                    android:layout_marginEnd="12dp"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/audioStatusTitle"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:ellipsize="end"
+                        android:maxLines="1"
+                        android:text="Görüşme iPhone'da"
+                        android:textColor="@color/neon_sky"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/audioStatusDetail"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:ellipsize="end"
+                        android:maxWidth="160dp"
+                        android:maxLines="1"
+                        android:text="Ses iPhone üzerinden"
+                        android:textColor="@color/call_text_slate"
+                        android:textSize="11sp" />
+                </LinearLayout>
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/audioTransferButton"
                     style="@style/Widget.MaterialComponents.Button.OutlinedButton"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
-                    android:text="Sesi Redmi'ye Al"
-                    android:textSize="13sp"
+                    android:layout_height="34dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:text="Redmi'ye al"
+                    android:textAllCaps="false"
+                    android:textColor="@color/neon_sky"
+                    android:textSize="12sp"
+                    android:textStyle="bold"
+                    app:cornerRadius="17dp"
                     app:strokeColor="@color/neon_sky" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- Incoming Call: Bidirectional Swipe Slider Container -->
+    </LinearLayout>
+
+    <!-- ==================== CENTER SECTION (HERO CALLER INFO) ==================== -->
+    <LinearLayout
+        android:id="@+id/callerInfoContainer"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        app:layout_constraintBottom_toTopOf="@id/bottomContainer"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/topBarContainer">
+
+        <!-- 96dp Circular Contact Avatar -->
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/avatarContainer"
+            android:layout_width="96dp"
+            android:layout_height="96dp"
+            app:cardBackgroundColor="@color/call_glass_bg"
+            app:cardCornerRadius="48dp"
+            app:cardElevation="8dp"
+            app:strokeColor="@color/call_glass_stroke"
+            app:strokeWidth="1.5dp">
+
+            <ImageView
+                android:id="@+id/contactPhoto"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:contentDescription="Kişi fotoğrafı"
+                android:scaleType="centerCrop"
+                android:src="@drawable/ic_person_avatar" />
+        </com.google.android.material.card.MaterialCardView>
+
+        <!-- Hero Caller Name -->
+        <TextView
+            android:id="@+id/contactName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:ellipsize="end"
+            android:gravity="center"
+            android:maxLines="2"
+            android:textColor="#FFFFFF"
+            android:textSize="28sp"
+            android:textStyle="bold"
+            android:visibility="gone"
+            tools:text="İlkay Turna"
+            tools:visibility="visible" />
+
+        <!-- Caller Phone Number -->
+        <TextView
+            android:id="@+id/number"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center"
+            android:letterSpacing="0.04"
+            android:textColor="@color/call_text_slate"
+            android:textSize="18sp"
+            android:textStyle="normal"
+            tools:text="+90 532 123 4567" />
+
+    </LinearLayout>
+
+    <!-- ==================== BOTTOM CONTAINER ==================== -->
+    <FrameLayout
+        android:id="@+id/bottomContainer"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="20dp"
+        android:layout_marginEnd="20dp"
+        android:layout_marginBottom="40dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <!-- ===== INCOMING CALL MODE (Large 72dp Decline & Answer Circles) ===== -->
         <LinearLayout
             android:id="@+id/incomingActions"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="32dp"
-            android:orientation="vertical">
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:visibility="gone"
+            tools:visibility="gone">
 
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center"
-                android:text="Yanıtlamak için sağa, reddetmek için sola kaydırın"
-                android:textColor="?android:attr/textColorSecondary"
-                android:textSize="13sp"
-                android:layout_marginBottom="12dp" />
-
-            <!-- Slider Track -->
-            <FrameLayout
-                android:id="@+id/sliderTrack"
-                android:layout_width="match_parent"
-                android:layout_height="72dp"
-                android:background="@drawable/slider_background"
-                android:padding="4dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical">
-
-                    <TextView
-                        android:id="@+id/sliderRejectLabel"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:gravity="center"
-                        android:text="◀ Reddet"
-                        android:textColor="@color/status_bad"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/sliderAnswerLabel"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:gravity="center"
-                        android:text="Yanıtla ▶"
-                        android:textColor="@color/status_good"
-                        android:textSize="16sp"
-                        android:textStyle="bold" />
-                </LinearLayout>
-
-                <!-- Floating Handle -->
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/sliderThumb"
-                    android:layout_width="64dp"
-                    android:layout_height="64dp"
-                    android:layout_gravity="center"
-                    android:text="📞"
-                    android:textSize="22sp"
-                    app:cornerRadius="32dp"
-                    app:backgroundTint="@color/neon_emerald" />
-            </FrameLayout>
-
-            <!-- Fallback Tap Buttons (for accessibility and testing) -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
+                android:gravity="center"
                 android:orientation="horizontal">
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/reject"
-                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                <!-- Left: 72dp Decline Button -->
+                <LinearLayout
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Doğrudan Reddet"
-                    android:textColor="@color/status_bad"
-                    android:textSize="12sp" />
+                    android:gravity="center"
+                    android:orientation="vertical">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/reject"
+                        android:layout_width="72dp"
+                        android:layout_height="72dp"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        app:backgroundTint="@color/call_decline"
+                        app:cornerRadius="36dp"
+                        app:elevation="6dp"
+                        app:icon="@drawable/ic_call_end"
+                        app:iconGravity="textStart"
+                        app:iconPadding="0dp"
+                        app:iconSize="32dp"
+                        app:iconTint="#FFFFFF"
+                        app:rippleColor="#40FFFFFF" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="Reddet"
+                        android:textColor="@color/call_decline"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <!-- Right: 72dp Answer Button -->
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:gravity="center"
+                    android:orientation="vertical">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/answer"
+                        android:layout_width="72dp"
+                        android:layout_height="72dp"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        app:backgroundTint="@color/call_answer"
+                        app:cornerRadius="36dp"
+                        app:elevation="6dp"
+                        app:icon="@drawable/ic_call_answer"
+                        app:iconGravity="textStart"
+                        app:iconPadding="0dp"
+                        app:iconSize="32dp"
+                        app:iconTint="#FFFFFF"
+                        app:rippleColor="#40FFFFFF" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="Yanıtla"
+                        android:textColor="@color/call_answer"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Hidden slider stubs to ensure 100% binary/ViewBinding compatibility -->
+            <FrameLayout
+                android:id="@+id/sliderTrack"
+                android:layout_width="0dp"
+                android:layout_height="0dp"
+                android:visibility="gone">
 
                 <com.google.android.material.button.MaterialButton
-                    android:id="@+id/answer"
-                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:id="@+id/sliderThumb"
                     android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Doğrudan Yanıtla"
-                    android:textColor="@color/status_good"
-                    android:textSize="12sp" />
-            </LinearLayout>
+                    android:layout_height="0dp"
+                    android:visibility="gone" />
+            </FrameLayout>
+
         </LinearLayout>
 
-        <!-- Active Call: Symmetrical 2x2 Control Grid -->
+        <!-- ===== ACTIVE CALL MODE (3x2 Grid OR DTMF Keypad, with centered 72dp Red End Call Button) ===== -->
         <LinearLayout
             android:id="@+id/activeControls"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
+            android:gravity="center_horizontal"
             android:orientation="vertical"
-            android:visibility="gone">
+            tools:visibility="visible">
 
+            <!-- 3x2 Symmetrical Grid of 56dp Glass Action Buttons -->
             <LinearLayout
+                android:id="@+id/controlsGrid"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal">
+                android:orientation="vertical">
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/mute"
-                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                    android:layout_width="0dp"
-                    android:layout_height="64dp"
-                    android:layout_marginEnd="8dp"
-                    android:layout_weight="1"
-                    android:text="Sessiz"
-                    android:textSize="15sp"
-                    app:cornerRadius="16dp" />
+                <!-- Row 1: Mute, Keypad, Speaker -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:orientation="horizontal">
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/speaker"
-                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                    android:layout_width="0dp"
-                    android:layout_height="64dp"
-                    android:layout_marginStart="8dp"
-                    android:layout_weight="1"
-                    android:text="Hoparlör"
-                    android:textSize="15sp"
-                    app:cornerRadius="16dp" />
+                    <!-- Col 1: Mute -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:gravity="center"
+                        android:orientation="vertical">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/mute"
+                            android:layout_width="56dp"
+                            android:layout_height="56dp"
+                            android:insetLeft="0dp"
+                            android:insetTop="0dp"
+                            android:insetRight="0dp"
+                            android:insetBottom="0dp"
+                            android:padding="0dp"
+                            app:backgroundTint="@color/call_glass_bg"
+                            app:cornerRadius="28dp"
+                            app:elevation="2dp"
+                            app:icon="@drawable/ic_mic"
+                            app:iconGravity="textStart"
+                            app:iconPadding="0dp"
+                            app:iconSize="24dp"
+                            app:iconTint="#FFFFFF"
+                            app:strokeColor="@color/call_glass_stroke"
+                            app:strokeWidth="1dp" />
+
+                        <TextView
+                            android:id="@+id/muteLabel"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="Sessiz"
+                            android:textColor="@color/call_text_slate"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <!-- Col 2: Keypad Toggle -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:gravity="center"
+                        android:orientation="vertical">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/keypadToggle"
+                            android:layout_width="56dp"
+                            android:layout_height="56dp"
+                            android:insetLeft="0dp"
+                            android:insetTop="0dp"
+                            android:insetRight="0dp"
+                            android:insetBottom="0dp"
+                            android:padding="0dp"
+                            app:backgroundTint="@color/call_glass_bg"
+                            app:cornerRadius="28dp"
+                            app:elevation="2dp"
+                            app:icon="@drawable/ic_dialpad_white"
+                            app:iconGravity="textStart"
+                            app:iconPadding="0dp"
+                            app:iconSize="24dp"
+                            app:iconTint="#FFFFFF"
+                            app:strokeColor="@color/call_glass_stroke"
+                            app:strokeWidth="1dp" />
+
+                        <TextView
+                            android:id="@+id/keypadLabel"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="Tuşlar"
+                            android:textColor="@color/call_text_slate"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <!-- Col 3: Speaker -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:gravity="center"
+                        android:orientation="vertical">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/speaker"
+                            android:layout_width="56dp"
+                            android:layout_height="56dp"
+                            android:insetLeft="0dp"
+                            android:insetTop="0dp"
+                            android:insetRight="0dp"
+                            android:insetBottom="0dp"
+                            android:padding="0dp"
+                            app:backgroundTint="@color/call_glass_bg"
+                            app:cornerRadius="28dp"
+                            app:elevation="2dp"
+                            app:icon="@drawable/ic_volume_up"
+                            app:iconGravity="textStart"
+                            app:iconPadding="0dp"
+                            app:iconSize="24dp"
+                            app:iconTint="#FFFFFF"
+                            app:strokeColor="@color/call_glass_stroke"
+                            app:strokeWidth="1dp" />
+
+                        <TextView
+                            android:id="@+id/speakerLabel"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="Hoparlör"
+                            android:textColor="@color/call_text_slate"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                </LinearLayout>
+
+                <!-- Row 2: Hold, iPhone Route, More Route -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:gravity="center"
+                    android:orientation="horizontal">
+
+                    <!-- Col 4: Hold -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:gravity="center"
+                        android:orientation="vertical">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/holdButton"
+                            android:layout_width="56dp"
+                            android:layout_height="56dp"
+                            android:insetLeft="0dp"
+                            android:insetTop="0dp"
+                            android:insetRight="0dp"
+                            android:insetBottom="0dp"
+                            android:padding="0dp"
+                            app:backgroundTint="@color/call_glass_bg"
+                            app:cornerRadius="28dp"
+                            app:elevation="2dp"
+                            app:icon="@drawable/ic_pause"
+                            app:iconGravity="textStart"
+                            app:iconPadding="0dp"
+                            app:iconSize="24dp"
+                            app:iconTint="#FFFFFF"
+                            app:strokeColor="@color/call_glass_stroke"
+                            app:strokeWidth="1dp" />
+
+                        <TextView
+                            android:id="@+id/holdLabel"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="Beklet"
+                            android:textColor="@color/call_text_slate"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <!-- Col 5: Transfer / iPhone -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:gravity="center"
+                        android:orientation="vertical">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/gridTransferButton"
+                            android:layout_width="56dp"
+                            android:layout_height="56dp"
+                            android:insetLeft="0dp"
+                            android:insetTop="0dp"
+                            android:insetRight="0dp"
+                            android:insetBottom="0dp"
+                            android:padding="0dp"
+                            app:backgroundTint="@color/call_glass_bg"
+                            app:cornerRadius="28dp"
+                            app:elevation="2dp"
+                            app:icon="@drawable/ic_transfer_iphone"
+                            app:iconGravity="textStart"
+                            app:iconPadding="0dp"
+                            app:iconSize="24dp"
+                            app:iconTint="@color/neon_sky"
+                            app:strokeColor="@color/call_glass_stroke"
+                            app:strokeWidth="1dp" />
+
+                        <TextView
+                            android:id="@+id/gridTransferLabel"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="Ses Aktar"
+                            android:textColor="@color/neon_sky"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <!-- Col 6: Audio Route / Device Subtitle -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:gravity="center"
+                        android:orientation="vertical">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/moreButton"
+                            android:layout_width="56dp"
+                            android:layout_height="56dp"
+                            android:insetLeft="0dp"
+                            android:insetTop="0dp"
+                            android:insetRight="0dp"
+                            android:insetBottom="0dp"
+                            android:padding="0dp"
+                            app:backgroundTint="@color/call_glass_bg"
+                            app:cornerRadius="28dp"
+                            app:elevation="2dp"
+                            app:icon="@drawable/ic_pb_settings"
+                            app:iconGravity="textStart"
+                            app:iconPadding="0dp"
+                            app:iconSize="24dp"
+                            app:iconTint="#FFFFFF"
+                            app:strokeColor="@color/call_glass_stroke"
+                            app:strokeWidth="1dp" />
+
+                        <TextView
+                            android:id="@+id/moreLabel"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="Geçit"
+                            android:textColor="@color/call_text_slate"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                </LinearLayout>
+
             </LinearLayout>
 
+            <!-- ===== IN-CALL DTMF KEYPAD (Inside activeControls, directly swaps with controlsGrid) ===== -->
             <LinearLayout
+                android:id="@+id/dtmfContainer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:orientation="horizontal">
+                android:gravity="center"
+                android:orientation="vertical"
+                android:visibility="gone"
+                tools:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/dtmf1"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:layout_margin="6dp"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="1"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold"
+                        app:backgroundTint="@color/call_glass_bg"
+                        app:cornerRadius="30dp"
+                        app:strokeColor="@color/call_glass_stroke"
+                        app:strokeWidth="1dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/dtmf2"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:layout_margin="6dp"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="2"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold"
+                        app:backgroundTint="@color/call_glass_bg"
+                        app:cornerRadius="30dp"
+                        app:strokeColor="@color/call_glass_stroke"
+                        app:strokeWidth="1dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/dtmf3"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:layout_margin="6dp"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="3"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold"
+                        app:backgroundTint="@color/call_glass_bg"
+                        app:cornerRadius="30dp"
+                        app:strokeColor="@color/call_glass_stroke"
+                        app:strokeWidth="1dp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/dtmf4"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:layout_margin="6dp"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="4"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold"
+                        app:backgroundTint="@color/call_glass_bg"
+                        app:cornerRadius="30dp"
+                        app:strokeColor="@color/call_glass_stroke"
+                        app:strokeWidth="1dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/dtmf5"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:layout_margin="6dp"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="5"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold"
+                        app:backgroundTint="@color/call_glass_bg"
+                        app:cornerRadius="30dp"
+                        app:strokeColor="@color/call_glass_stroke"
+                        app:strokeWidth="1dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/dtmf6"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:layout_margin="6dp"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="6"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold"
+                        app:backgroundTint="@color/call_glass_bg"
+                        app:cornerRadius="30dp"
+                        app:strokeColor="@color/call_glass_stroke"
+                        app:strokeWidth="1dp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/dtmf7"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:layout_margin="6dp"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="7"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold"
+                        app:backgroundTint="@color/call_glass_bg"
+                        app:cornerRadius="30dp"
+                        app:strokeColor="@color/call_glass_stroke"
+                        app:strokeWidth="1dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/dtmf8"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:layout_margin="6dp"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="8"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold"
+                        app:backgroundTint="@color/call_glass_bg"
+                        app:cornerRadius="30dp"
+                        app:strokeColor="@color/call_glass_stroke"
+                        app:strokeWidth="1dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/dtmf9"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:layout_margin="6dp"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="9"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold"
+                        app:backgroundTint="@color/call_glass_bg"
+                        app:cornerRadius="30dp"
+                        app:strokeColor="@color/call_glass_stroke"
+                        app:strokeWidth="1dp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/dtmfStar"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:layout_margin="6dp"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="*"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold"
+                        app:backgroundTint="@color/call_glass_bg"
+                        app:cornerRadius="30dp"
+                        app:strokeColor="@color/call_glass_stroke"
+                        app:strokeWidth="1dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/dtmf0"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:layout_margin="6dp"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="0"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold"
+                        app:backgroundTint="@color/call_glass_bg"
+                        app:cornerRadius="30dp"
+                        app:strokeColor="@color/call_glass_stroke"
+                        app:strokeWidth="1dp" />
+
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/dtmfHash"
+                        android:layout_width="60dp"
+                        android:layout_height="60dp"
+                        android:layout_margin="6dp"
+                        android:insetLeft="0dp"
+                        android:insetTop="0dp"
+                        android:insetRight="0dp"
+                        android:insetBottom="0dp"
+                        android:padding="0dp"
+                        android:text="#"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold"
+                        app:backgroundTint="@color/call_glass_bg"
+                        app:cornerRadius="30dp"
+                        app:strokeColor="@color/call_glass_stroke"
+                        app:strokeWidth="1dp" />
+                </LinearLayout>
 
                 <com.google.android.material.button.MaterialButton
-                    android:id="@+id/keypadToggle"
-                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                    android:layout_width="0dp"
-                    android:layout_height="64dp"
-                    android:layout_marginEnd="8dp"
-                    android:layout_weight="1"
-                    android:text="Tuşlar"
-                    android:textSize="15sp"
-                    app:cornerRadius="16dp" />
+                    android:id="@+id/dtmfHide"
+                    style="@style/Widget.MaterialComponents.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="Tuşları Gizle"
+                    android:textColor="@color/call_text_slate"
+                    android:textSize="13sp" />
 
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/hangup"
-                    android:layout_width="0dp"
-                    android:layout_height="64dp"
-                    android:layout_marginStart="8dp"
-                    android:layout_weight="1"
-                    android:text="Bitir"
-                    android:textSize="16sp"
-                    android:textStyle="bold"
-                    app:backgroundTint="@color/status_bad"
-                    app:cornerRadius="16dp" />
             </LinearLayout>
+
+            <!-- Centered Large 72dp Red End Call Button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/hangup"
+                android:layout_width="72dp"
+                android:layout_height="72dp"
+                android:layout_marginTop="20dp"
+                android:insetLeft="0dp"
+                android:insetTop="0dp"
+                android:insetRight="0dp"
+                android:insetBottom="0dp"
+                android:padding="0dp"
+                app:backgroundTint="@color/call_decline"
+                app:cornerRadius="36dp"
+                app:elevation="8dp"
+                app:icon="@drawable/ic_call_end"
+                app:iconGravity="textStart"
+                app:iconPadding="0dp"
+                app:iconSize="32dp"
+                app:iconTint="#FFFFFF"
+                app:rippleColor="#40FFFFFF" />
+
+            <!-- Status / Transfer Help Subtitle -->
+            <TextView
+                android:id="@+id/help"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="24dp"
+                android:layout_marginTop="12dp"
+                android:layout_marginEnd="24dp"
+                android:gravity="center"
+                android:textColor="@color/call_text_slate"
+                android:textSize="13sp"
+                tools:text="Görüşmeyi bu telefondan da sonlandırabilirsin." />
+
         </LinearLayout>
 
-        <!-- In-Call DTMF Keypad View -->
-        <LinearLayout
-            android:id="@+id/dtmfContainer"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:gravity="center"
-            android:orientation="vertical"
-            android:visibility="gone">
+    </FrameLayout>
 
-            <LinearLayout
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal">
-                <Button android:id="@+id/dtmf1" android:layout_width="64dp" android:layout_height="64dp" android:layout_margin="6dp" android:text="1" android:textSize="20sp" />
-                <Button android:id="@+id/dtmf2" android:layout_width="64dp" android:layout_height="64dp" android:layout_margin="6dp" android:text="2" android:textSize="20sp" />
-                <Button android:id="@+id/dtmf3" android:layout_width="64dp" android:layout_height="64dp" android:layout_margin="6dp" android:text="3" android:textSize="20sp" />
-            </LinearLayout>
-            <LinearLayout
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal">
-                <Button android:id="@+id/dtmf4" android:layout_width="64dp" android:layout_height="64dp" android:layout_margin="6dp" android:text="4" android:textSize="20sp" />
-                <Button android:id="@+id/dtmf5" android:layout_width="64dp" android:layout_height="64dp" android:layout_margin="6dp" android:text="5" android:textSize="20sp" />
-                <Button android:id="@+id/dtmf6" android:layout_width="64dp" android:layout_height="64dp" android:layout_margin="6dp" android:text="6" android:textSize="20sp" />
-            </LinearLayout>
-            <LinearLayout
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal">
-                <Button android:id="@+id/dtmf7" android:layout_width="64dp" android:layout_height="64dp" android:layout_margin="6dp" android:text="7" android:textSize="20sp" />
-                <Button android:id="@+id/dtmf8" android:layout_width="64dp" android:layout_height="64dp" android:layout_margin="6dp" android:text="8" android:textSize="20sp" />
-                <Button android:id="@+id/dtmf9" android:layout_width="64dp" android:layout_height="64dp" android:layout_margin="6dp" android:text="9" android:textSize="20sp" />
-            </LinearLayout>
-            <LinearLayout
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal">
-                <Button android:id="@+id/dtmfStar" android:layout_width="64dp" android:layout_height="64dp" android:layout_margin="6dp" android:text="*" android:textSize="20sp" />
-                <Button android:id="@+id/dtmf0" android:layout_width="64dp" android:layout_height="64dp" android:layout_margin="6dp" android:text="0" android:textSize="20sp" />
-                <Button android:id="@+id/dtmfHash" android:layout_width="64dp" android:layout_height="64dp" android:layout_margin="6dp" android:text="#" android:textSize="20sp" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <!-- Help / Information Text -->
-        <TextView
-            android:id="@+id/help"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:gravity="center"
-            android:textColor="?android:attr/textColorSecondary"
-            android:textSize="14sp" />
-
-    </LinearLayout>
-</ScrollView>
+</androidx.constraintlayout.widget.ConstraintLayout>
