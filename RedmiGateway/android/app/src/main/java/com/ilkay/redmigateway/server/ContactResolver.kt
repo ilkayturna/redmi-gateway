@@ -1,6 +1,13 @@
 package com.ilkay.redmigateway.server
 
+import android.content.ContentProviderOperation
 import android.content.Context
+import android.content.pm.PackageManager
+import android.provider.ContactsContract
+import android.provider.ContactsContract.CommonDataKinds.Phone
+import android.provider.ContactsContract.CommonDataKinds.StructuredName
+import android.provider.ContactsContract.Data
+import android.provider.ContactsContract.RawContacts
 import android.util.Log
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -14,13 +21,20 @@ import java.util.concurrent.CopyOnWriteArrayList
 object ContactResolver {
     private const val TAG = "ContactResolver"
 
+    data class SeedContact(val name: String, val numbers: List<String>)
+
     interface Listener {
         fun onContactResolved(number: String, name: String)
     }
 
     private val cache = ConcurrentHashMap<String, String>()
     private val listeners = CopyOnWriteArrayList<Listener>()
+    private val seedContactList = CopyOnWriteArrayList<SeedContact>()
+    private val syncLock = Any()
     @Volatile private var isLoaded = false
+    @Volatile private var isSyncedToSystem = false
+
+    fun getSeedContacts(): List<SeedContact> = seedContactList
 
     fun normalize(number: String): String {
         val digits = number.filter { it.isDigit() }
@@ -97,7 +111,9 @@ object ContactResolver {
                                     val name = currentFn ?: currentN
                                     if (!name.isNullOrBlank() && currentTels.isNotEmpty()) {
                                         contactCount++
-                                        for (rawTel in currentTels) {
+                                        val nums = currentTels.toList()
+                                        seedContactList.add(SeedContact(name, nums))
+                                        for (rawTel in nums) {
                                             val normalized = normalize(rawTel)
                                             if (normalized.isNotBlank()) {
                                                 cache.putIfAbsent(normalized, name)
@@ -114,10 +130,98 @@ object ContactResolver {
                     }
                 }
                 Log.i(TAG, "Loaded seed contacts: $contactCount contacts, $numberCount numbers mapped")
+                syncToSystemContacts(context)
             } catch (e: Exception) {
                 Log.w(TAG, "Could not load seed contacts: ${e.message}")
             }
         }, "ContactResolver-SeedLoader").start()
+    }
+
+    fun syncToSystemContacts(context: Context) {
+        if (context.checkSelfPermission(android.Manifest.permission.WRITE_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            Log.w(TAG, "WRITE_CONTACTS permission not granted, skipping system contacts sync")
+            return
+        }
+        if (seedContactList.isEmpty()) {
+            Log.d(TAG, "Seed contacts list is empty, skipping sync")
+            return
+        }
+        if (isSyncedToSystem) return
+        Thread({
+            synchronized(syncLock) {
+                if (isSyncedToSystem) return@Thread
+                try {
+                    val count = runCatching {
+                        context.contentResolver.query(
+                            ContactsContract.Contacts.CONTENT_URI,
+                            arrayOf(ContactsContract.Contacts._ID),
+                            null, null, null
+                        )?.use { it.count } ?: 0
+                    }.getOrElse { 0 }
+                    if (count >= 50) {
+                        Log.i(TAG, "System contacts already populated ($count contacts), skipping seed sync")
+                        isSyncedToSystem = true
+                        return@Thread
+                    }
+
+                    Log.i(TAG, "Starting sync of ${seedContactList.size} seed contacts to ContactsContract...")
+                    val batch = ArrayList<ContentProviderOperation>()
+                    var inBatchCount = 0
+                    var totalInserted = 0
+
+                    for (contact in seedContactList) {
+                        val rawContactIndex = batch.size
+                        batch.add(
+                            ContentProviderOperation.newInsert(RawContacts.CONTENT_URI)
+                                .withValue(RawContacts.ACCOUNT_TYPE, null)
+                                .withValue(RawContacts.ACCOUNT_NAME, null)
+                                .build()
+                        )
+                        batch.add(
+                            ContentProviderOperation.newInsert(Data.CONTENT_URI)
+                                .withValueBackReference(Data.RAW_CONTACT_ID, rawContactIndex)
+                                .withValue(Data.MIMETYPE, StructuredName.CONTENT_ITEM_TYPE)
+                                .withValue(StructuredName.DISPLAY_NAME, contact.name)
+                                .build()
+                        )
+                        for (number in contact.numbers) {
+                            batch.add(
+                                ContentProviderOperation.newInsert(Data.CONTENT_URI)
+                                    .withValueBackReference(Data.RAW_CONTACT_ID, rawContactIndex)
+                                    .withValue(Data.MIMETYPE, Phone.CONTENT_ITEM_TYPE)
+                                    .withValue(Phone.NUMBER, number)
+                                    .withValue(Phone.TYPE, Phone.TYPE_MOBILE)
+                                    .build()
+                            )
+                        }
+                        inBatchCount++
+                        if (inBatchCount >= 50) {
+                            runCatching {
+                                context.contentResolver.applyBatch(ContactsContract.AUTHORITY, batch)
+                                totalInserted += inBatchCount
+                            }.onFailure { e ->
+                                Log.w(TAG, "Failed to apply batch of contacts: ${e.message}")
+                            }
+                            batch.clear()
+                            inBatchCount = 0
+                        }
+                    }
+                    if (batch.isNotEmpty()) {
+                        runCatching {
+                            context.contentResolver.applyBatch(ContactsContract.AUTHORITY, batch)
+                            totalInserted += inBatchCount
+                        }.onFailure { e ->
+                            Log.w(TAG, "Failed to apply final batch of contacts: ${e.message}")
+                        }
+                        batch.clear()
+                    }
+                    isSyncedToSystem = true
+                    Log.i(TAG, "Successfully synced $totalInserted contacts to Android ContactsContract")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error syncing seed contacts to system: ${e.message}")
+                }
+            }
+        }, "ContactResolver-SystemSync").start()
     }
 
     fun put(number: String, name: String) {
@@ -146,6 +250,8 @@ object ContactResolver {
 
     fun clear() {
         cache.clear()
+        seedContactList.clear()
         isLoaded = false
+        isSyncedToSystem = false
     }
 }

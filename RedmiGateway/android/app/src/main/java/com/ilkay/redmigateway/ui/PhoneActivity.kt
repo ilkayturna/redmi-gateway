@@ -46,6 +46,7 @@ import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.ilkay.redmigateway.R
 import com.ilkay.redmigateway.databinding.ActivityPhoneBinding
 import com.ilkay.redmigateway.journal.CallJournal
+import com.ilkay.redmigateway.server.ContactResolver
 import com.ilkay.redmigateway.service.GatewayService
 import com.ilkay.redmigateway.service.IPhoneReachability
 import com.ilkay.redmigateway.sms.SmsSender
@@ -102,6 +103,7 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
     private val permissions = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
+        ContactResolver.syncToSystemContacts(this)
         loaded = false
         refreshPhoneData()
         render()
@@ -186,6 +188,9 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
 
     override fun onResume() {
         super.onResume()
+        if (has(Manifest.permission.WRITE_CONTACTS)) {
+            ContactResolver.syncToSystemContacts(this)
+        }
         renderChrome()
         refreshPhoneData()
     }
@@ -220,8 +225,8 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
     private fun requestPermissionsIfNeeded() {
         val required = listOf(
             Manifest.permission.CALL_PHONE, Manifest.permission.READ_CALL_LOG,
-            Manifest.permission.READ_CONTACTS, Manifest.permission.READ_SMS,
-            Manifest.permission.SEND_SMS
+            Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS,
+            Manifest.permission.READ_SMS, Manifest.permission.SEND_SMS
         )
         val missing = required.filter { !has(it) }
         if (missing.isNotEmpty()) permissions.launch(missing.toTypedArray())
@@ -261,29 +266,39 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
     }
 
     private fun readContacts(): List<Person> {
-        if (!has(Manifest.permission.READ_CONTACTS)) return emptyList()
         val rows = ArrayList<Person>()
-        runCatching {
-            contentResolver.query(
-                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                arrayOf(
-                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
-                    ContactsContract.CommonDataKinds.Phone.NUMBER,
-                    ContactsContract.CommonDataKinds.Phone.PHOTO_THUMBNAIL_URI,
-                    ContactsContract.CommonDataKinds.Phone.TYPE,
-                    ContactsContract.CommonDataKinds.Phone.LABEL
-                ), null, null, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " COLLATE LOCALIZED ASC"
-            )?.use { cursor ->
-                while (cursor.moveToNext()) {
-                    val number = cursor.getString(1) ?: continue
-                    val label = ContactsContract.CommonDataKinds.Phone.getTypeLabel(
-                        resources, cursor.getInt(3), cursor.getString(4)
-                    ).toString()
-                    rows.add(Person(cursor.getString(0) ?: number, number, label, cursor.getString(2)))
+        if (has(Manifest.permission.READ_CONTACTS)) {
+            runCatching {
+                contentResolver.query(
+                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    arrayOf(
+                        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                        ContactsContract.CommonDataKinds.Phone.NUMBER,
+                        ContactsContract.CommonDataKinds.Phone.PHOTO_THUMBNAIL_URI,
+                        ContactsContract.CommonDataKinds.Phone.TYPE,
+                        ContactsContract.CommonDataKinds.Phone.LABEL
+                    ), null, null, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " COLLATE LOCALIZED ASC"
+                )?.use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val number = cursor.getString(1) ?: continue
+                        val label = ContactsContract.CommonDataKinds.Phone.getTypeLabel(
+                            resources, cursor.getInt(3), cursor.getString(4)
+                        ).toString()
+                        rows.add(Person(cursor.getString(0) ?: number, number, label, cursor.getString(2)))
+                    }
+                }
+            }
+        }
+        val existingKeys = rows.map { numberKey(it.number) }.toHashSet()
+        for (seed in ContactResolver.getSeedContacts()) {
+            for (num in seed.numbers) {
+                if (existingKeys.add(numberKey(num))) {
+                    rows.add(Person(seed.name, num, "Rehber", null))
                 }
             }
         }
         return rows.distinctBy { numberKey(it.number) + "|" + it.name }
+            .sortedBy { it.name.lowercase(turkish) }
     }
 
     private fun readRecents(): List<Recent> {
@@ -332,7 +347,13 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         return if (digits.length >= 7) digits.takeLast(10) else number.trim().lowercase(turkish)
     }
 
-    private fun contactFor(number: String): Person? = contactByKey[numberKey(number)]
+    private fun contactFor(number: String): Person? {
+        val found = contactByKey[numberKey(number)]
+        if (found != null) return found
+        val cachedName = ContactResolver.getCached(number)
+        if (!cachedName.isNullOrBlank()) return Person(cachedName, number, "Rehber", null)
+        return null
+    }
 
     private fun isHidden(number: String) = number.isBlank() || number.startsWith("-")
 
@@ -344,7 +365,7 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
 
     private fun nameFor(number: String): String = when {
         isHidden(number) -> "Gizli numara"
-        else -> contactFor(number)?.name ?: formatNumber(number)
+        else -> contactFor(number)?.name ?: ContactResolver.getCached(number) ?: formatNumber(number)
     }
 
     // ---- chrome: title, iPhone status, attention, current call, badges ----
@@ -671,7 +692,7 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
     }
 
     private fun showContacts() {
-        if (!has(Manifest.permission.READ_CONTACTS)) {
+        if (!has(Manifest.permission.READ_CONTACTS) && contacts.isEmpty()) {
             return showEmpty(R.drawable.ic_pb_person, "Kişiler için izin gerekli.", "İzin ver") { requestPermissionsIfNeeded() }
         }
         val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
