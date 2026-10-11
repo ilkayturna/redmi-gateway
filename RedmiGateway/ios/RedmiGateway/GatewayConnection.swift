@@ -549,6 +549,18 @@ public final class GatewayConnection: ObservableObject {
                let pretty = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]) {
                 remoteDiagnostics = String(decoding: pretty, as: UTF8.self)
             }
+        case "resolve_contact":
+            if let request = decode(ResolveContactMessage.self, data) {
+                PhoneContactDirectory.shared.ensureLoaded()
+                let name = PhoneContactDirectory.shared.name(for: request.number)
+                var reply: [String: Any] = [
+                    "type": "contact_info",
+                    "number": request.number
+                ]
+                if let name { reply["name"] = name }
+                if let requestId = request.requestId { reply["requestId"] = requestId }
+                send(reply)
+            }
         case "error":
             if let error = decode(ErrorMessage.self, data) { log("Redmi error: \(error.code ?? error.message ?? "unknown")") }
         default:
@@ -807,6 +819,13 @@ public final class GatewayConnection: ObservableObject {
             }
             return
         }
+        if let wid = update.waitingCallId, !wid.isEmpty {
+            waitingCall = GSMCall(rawCallId: wid, number: update.waitingNumber ?? "", state: .ringing, isIncoming: true)
+            CallKitManager.shared.handleWaitingCall(callId: wid, number: update.waitingNumber, ringing: true)
+        } else if let previousWaiting = waitingCall {
+            waitingCall = nil
+            CallKitManager.shared.handleWaitingCall(callId: previousWaiting.rawCallId, number: nil, ringing: false)
+        }
         applyCallEvent(CallEventMessage(state: update.state, number: update.number, callId: update.callId,
                                         direction: update.direction))
         if update.state == "ringing" || update.state == "active" { reconnectNow(reason: "Bluetooth call state") }
@@ -932,7 +951,7 @@ public final class GatewayConnection: ObservableObject {
         send(["type": "diagnostics"])
     }
 
-    private func send(_ payload: [String: Any]) {
+    func send(_ payload: [String: Any]) {
         guard let task = webSocketTask, let channel,
               let json = try? JSONSerialization.data(withJSONObject: payload),
               let frame = channel.seal(json) else { return }

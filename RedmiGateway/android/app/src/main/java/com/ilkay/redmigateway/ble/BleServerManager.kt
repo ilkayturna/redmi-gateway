@@ -45,7 +45,7 @@ import java.util.concurrent.atomic.AtomicLong
  * control writes must be sealed, fresh and sequence-increasing; plain JSON is only accepted while
  * no keyed pairing exists. BLE never carries call audio.
  */
-class BleServerManager(private val context: Context) : CallManager.CallListener {
+class BleServerManager(private val context: Context) : CallManager.CallListener, CallManager.WaitingListener {
 
     companion object {
         private const val TAG = "BleServerManager"
@@ -430,6 +430,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         this.shouldBeRunning = false
         unregisterBluetoothReceiver()
         CallManager.removeListener(this)
+        CallManager.removeWaitingListener(this)
         com.ilkay.redmigateway.service.IPhoneReachability.removeListener(reachabilityListener)
         mainHandler.removeCallbacks(reconnectPulse)
         pulseScheduled = false
@@ -482,6 +483,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
             setupGattServer()
             startAdvertising()
             CallManager.addListener(this)
+            CallManager.addWaitingListener(this)
             com.ilkay.redmigateway.journal.CallJournal.get(context).addListener(callJournalListener)
             com.ilkay.redmigateway.journal.SmsJournal.get(context).addListener(smsJournalListener)
             isServerRunning = true
@@ -494,6 +496,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     private fun tearDownGattServerAndAdvertiser() {
         stopAdvertising()
         CallManager.removeListener(this)
+        CallManager.removeWaitingListener(this)
         com.ilkay.redmigateway.journal.CallJournal.get(context).removeListener(callJournalListener)
         com.ilkay.redmigateway.journal.SmsJournal.get(context).removeListener(smsJournalListener)
         try {
@@ -625,6 +628,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     // pairing key; the iPhone monitors that region and wakes up to present the call.
 
     private var beaconCallback: AdvertiseCallback? = null
+    private var beaconIsUrgent: Boolean? = null
     private var beaconMajor = 0
     private val beaconCheck = object : Runnable {
         override fun run() {
@@ -637,7 +641,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         val ringingHere = CallManager.currentCallState == "ringing" && CallManager.currentDirection == "incoming" &&
             IncomingCallPresenter.presentedOnIPhoneCallId != CallManager.currentCallId
         val pulsing = android.os.SystemClock.elapsedRealtime() < pulseUntil
-        if ((ringingHere || pulsing) && shouldBeRunning) startCallBeacon() else stopCallBeacon()
+        if ((ringingHere || pulsing) && shouldBeRunning) startCallBeacon(isUrgent = ringingHere) else stopCallBeacon()
     }
 
     // ---- Reconnect pulse ----
@@ -707,8 +711,12 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
         mainHandler.postDelayed({ updateCallBeacon() }, PULSE_MS + 100)
     }
 
-    private fun startCallBeacon() {
-        if (beaconCallback != null || !hasAdvertisePermission()) return
+    private fun startCallBeacon(isUrgent: Boolean = false) {
+        if (!hasAdvertisePermission()) return
+        if (beaconCallback != null) {
+            if (beaconIsUrgent == isUrgent) return
+            stopCallBeacon()
+        }
         val key = PairingStore.pairedClient()?.key ?: return
         val advertiser = bluetoothAdapter?.bluetoothLeAdvertiser ?: return
         val uuid = BridgeCrypto.derive(key, "beacon").copyOf(16)
@@ -721,29 +729,36 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
             .setIncludeTxPowerLevel(false)
             .addManufacturerData(0x004C, payload)
             .build()
+        val mode = if (isUrgent) AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY else AdvertiseSettings.ADVERTISE_MODE_BALANCED
+        val txPower = if (isUrgent) AdvertiseSettings.ADVERTISE_TX_POWER_HIGH else AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM
         val settings = AdvertiseSettings.Builder()
-            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+            .setAdvertiseMode(mode)
+            .setTxPowerLevel(txPower)
             .setConnectable(false)
             .setTimeout(0)
             .build()
         val callback = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-                Log.i(TAG, "Call wake beacon on (major $beaconMajor)")
+                Log.i(TAG, "Call wake beacon on (major $beaconMajor, urgent=$isUrgent)")
             }
 
             override fun onStartFailure(errorCode: Int) {
                 Log.w(TAG, "Call wake beacon failed: $errorCode")
-                if (beaconCallback === this) beaconCallback = null
+                if (beaconCallback === this) {
+                    beaconCallback = null
+                    beaconIsUrgent = null
+                }
             }
         }
         beaconCallback = callback
+        beaconIsUrgent = isUrgent
         try {
             advertiser.startAdvertising(settings, data, callback)
             mainHandler.removeCallbacks(beaconCheck)
             mainHandler.postDelayed(beaconCheck, 500)
         } catch (e: Exception) {
             beaconCallback = null
+            beaconIsUrgent = null
             Log.w(TAG, "Call wake beacon failed: ${e.javaClass.simpleName}")
         }
     }
@@ -756,6 +771,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
     private fun stopCallBeacon() {
         val callback = beaconCallback ?: return
         beaconCallback = null
+        beaconIsUrgent = null
         mainHandler.removeCallbacks(beaconCheck)
         runCatching { if (hasAdvertisePermission()) bluetoothAdapter?.bluetoothLeAdvertiser?.stopAdvertising(callback) }
         Log.i(TAG, "Call wake beacon off")
@@ -846,6 +862,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
      */
     private fun buildStateBytes(): ByteArray {
         val key = bleKey()
+        val isConf = CallManager.isConference
         val state = JSONObject()
             .put("s", CallManager.currentCallState)
             .put("id", CallManager.currentCallId ?: "")
@@ -854,19 +871,25 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
             .put("t", System.currentTimeMillis())
             .put("k", runCatching { com.ilkay.redmigateway.journal.CallJournal.get(context).latestSeq() }.getOrDefault(0L))
             .put("m", runCatching { com.ilkay.redmigateway.journal.SmsJournal.get(context).latestSeq() }.getOrDefault(0L))
+            .put("conf", isConf)
         CallManager.currentPhoneNumber?.takeIf { it.isNotBlank() }?.let { state.put("n", it) }
+        CallManager.waitingCallId?.let { state.put("wid", it) }
+        CallManager.waitingNumber?.takeIf { it.isNotBlank() }?.let { state.put("wn", it) }
         if (key != null) {
             return byteArrayOf(SEALED_VERSION) + BridgeCrypto.seal(key, state.toString().toByteArray(Charsets.UTF_8), BLE_STATE_AAD)
         }
         if (!PairingStore.legacyAuthAllowed) return ByteArray(0)
         // Protocol 1 layout for iPhone builds up to 1.0 (33).
-        return JSONObject()
+        val legacy = JSONObject()
             .put("state", CallManager.currentCallState)
             .put("callId", CallManager.currentCallId ?: "")
             .put("number", CallManager.currentPhoneNumber ?: "")
             .put("seq", state.getLong("q"))
             .put("ts", state.getLong("t"))
-            .toString().toByteArray(Charsets.UTF_8)
+            .put("conf", isConf)
+        CallManager.waitingCallId?.let { legacy.put("wid", it) }
+        CallManager.waitingNumber?.takeIf { it.isNotBlank() }?.let { legacy.put("wn", it) }
+        return legacy.toString().toByteArray(Charsets.UTF_8)
     }
 
     private fun notifyCharacteristicToSubscribers(
@@ -898,6 +921,12 @@ class BleServerManager(private val context: Context) : CallManager.CallListener 
 
     // CallManager.CallListener implementation
     override fun onCallStateChanged(callId: String, state: String, number: String?) {
+        charState?.let { notifyCharacteristicToSubscribers(it, buildStateBytes()) }
+        mainHandler.post { updateCallBeacon() }
+    }
+
+    // CallManager.WaitingListener implementation
+    override fun onWaitingCallChanged(callId: String?, number: String?) {
         charState?.let { notifyCharacteristicToSubscribers(it, buildStateBytes()) }
         mainHandler.post { updateCallBeacon() }
     }

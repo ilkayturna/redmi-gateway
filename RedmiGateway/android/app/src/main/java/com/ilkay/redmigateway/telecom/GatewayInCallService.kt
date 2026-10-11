@@ -10,6 +10,7 @@ import android.telecom.CallEndpointException
 import android.telecom.InCallService
 import android.util.Log
 import android.os.OutcomeReceiver
+import androidx.core.content.ContextCompat
 
 class GatewayInCallService : InCallService() {
 
@@ -23,7 +24,7 @@ class GatewayInCallService : InCallService() {
         /** Mutes the Redmi microphone on the cellular call; the iPhone supplies the uplink. */
         fun setGatewayMuted(muted: Boolean) {
             val service = instance ?: return
-            service.mainExecutor.execute {
+            ContextCompat.getMainExecutor(service).execute {
                 runCatching { service.setMuted(muted) }
                     .onFailure { Log.w(TAG, "Could not change call mute", it) }
             }
@@ -32,7 +33,13 @@ class GatewayInCallService : InCallService() {
         fun isSpeakerOn(): Boolean {
             val service = instance ?: return false
             return if (Build.VERSION.SDK_INT >= 34) {
-                service.currentCallEndpoint?.endpointType == CallEndpoint.TYPE_SPEAKER
+                val current = runCatching { service.currentCallEndpoint }.getOrNull()
+                if (current != null) {
+                    current.endpointType == CallEndpoint.TYPE_SPEAKER
+                } else {
+                    @Suppress("DEPRECATION")
+                    service.callAudioState?.route == CallAudioState.ROUTE_SPEAKER
+                }
             } else {
                 @Suppress("DEPRECATION")
                 service.callAudioState?.route == CallAudioState.ROUTE_SPEAKER
@@ -41,34 +48,42 @@ class GatewayInCallService : InCallService() {
 
         fun toggleSpeaker(onResult: (Boolean) -> Unit) {
             val service = instance ?: return onResult(false)
-            service.mainExecutor.execute {
+            val executor = ContextCompat.getMainExecutor(service)
+            executor.execute {
+                val toSpeaker = !isSpeakerOn()
+                val targetRoute = if (toSpeaker) CallAudioState.ROUTE_SPEAKER else CallAudioState.ROUTE_EARPIECE
+                fun fallbackAudioRoute() {
+                    val ok = runCatching {
+                        @Suppress("DEPRECATION")
+                        service.setAudioRoute(targetRoute)
+                        true
+                    }.onFailure { Log.w(TAG, "Fallback setAudioRoute failed", it) }.getOrDefault(false)
+                    onResult(ok)
+                }
+
                 if (Build.VERSION.SDK_INT >= 34) {
-                    val targetType = if (isSpeakerOn())
-                        CallEndpoint.TYPE_EARPIECE else CallEndpoint.TYPE_SPEAKER
+                    val targetType = if (toSpeaker)
+                        CallEndpoint.TYPE_SPEAKER else CallEndpoint.TYPE_EARPIECE
                     val endpoint = service.endpoints.firstOrNull {
                         it.endpointType == targetType
                     }
                     if (endpoint == null) {
-                        onResult(false)
+                        Log.w(TAG, "Endpoint $targetType not found in cached endpoints, falling back to setAudioRoute")
+                        fallbackAudioRoute()
                     } else {
                         service.requestCallEndpointChange(
-                            endpoint, service.mainExecutor,
+                            endpoint, executor,
                             object : OutcomeReceiver<Void?, CallEndpointException> {
                                 override fun onResult(result: Void?) = onResult(true)
                                 override fun onError(error: CallEndpointException) {
-                                    Log.w(TAG, "Could not change call speaker", error)
-                                    onResult(false)
+                                    Log.w(TAG, "requestCallEndpointChange error, falling back to setAudioRoute", error)
+                                    fallbackAudioRoute()
                                 }
                             }
                         )
                     }
                 } else {
-                    @Suppress("DEPRECATION")
-                    service.setAudioRoute(
-                        if (isSpeakerOn()) CallAudioState.ROUTE_EARPIECE
-                        else CallAudioState.ROUTE_SPEAKER
-                    )
-                    onResult(true)
+                    fallbackAudioRoute()
                 }
             }
         }
@@ -78,9 +93,10 @@ class GatewayInCallService : InCallService() {
             val service = instance ?: return false
             if (Build.VERSION.SDK_INT < 34) return false
             val current = service.currentCallEndpoint ?: return false
-            service.mainExecutor.execute {
+            val executor = ContextCompat.getMainExecutor(service)
+            executor.execute {
                 service.requestCallEndpointChange(
-                    current, service.mainExecutor,
+                    current, executor,
                     object : OutcomeReceiver<Void?, CallEndpointException> {
                         override fun onResult(result: Void?) = Unit
                         override fun onError(error: CallEndpointException) {
@@ -97,7 +113,8 @@ class GatewayInCallService : InCallService() {
 
         fun setAudioRoute(route: Int) {
             val service = instance ?: return
-            service.mainExecutor.execute {
+            val executor = ContextCompat.getMainExecutor(service)
+            executor.execute {
                 if (Build.VERSION.SDK_INT >= 34) {
                     val targetType = when (route) {
                         CallAudioState.ROUTE_SPEAKER -> CallEndpoint.TYPE_SPEAKER
@@ -108,14 +125,19 @@ class GatewayInCallService : InCallService() {
                     val endpoint = service.endpoints.firstOrNull { it.endpointType == targetType }
                     if (endpoint != null) {
                         service.requestCallEndpointChange(
-                            endpoint, service.mainExecutor,
+                            endpoint, executor,
                             object : OutcomeReceiver<Void?, CallEndpointException> {
                                 override fun onResult(result: Void?) = Unit
                                 override fun onError(error: CallEndpointException) {
-                                    Log.w(TAG, "Could not set audio route to $route", error)
+                                    Log.w(TAG, "Could not set audio route to $route via requestCallEndpointChange, falling back", error)
+                                    @Suppress("DEPRECATION")
+                                    service.setAudioRoute(route)
                                 }
                             }
                         )
+                    } else {
+                        @Suppress("DEPRECATION")
+                        service.setAudioRoute(route)
                     }
                 } else {
                     @Suppress("DEPRECATION")

@@ -34,7 +34,7 @@ object SmartHotspot {
     private const val PREFS = "smart_hotspot"
     private const val KEY_ENABLED = "enabled"
     private const val KEY_KNOWN = "known_ssids"
-    private const val CHECK_EVERY_MS = 5_000L
+    private const val CHECK_EVERY_MS = 20_000L
     private const val STABLE_MS = 15_000L
     private const val LOST_MS = 15_000L
     private const val TRY_MS = 30_000L
@@ -94,6 +94,22 @@ object SmartHotspot {
             .onFailure { Log.w(TAG, "Wi-Fi callback not registered: ${it.javaClass.simpleName}") }
         handler.post(ticker)
         Log.i(TAG, "Started (enabled=${prefs.getBoolean(KEY_ENABLED, true)}, known=${knownNetworks.size})")
+    }
+
+    fun stop(appContext: Context? = null) {
+        if (!started) return
+        started = false
+        handler.removeCallbacks(ticker)
+        val cm = (appContext?.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager) ?: connectivity()
+        runCatching { cm.unregisterNetworkCallback(callback) }
+            .onFailure { Log.w(TAG, "Wi-Fi callback not unregistered: ${it.javaClass.simpleName}") }
+        trying = null
+        tryDeadline = 0L
+        wifiNetwork = null
+        wifiSince = 0L
+        lostSince = 0L
+        lastScanAt = 0L
+        Log.i(TAG, "Stopped")
     }
 
     private val callback = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -188,14 +204,19 @@ object SmartHotspot {
     }
 
     private fun tryKnownNetwork(now: Long) {
+        if (!started || !enabled) return
+        val clientConnected = GatewayService.hasAuthenticatedClient()
+        val inCall = CallManager.currentCallState !in setOf("idle", "disconnected")
+        if (clientConnected || inCall) return
+
         val known = knownNetworks
         if (known.isEmpty()) return
-        val wifi = context.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        if (now - lastScanAt >= SCAN_EVERY_MS) {
-            lastScanAt = now
-            @Suppress("DEPRECATION")
-            runCatching { wifi.startScan() }
-        }
+        val eligible = known.filter { (backoff[it] ?: 0L) < now }
+        if (eligible.isEmpty()) return
+
+        val wifi = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
+        if (!wifi.isWifiEnabled) return
+
         val fresh = now * 1000 - SCAN_MAX_AGE_MS * 1000
         val candidate = runCatching { wifi.scanResults }.getOrDefault(emptyList())
             .asSequence()
@@ -203,13 +224,23 @@ object SmartHotspot {
             .mapNotNull { result ->
                 @Suppress("DEPRECATION")
                 val ssid = result.SSID?.removeSurrounding("\"").orEmpty()
-                if (ssid in known && (backoff[ssid] ?: 0L) < now) ssid to result.level else null
+                if (ssid in eligible) ssid to result.level else null
             }
-            .maxByOrNull { it.second }?.first ?: return
-        Log.i(TAG, "Known Wi-Fi $candidate in range; hotspot off to join it")
-        trying = candidate
-        tryDeadline = now + TRY_MS
-        stopHotspot()
+            .maxByOrNull { it.second }?.first
+
+        if (candidate != null) {
+            Log.i(TAG, "Known Wi-Fi $candidate in range; hotspot off to join it")
+            trying = candidate
+            tryDeadline = now + TRY_MS
+            stopHotspot()
+            return
+        }
+
+        if (now - lastScanAt >= SCAN_EVERY_MS) {
+            lastScanAt = now
+            @Suppress("DEPRECATION")
+            runCatching { wifi.startScan() }
+        }
     }
 
     private fun connectivity() = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager

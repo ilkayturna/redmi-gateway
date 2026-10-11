@@ -420,22 +420,30 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         }
     }
 
-    private fun isCallLive() = CallManager.currentCallState !in listOf("idle", "disconnected")
+    private fun isCallLive() = CallManager.isCallLive()
 
     private fun updateCallCard() {
         val live = isCallLive()
         binding.currentCallCard.visibility = visibleIf(live)
         if (!live) return
-        val number = CallManager.currentPhoneNumber.orEmpty()
-        val who = if (number.isBlank()) "Gizli numara" else nameFor(number)
-        binding.currentCallState.text = when (CallManager.currentCallState) {
-            "ringing" -> "Gelen arama"
-            "dialing", "connecting" -> "Aranıyor"
-            "holding" -> "Arama beklemede"
-            else -> "Görüşme sürüyor"
+        val isConf = CallManager.isConference
+        if (isConf) {
+            binding.currentCallState.text = "Konferans Görüşme"
+            val title = CallManager.currentPhoneNumber?.takeIf { it.isNotBlank() } ?: "Birleştirilmiş Arama"
+            binding.currentCallNumber.text = title
+            binding.currentCallCard.contentDescription = "Konferans Görüşme, $title. Arama ekranını aç."
+        } else {
+            val number = CallManager.currentPhoneNumber.orEmpty()
+            val who = if (number.isBlank()) "Gizli numara" else nameFor(number)
+            binding.currentCallState.text = when (CallManager.currentCallState) {
+                "ringing" -> "Gelen arama"
+                "dialing", "connecting" -> "Aranıyor"
+                "holding" -> "Arama beklemede"
+                else -> "Görüşme sürüyor"
+            }
+            binding.currentCallNumber.text = who
+            binding.currentCallCard.contentDescription = "${binding.currentCallState.text}, $who. Arama ekranını aç."
         }
-        binding.currentCallNumber.text = who
-        binding.currentCallCard.contentDescription = "${binding.currentCallState.text}, $who. Arama ekranını aç."
     }
 
     private fun openCurrentCall() {

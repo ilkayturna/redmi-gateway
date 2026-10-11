@@ -10,6 +10,9 @@ struct BLECallState {
     /// Newest entries of the Redmi's call and SMS journals; higher than seen means news.
     let callsSeq: Int64?
     let smsSeq: Int64?
+    var waitingCallId: String? = nil
+    var waitingNumber: String? = nil
+    var isConference: Bool = false
 }
 
 /// Bluetooth LE link to the Redmi: presence, its current address, and the call-state wake-up.
@@ -173,9 +176,15 @@ final class BLECentralManager: NSObject, ObservableObject {
         case "o": direction = "outgoing"
         default: direction = nil
         }
+        let wid = (object["wid"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let wn = object["wn"] as? String
+        let conf = object["conf"] as? Bool ?? false
         onStateUpdate?(BLECallState(state: state, callId: id, number: object["n"] as? String, direction: direction,
                                     callsSeq: (object["k"] as? NSNumber)?.int64Value,
-                                    smsSeq: (object["m"] as? NSNumber)?.int64Value))
+                                    smsSeq: (object["m"] as? NSNumber)?.int64Value,
+                                    waitingCallId: wid,
+                                    waitingNumber: wn,
+                                    isConference: conf))
     }
 
     private func handleControlReply(_ data: Data) {

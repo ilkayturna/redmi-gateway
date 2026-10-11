@@ -1,8 +1,11 @@
 # Call audio architecture
 
-This page explains how the conversation of a cellular call on the Redmi reaches the iPhone. It
-also records why it works this way. Every statement here was measured on the real device, with
-automated calls to the Turkcell 532 IVR (`scripts/lab`), before it was built.
+This page explains how the conversation of a cellular call on the Redmi reaches the iPhone and
+why this device needs this audio route. The routing and vendor conclusions below come from
+earlier real-device measurements using automated calls to the Turkcell 532 IVR (`scripts/lab`).
+The timing and mute changes dated 2026-10-01 have regression-model, build and Android installation
+evidence described below. Those checks do not establish human conversation quality on the
+computer's shared Wi-Fi; that comparison still needs a real two-way call.
 
 ## The device, as it really is
 
@@ -26,7 +29,42 @@ iPhone mic ─▶ UDP ─▶ open ─▶ AudioTrack (USAGE_MEDIA → TELEPHONY) 
 | Uplink | A 48 kHz stereo `AudioTrack` with `USAGE_MEDIA`/`CONTENT_TYPE_SPEECH` and `setPreferredDevice(TYPE_TELEPHONY)`, fed by a 3× polyphase upsampler (`Upsampler3x.kt`) | The track lands on the INCALL_MUSIC output (`incall_music_uplink2`), which mixes into the uplink without moving the call off the handset path. |
 | Vendor fix | `scripts/device/vendor_audio_fix.py` maps `USECASE_INCALL_MUSIC_UPLINK2` to PCM 27 and uses the `Incall_Music_2 Audio Mixer MultiMedia9` path | Without it, `pcm_prepare` fails and the uplink sounds like the old "helicopter" audio. It is reversible (`status`, `apply` and `revert`, backups in `/vendor/etc/phonebridge-backup`) and was applied with the owner's approval. Diagnostics show whether it is present. |
 | Isolation | `setParameters("device_mute=true;direction=tx")` and `direction=rx` | This mutes the Redmi's own microphone and earpiece while the iPhone owns the call, without touching the stream the iPhone feeds or reads. |
-| Pacing | Blocking writes with two frames primed. The queue holds at most 8 frames and is trimmed above 4. | Freshness beats completeness for live voice; see the `RELAY_HEALTH` logs. |
+| Android uplink pacing | Blocking writes pace 20 ms frames. Local links prime 4 frames; remote links retain 2-frame priming. `UplinkJitterBuffer` holds at most 12 frames (240 ms), trims one frame when depth stays above 6 for more than 500 ms, and discards PCM more than 400 ms old before playback. | A recoverable 200 ms arrival burst fits without losing speech, while depth and monotonic arrival age bound the backlog after a stall. See `RELAY_HEALTH` and diagnostics. |
+
+## iPhone timing and capture privacy (2026-10-01)
+
+The network format remains 20 ms of 16 kHz mono PCM16. Timing helpers in
+`ios/RedmiGateway/CallAudioTiming.swift` operate on monotonic timestamps and session generations;
+`AudioEngine` supplies the real capture, network and playback events.
+
+- **Capture and send:** the tap converts to 16 kHz and deposits complete frames into a bounded
+  capture queue under a lock. A one-shot timer sends at most one frame per deadline, after
+  priming 3 frames. Capacity is 12 frames; captured PCM older than 320 ms is discarded. The tap
+  stamps capture time before conversion or dispatch, using the hardware host timestamp when
+  available, and accounts for each frame's position within a batch. Queueing a delayed callback
+  therefore does not make old microphone samples fresh.
+- **Timer phase:** lateness below 2 ms preserves the nominal 20 ms phase. A stall of 2 ms or more
+  starts the next interval from actual send time, preventing an immediate catch-up packet.
+  Backpressure bounds outstanding sends to 3; an empty or blocked queue schedules another
+  future wake-up rather than spinning on an expired deadline.
+- **Playback:** 3 received frames prime playback, and at most 12 frames may be scheduled with
+  the player. The completion callback is `.dataPlayedBack`, so a scheduled frame remains
+  outstanding until it actually plays. When the player drains, priming is rearmed before new
+  speech starts. A receive gap above 500 ms clears unscheduled reserve and rearms priming.
+  Session generations prevent old completions or receives from entering the following call.
+- **Mute privacy:** a mute transition clears pending capture and increments a mute generation.
+  The tap's generation and captured-while-muted snapshot, together with the latest transition's
+  monotonic timestamp, mask delayed or partially accumulated PCM from before or across unmute.
+  Muted frames continue as zero PCM to preserve the live audio transport. Send-time mute is an
+  additional check; it cannot by itself protect samples captured earlier and delivered later.
+
+Android ownership still measures complete successful track writes, including substituted
+silence, without changing its fallback thresholds. Diagnostics separately report received PCM
+written in full, inserted silence and incomplete writes. Received PCM may naturally contain
+silent samples; these counters do not measure whether someone is speaking. Authenticated
+full-PCM arrival metrics record maximum gap and maximum burst length (successive arrivals within
+5 ms). Drop, expired-frame and underrun counters survive a stop/fallback for inspection and reset
+at the next media start. No audio content is added to these logs.
 
 ## Measured failures (do not retry)
 
@@ -130,3 +168,30 @@ only Apple push can reach it, and "Bağlı değil" otherwise.
 - Audio is sealed with a per-connection key, and packets from any address other than the
   authenticated client's are dropped.
 - Nothing is recorded, transcribed or stored on either phone. The logs contain only counters.
+
+## Validation and handoff (2026-10-01)
+
+- **Regression evidence:** deliberate RED runs
+  [36813156080](https://github.com/ilkayturna/redmi-gateway/actions/runs/36813156080) and
+  [36814171069](https://github.com/ilkayturna/redmi-gateway/actions/runs/36814171069) expose the
+  timing/mute regressions. Intermediate GREEN
+  [36813663867](https://github.com/ilkayturna/redmi-gateway/actions/runs/36813663867) is provisional
+  evidence for that intermediate revision. Final run
+  [36814654278](https://github.com/ilkayturna/redmi-gateway/actions/runs/36814654278) passed all 14 timing tests and native compilation, then was cancelled before signing to include the required API manifest;
+  final release [36814956967](https://github.com/ilkayturna/redmi-gateway/actions/runs/36814956967), code revision `3fb6d7c`, passed 14 timing regressions, native compilation, bundled privacy manifest checks, simulator launch, signed archive/export and Apple upload. Apple reported build 59 `VALID`, and [36815257360](https://github.com/ilkayturna/redmi-gateway/actions/runs/36815257360) verified it is assigned to the existing owner internal TestFlight group.
+- **Android local validation:** the current primary checkout passed 10 audio regression tests
+  and 5 existing `CallManager` tests. The audio cases cover lossless 200 ms bursts, bounded excess
+  backlog, priming, paced latency trimming, stale-frame expiry and retention of failure counters.
+  The full primary debug APK is versionCode 202 / versionName 2.0.2, SHA256
+  `DB98790B4806D442E30680E07200883B31609E67440D3372867D28667F864BFC`. It preserves the current
+  conference changes and was installed while the Redmi was idle; the installed hash was
+  verified. The foreground service restarted and the phone activity was opened.
+- **Rollback:** the APK pulled immediately before that installation is
+  `scratch/audio-diagnosis-20261001/redmi-installed-before-v202-latest.apk`, SHA256
+  `96C5FE5C6BC9C5FB288485432CCF18CD49EEA46604F1BE916EBAACCB07F2A4F7`. Keep that exact artifact
+  available until the new build is verified in conversation.
+- **Remaining device evidence:** the Redmi's Wi-Fi was disabled when installation was verified, so no
+  improvement in human call quality has been established. Reconnect both phones on the intended
+  Wi-Fi and compare a real two-way call using the new PCM/silence, drop/underrun, arrival-gap and
+  burst diagnostics. Installation of the matching iOS binary and a two-way speech test remain
+  separate from Android installation and synthetic timing checks.

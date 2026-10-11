@@ -48,24 +48,28 @@ class NsdDiscoveryManager(private val context: Context) {
             isRegistering = false
             currentRegisteredName = serviceInfo.serviceName
             Log.i(TAG, "NSD service registered successfully as '${serviceInfo.serviceName}' on port ${serviceInfo.port}")
+            releaseMulticastLock()
         }
 
         override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
             isRegistered = false
             isRegistering = false
             Log.w(TAG, "NSD registration failed with error code $errorCode")
+            releaseMulticastLock()
         }
 
         override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {
             isRegistered = false
             isRegistering = false
             Log.i(TAG, "NSD service unregistered successfully")
+            releaseMulticastLock()
         }
 
         override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
             isRegistered = false
             isRegistering = false
             Log.w(TAG, "NSD unregistration failed with error code $errorCode")
+            releaseMulticastLock()
         }
     }
 
@@ -177,17 +181,23 @@ class NsdDiscoveryManager(private val context: Context) {
     private fun reRegisterService() {
         if (!isRunning) return
         Log.i(TAG, "Re-registering NSD service on port $activePort...")
+        acquireMulticastLock()
         unregisterService()
         // Allow brief interval for unregistration before registering anew
         handler.postDelayed({
             if (isRunning) {
                 registerService()
+            } else {
+                releaseMulticastLock()
             }
         }, 300L)
     }
 
     private fun registerService() {
-        if (isRegistered || isRegistering || nsdManager == null) return
+        if (isRegistered || isRegistering || nsdManager == null) {
+            releaseMulticastLock()
+            return
+        }
         isRegistering = true
 
         val deviceId = RedmiGatewayApp.getOpaqueDeviceId()
@@ -212,6 +222,7 @@ class NsdDiscoveryManager(private val context: Context) {
         } catch (e: Exception) {
             isRegistering = false
             Log.e(TAG, "Exception during NSD service registration: ${e.message}", e)
+            releaseMulticastLock()
         }
     }
 

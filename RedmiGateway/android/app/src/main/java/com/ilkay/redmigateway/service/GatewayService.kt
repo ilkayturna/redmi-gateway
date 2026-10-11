@@ -145,6 +145,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     private fun stopGateway() {
         Log.i(TAG, "Stopping Gateway Service...")
         handler.removeCallbacks(restoreHotspot)
+        SmartHotspot.stop(this)
         IPhoneReachability.removeListener(reachabilityListener)
         nsdDiscoveryManager?.stop()
         nsdDiscoveryManager = null

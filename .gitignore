@@ -25,3 +25,7 @@ RedmiGateway/root/
 
 # Lab binaries built from scripts/lab sources
 RedmiGateway/scripts/lab/mixctl
+
+.agents/
+.orchestrator/
+scratch/

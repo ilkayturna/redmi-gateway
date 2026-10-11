@@ -12,6 +12,7 @@ import android.telecom.VideoProfile
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
 object CallManager {
@@ -23,6 +24,10 @@ object CallManager {
     }
 
     private val listeners = CopyOnWriteArrayList<CallListener>()
+
+    private val calls = CopyOnWriteArrayList<Call>()
+    private val callIds = ConcurrentHashMap<Call, String>()
+    private val callCallbacks = ConcurrentHashMap<Call, Call.Callback>()
 
     @Volatile var activeCall: Call? = null
         private set
@@ -41,7 +46,45 @@ object CallManager {
     /** Wall-clock creation time of the current call; the CallLog entry carries the same time. */
     @Volatile var addedAtMillis: Long = 0L
         private set
-    private var activeCallCallback: Call.Callback? = null
+
+    val isConference: Boolean
+        get() = isConference(activeCall) || calls.any { isConference(it) && isCallLive(it) }
+
+    fun isCallLive(): Boolean =
+        currentCallState !in listOf("idle", "disconnected") || calls.any { isCallLive(it) }
+
+    fun isConference(call: Call?): Boolean {
+        if (call == null) return false
+        val details = runCatching { call.details }.getOrNull()
+        val hasConferenceProp = details?.hasProperty(Call.Details.PROPERTY_CONFERENCE) == true
+        val hasChildren = runCatching { call.children.isNotEmpty() }.getOrDefault(false)
+        return hasConferenceProp || hasChildren
+    }
+
+    fun getConferenceParticipantSummary(call: Call? = activeCall): String? {
+        val c = call ?: return null
+        val children = runCatching { c.children }.getOrNull().orEmpty()
+        if (children.isEmpty()) return null
+        val numbers = children.mapNotNull { extractPhoneNumber(it) }.filter { it.isNotBlank() }
+        return if (numbers.isNotEmpty()) numbers.joinToString(", ") else null
+    }
+
+    private fun getConferenceTitle(call: Call): String {
+        val children = runCatching { call.children }.getOrNull().orEmpty()
+        return if (children.isNotEmpty()) {
+            "Konferans Görüşme (${children.size} kişi)"
+        } else {
+            "Konferans Görüşme"
+        }
+    }
+
+    private fun isLiveState(state: Int): Boolean {
+        return state != Call.STATE_DISCONNECTED && state != Call.STATE_DISCONNECTING
+    }
+
+    fun isCallLive(call: Call?): Boolean {
+        return call != null && isLiveState(call.state)
+    }
 
     /**
      * Call waiting: a second incoming call while one is in progress. It is tracked apart from the
@@ -79,7 +122,9 @@ object CallManager {
 
     private fun setWaiting(call: Call) {
         waitingCall = call
-        waitingCallId = UUID.randomUUID().toString()
+        val id = UUID.randomUUID().toString()
+        waitingCallId = id
+        callIds[call] = id
         waitingNumber = extractPhoneNumber(call)
         answerWaitingWhenFree = false
         val callback = object : Call.Callback() {
@@ -89,6 +134,14 @@ object CallManager {
                 if (!num.isNullOrBlank() && num != waitingNumber) {
                     waitingNumber = num
                     notifyWaitingChanged()
+                }
+            }
+
+            override fun onStateChanged(c: Call, state: Int) {
+                if (waitingCall !== c) return
+                if (state == Call.STATE_DISCONNECTED) {
+                    log("Waiting call disconnected in onStateChanged")
+                    clearWaiting()
                 }
             }
         }
@@ -102,7 +155,7 @@ object CallManager {
     private fun clearWaiting(): Pair<Call, String>? {
         val call = waitingCall ?: return null
         val id = waitingCallId ?: return null
-        waitingCallback?.let { call.unregisterCallback(it) }
+        waitingCallback?.let { runCatching { call.unregisterCallback(it) } }
         waitingCallback = null
         waitingCall = null
         waitingCallId = null
@@ -139,96 +192,205 @@ object CallManager {
         onCallAdded(call, null)
     }
 
+    @Synchronized
     private fun onCallAdded(call: Call, reuseId: String?) {
-        if (activeCall != null && activeCall !== call) {
-            if (waitingCall == null && call.state == Call.STATE_RINGING) {
-                setWaiting(call)
-                RedmiRinger.onWaiting(true)
-            } else {
-                log("Additional call ignored: a call is already waiting")
-            }
+        if (calls.contains(call)) {
+            log("Call already tracked: ${callIds[call]}")
             return
         }
-        activeCall = call
-        currentCallId = reuseId ?: UUID.randomUUID().toString()
-        currentPhoneNumber = extractPhoneNumber(call)
-        val stateStr = mapCallState(call.state)
-        currentCallState = stateStr
-        currentDirection = if (call.state == Call.STATE_RINGING ||
-            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-                call.details?.callDirection == Call.Details.DIRECTION_INCOMING)) "incoming" else "outgoing"
-        activeSinceMillis = if (stateStr == "active") System.currentTimeMillis() else 0L
-        addedAtMillis = call.details?.creationTimeMillis?.takeIf { it > 0 } ?: System.currentTimeMillis()
 
-        log("Call Added: ID=$currentCallId, State=$stateStr")
-        if (stateStr == "ringing" && currentDirection == "incoming") {
-            val silent = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-                call.details?.extras?.getBoolean(Call.EXTRA_SILENT_RINGING_REQUESTED, false) == true
-            RedmiRinger.onIncoming(currentCallId!!, silent)
-        }
-        notifyStateChanged()
+        val callId = reuseId ?: UUID.randomUUID().toString()
+        callIds[call] = callId
+        calls.add(call)
+
+        val mappedState = mapCallState(call.state)
+        val isConf = isConference(call)
+        log("Call Added: ID=$callId, State=$mappedState, IsConference=$isConf, TotalCalls=${calls.size}")
 
         val callback = object : Call.Callback() {
             override fun onStateChanged(c: Call, state: Int) {
-                if (activeCall !== c) return
                 val mapped = mapCallState(state)
-                if (mapped != "ringing") RedmiRinger.stop()
-                currentCallState = mapped
-                if (mapped == "active" && activeSinceMillis == 0L) activeSinceMillis = System.currentTimeMillis()
-                val num = extractPhoneNumber(c)
-                if (!num.isNullOrBlank() && currentPhoneNumber.isNullOrBlank()) {
-                    currentPhoneNumber = num
+                log("Call State Changed: ID=${callIds[c]}, State=$mapped")
+                if (c === waitingCall) {
+                    if (state == Call.STATE_DISCONNECTED) {
+                        clearWaiting()
+                    }
+                    return
                 }
-                log("Call State Changed: ID=$currentCallId, State=$mapped")
-                notifyStateChanged()
+                if (mapped != "ringing") {
+                    RedmiRinger.stop()
+                }
+                updatePrimaryCallAndNotify("state_changed")
             }
 
             override fun onDetailsChanged(c: Call, details: Call.Details) {
-                if (activeCall !== c) return
-                val num = extractPhoneNumber(c)
-                if (!num.isNullOrBlank() && num != currentPhoneNumber) {
-                    currentPhoneNumber = num
-                    log("Call Details Changed")
-                    notifyStateChanged()
+                if (c === waitingCall) {
+                    val num = extractPhoneNumber(c)
+                    if (!num.isNullOrBlank() && num != waitingNumber) {
+                        waitingNumber = num
+                        notifyWaitingChanged()
+                    }
+                    return
                 }
+                updatePrimaryCallAndNotify("details_changed")
+            }
+
+            override fun onChildrenChanged(c: Call, children: MutableList<Call>) {
+                log("onChildrenChanged on ID=${callIds[c]}, children count=${children.size}")
+                for (child in children) {
+                    if (!calls.contains(child)) {
+                        onCallAdded(child)
+                    }
+                }
+                updatePrimaryCallAndNotify("children_changed")
+            }
+
+            override fun onParentChanged(c: Call, parent: Call?) {
+                log("onParentChanged on ID=${callIds[c]}, hasParent=${parent != null}")
+                if (parent != null && !calls.contains(parent)) {
+                    onCallAdded(parent)
+                }
+                updatePrimaryCallAndNotify("parent_changed")
+            }
+
+            override fun onConferenceableCallsChanged(c: Call, conferenceableCalls: MutableList<Call>) {
+                log("onConferenceableCallsChanged on ID=${callIds[c]}, count=${conferenceableCalls.size}")
+                updatePrimaryCallAndNotify("conferenceable_changed")
             }
         }
-        activeCallCallback = callback
+        callCallbacks[call] = callback
         call.registerCallback(callback)
+
+        // Check if there is already an active/connected call and this is a second incoming ringing call
+        val hasActiveLiveCall = calls.any { it !== call && isCallLive(it) && it.state != Call.STATE_RINGING }
+        if (call.state == Call.STATE_RINGING && hasActiveLiveCall && waitingCall == null) {
+            setWaiting(call)
+            RedmiRinger.onWaiting(true)
+            return
+        }
+
+        updatePrimaryCallAndNotify("call_added")
+
+        if (activeCall === call && call.state == Call.STATE_RINGING && currentDirection == "incoming") {
+            val silent = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                call.details?.extras?.getBoolean(Call.EXTRA_SILENT_RINGING_REQUESTED, false) == true
+            RedmiRinger.onIncoming(callId, silent)
+        }
     }
 
+    @Synchronized
     fun onCallRemoved(call: Call) {
+        val id = callIds[call]
+        log("Call Removed from Telecom: ID=$id, State=${mapCallState(call.state)}, Total before=${calls.size}")
+
         if (waitingCall === call) {
             log("Waiting call ended")
             clearWaiting()
             answerWaitingWhenFree = false
+            calls.remove(call)
+            callIds.remove(call)
+            callCallbacks.remove(call)?.let { cb -> runCatching { call.unregisterCallback(cb) } }
             return
         }
-        if (activeCall === call) {
-            activeCallCallback?.let { call.unregisterCallback(it) }
-            activeCallCallback = null
-            RedmiRinger.stop()
-            val finalId = currentCallId ?: return
-            log("Call Removed / Terminated: ID=$finalId")
-            currentCallState = "disconnected"
-            notifyStateChanged()
 
-            IncomingCallPresenter.onCallEnded(finalId)
-            if (activeSinceMillis != 0L) {
-                // Recents on both phones show which one carried the conversation.
-                val device = if (com.ilkay.redmigateway.audio.CallAudioRelay.carriedCallId == finalId) "iphone" else "redmi"
-                com.ilkay.redmigateway.journal.CallJournal.get(com.ilkay.redmigateway.RedmiGatewayApp.instance)
-                    .noteAnsweredOn(addedAtMillis, device)
+        callCallbacks.remove(call)?.let { cb ->
+            runCatching { call.unregisterCallback(cb) }
+        }
+        calls.remove(call)
+        callIds.remove(call)
+
+        updatePrimaryCallAndNotify("call_removed")
+    }
+
+    private fun selectPrimaryCall(): Call? {
+        val liveCalls = calls.filter { isCallLive(it) && it !== waitingCall }
+        if (liveCalls.isEmpty()) return null
+
+        // 1. Live conference call (parent)
+        val conf = liveCalls.firstOrNull { isConference(it) }
+        if (conf != null) return conf
+
+        // 2. Active call
+        val active = liveCalls.firstOrNull { it.state == Call.STATE_ACTIVE }
+        if (active != null) return active
+
+        // 3. Dialing or connecting call
+        val dialing = liveCalls.firstOrNull { it.state == Call.STATE_DIALING || it.state == Call.STATE_CONNECTING }
+        if (dialing != null) return dialing
+
+        // 4. Ringing call (if not handled as waiting)
+        val ringing = liveCalls.firstOrNull { it.state == Call.STATE_RINGING }
+        if (ringing != null) return ringing
+
+        // 5. Holding call
+        val holding = liveCalls.firstOrNull { it.state == Call.STATE_HOLDING }
+        if (holding != null) return holding
+
+        // 6. First live call
+        return liveCalls.firstOrNull()
+    }
+
+    @Synchronized
+    private fun updatePrimaryCallAndNotify(reason: String) {
+        val primary = selectPrimaryCall()
+        if (primary != null) {
+            activeCall = primary
+            currentCallId = callIds[primary] ?: UUID.randomUUID().toString().also { callIds[primary] = it }
+            val mappedState = mapCallState(primary.state)
+            currentCallState = mappedState
+
+            val isConf = isConference(primary)
+            val number = if (isConf) {
+                getConferenceTitle(primary)
+            } else {
+                extractPhoneNumber(primary) ?: currentPhoneNumber
             }
-            // Reset after informing listeners
-            activeCall = null
-            currentCallState = "idle"
-            currentCallId = null
-            currentPhoneNumber = null
-            activeSinceMillis = 0L
-            addedAtMillis = 0L
+            currentPhoneNumber = number
+
+            if (primary.state == Call.STATE_RINGING ||
+                (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                    primary.details?.callDirection == Call.Details.DIRECTION_INCOMING)) {
+                currentDirection = "incoming"
+            } else if (!isConf && (currentDirection.isBlank() || primary.state == Call.STATE_DIALING || primary.state == Call.STATE_CONNECTING)) {
+                currentDirection = "outgoing"
+            }
+
+            if (mappedState == "active" && activeSinceMillis == 0L) {
+                activeSinceMillis = System.currentTimeMillis()
+            }
+            if (addedAtMillis == 0L) {
+                addedAtMillis = primary.details?.creationTimeMillis?.takeIf { it > 0 } ?: System.currentTimeMillis()
+            }
+
+            log("Primary call evaluated ($reason): ID=$currentCallId, State=$currentCallState, Number=$currentPhoneNumber, Conf=$isConf")
             notifyStateChanged()
-            promoteWaiting()
+        } else {
+            // No live calls remain!
+            if (activeCall != null || currentCallState != "idle") {
+                log("No live calls remain ($reason). Transitioning to disconnected then idle.")
+                val finalId = currentCallId
+                currentCallState = "disconnected"
+                notifyStateChanged()
+
+                if (finalId != null) {
+                    IncomingCallPresenter.onCallEnded(finalId)
+                    if (activeSinceMillis != 0L) {
+                        val device = if (com.ilkay.redmigateway.audio.CallAudioRelay.carriedCallId == finalId) "iphone" else "redmi"
+                        com.ilkay.redmigateway.journal.CallJournal.get(com.ilkay.redmigateway.RedmiGatewayApp.instance)
+                            .noteAnsweredOn(addedAtMillis, device)
+                    }
+                }
+
+                activeCall = null
+                currentCallState = "idle"
+                currentCallId = null
+                currentPhoneNumber = null
+                activeSinceMillis = 0L
+                addedAtMillis = 0L
+                RedmiRinger.stop()
+                notifyStateChanged()
+                promoteWaiting()
+            }
         }
     }
 
@@ -237,10 +399,17 @@ object CallManager {
         val (call, id) = clearWaiting() ?: return
         val answerNow = answerWaitingWhenFree
         answerWaitingWhenFree = false
-        if (call.state == Call.STATE_DISCONNECTED) return
+        if (call.state == Call.STATE_DISCONNECTED) {
+            calls.remove(call)
+            callIds.remove(call)
+            callCallbacks.remove(call)?.let { cb -> runCatching { call.unregisterCallback(cb) } }
+            return
+        }
         log("Waiting call becomes the current call: ID=$id")
-        onCallAdded(call, id)
-        if (answerNow && call.state == Call.STATE_RINGING) answer(id)
+        updatePrimaryCallAndNotify("promote_waiting")
+        if (answerNow && call.state == Call.STATE_RINGING) {
+            answer(id)
+        }
     }
 
     private fun notifyStateChanged() {
@@ -269,11 +438,15 @@ object CallManager {
             }
             return true
         }
-        val call = activeCall
+        val call = if (expectedCallId != null) {
+            calls.firstOrNull { callIds[it] == expectedCallId } ?: activeCall
+        } else {
+            activeCall
+        }
         if (call != null &&
-            (expectedCallId == null || expectedCallId == currentCallId) &&
+            (expectedCallId == null || expectedCallId == callIds[call] || expectedCallId == currentCallId) &&
             call.state == Call.STATE_RINGING) {
-            log("Executing ANSWER on call: $currentCallId")
+            log("Executing ANSWER on call: ${callIds[call]}")
             return try {
                 call.answer(VideoProfile.STATE_AUDIO_ONLY)
                 true
@@ -289,11 +462,15 @@ object CallManager {
 
     fun reject(expectedCallId: String? = null): Boolean {
         if (expectedCallId != null && expectedCallId == waitingCallId) return rejectWaiting()
-        val call = activeCall
+        val call = if (expectedCallId != null) {
+            calls.firstOrNull { callIds[it] == expectedCallId } ?: activeCall
+        } else {
+            activeCall
+        }
         if (call != null &&
-            (expectedCallId == null || expectedCallId == currentCallId) &&
+            (expectedCallId == null || expectedCallId == callIds[call] || expectedCallId == currentCallId) &&
             call.state == Call.STATE_RINGING) {
-            log("Executing REJECT on call: $currentCallId")
+            log("Executing REJECT on call: ${callIds[call]}")
             return try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     call.reject(Call.REJECT_REASON_DECLINED)
@@ -331,26 +508,98 @@ object CallManager {
 
     fun hangup(expectedCallId: String? = null): Boolean {
         if (expectedCallId != null && expectedCallId == waitingCallId) return rejectWaiting()
-        val call = activeCall
-        val matchesCallId = expectedCallId == null ||
-            expectedCallId == currentCallId ||
-            (expectedCallId.startsWith("outgoing_") && call != null)
-        if (call != null &&
-            matchesCallId &&
-            call.state != Call.STATE_DISCONNECTED &&
-            call.state != Call.STATE_DISCONNECTING) {
-            log("Executing HANGUP / DISCONNECT on call: $currentCallId (expected: $expectedCallId)")
+        val call = if (expectedCallId != null && expectedCallId != currentCallId && !expectedCallId.startsWith("outgoing_")) {
+            calls.firstOrNull { callIds[it] == expectedCallId } ?: activeCall
+        } else {
+            activeCall
+        }
+
+        if (call != null && isCallLive(call)) {
+            log("Executing HANGUP / DISCONNECT on call: ${callIds[call]} (conference=${isConference(call)})")
             return try {
                 call.disconnect()
+                if (isConference(call)) {
+                    for (child in call.children.orEmpty()) {
+                        if (isCallLive(child)) {
+                            runCatching { child.disconnect() }
+                        }
+                    }
+                }
                 true
             } catch (e: Exception) {
                 log("Error hanging up call: ${e.message}")
                 false
             }
+        } else if (calls.any { isCallLive(it) }) {
+            log("Executing HANGUP on all remaining live calls (${calls.size})")
+            var anyDisconnected = false
+            for (c in calls) {
+                if (isCallLive(c)) {
+                    runCatching {
+                        c.disconnect()
+                        anyDisconnected = true
+                    }
+                }
+            }
+            return anyDisconnected
         } else {
             log("Cannot hangup: call ID or state does not match a current call")
             return false
         }
+    }
+
+    fun canMerge(): Boolean {
+        val current = activeCall ?: return false
+        val details = current.details
+        val hasMergeCap = details != null && (details.callCapabilities and Call.Details.CAPABILITY_MERGE_CONFERENCE) != 0
+        if (hasMergeCap) return true
+        if (runCatching { current.conferenceableCalls.isNotEmpty() }.getOrDefault(false)) return true
+        val otherLiveCalls = calls.filter { it !== current && isCallLive(it) }
+        return otherLiveCalls.isNotEmpty()
+    }
+
+    fun merge(): Boolean {
+        val current = activeCall ?: return false
+        val details = current.details
+        val hasMergeCap = details != null && (details.callCapabilities and Call.Details.CAPABILITY_MERGE_CONFERENCE) != 0
+        if (hasMergeCap) {
+            log("Merging conference via mergeConference()")
+            runCatching { current.mergeConference() }
+            return true
+        }
+        val confCall = runCatching { current.conferenceableCalls.firstOrNull() }.getOrNull()
+        if (confCall != null) {
+            log("Merging call with conferenceable call via conference()")
+            runCatching { current.conference(confCall) }
+            return true
+        }
+        val other = calls.firstOrNull { it !== current && isCallLive(it) }
+        if (other != null) {
+            log("Merging call with other live call via conference()")
+            runCatching { current.conference(other) }
+            return true
+        }
+        log("Cannot merge: no mergeable calls found")
+        return false
+    }
+
+    fun getCall(callId: String): Call? {
+        return callIds.entries.firstOrNull { it.value == callId }?.key
+            ?: calls.firstOrNull { callIds[it] == callId }
+            ?: if (callId == currentCallId) activeCall else if (callId == waitingCallId) waitingCall else null
+    }
+
+    fun swap(): Boolean {
+        val active = calls.firstOrNull { it.state == Call.STATE_ACTIVE } ?: activeCall?.takeIf { it.state == Call.STATE_ACTIVE }
+        val holding = calls.firstOrNull { it.state == Call.STATE_HOLDING }
+        if (active != null && holding != null) {
+            log("Swapping calls: holding active=${callIds[active]}, unholding holding=${callIds[holding]}")
+            runCatching { active.hold() }
+            runCatching { holding.unhold() }
+            return true
+        }
+        log("Cannot swap calls: active=$active, holding=$holding")
+        return false
     }
 
     fun playDtmf(digit: Char): Boolean {
@@ -361,7 +610,7 @@ object CallManager {
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                     runCatching { call.stopDtmfTone() }
                 }, 200L)
-                log("Played DTMF tone")
+                log("Played DTMF tone: $digit")
                 true
             } catch (e: Exception) {
                 log("Error playing DTMF tone: ${e.message}")
@@ -391,7 +640,7 @@ object CallManager {
             log("Cannot dial: invalid number format")
             return false
         }
-        if (activeCall != null) {
+        if (activeCall != null || calls.any { isCallLive(it) }) {
             log("Cannot dial: gateway is already handling a call")
             return false
         }
@@ -418,25 +667,72 @@ object CallManager {
         }
     }
 
+    private val INVALID_NUMBERS = setOf(
+        "unknown", "private", "restricted", "unavailable", "anonymous", "null", "gizli", "bilinmeyen"
+    )
+
+    private fun cleanCandidateNumber(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        var s = raw.trim()
+        if (s.startsWith("sip:", ignoreCase = true)) s = s.substring(4)
+        if (s.startsWith("tel:", ignoreCase = true)) s = s.substring(4)
+        if (s.contains("@")) s = s.substringBefore("@")
+        if (s.contains(";")) s = s.substringBefore(";")
+        if (s.contains("?")) s = s.substringBefore("?")
+        s = s.trim()
+        if (s.isBlank() || s.lowercase() in INVALID_NUMBERS) return null
+        return s
+    }
+
+    private fun extractFromBundle(bundle: Bundle?): String? {
+        if (bundle == null) return null
+        val keys = arrayOf(
+            "android.telecom.extra.INCOMING_CALL_ADDRESS",
+            "android.telecom.extra.INCOMING_NUMBER",
+            "android.telephony.extra.INCOMING_NUMBER",
+            "incoming_number",
+            "cce_caller_id",
+            "com.android.phone.extra.INCOMING_NUMBER"
+        )
+        for (key in keys) {
+            val value = runCatching { bundle.get(key) }.getOrNull() ?: continue
+            val raw = when (value) {
+                is Uri -> value.schemeSpecificPart ?: value.toString()
+                is String -> value
+                else -> value.toString()
+            }
+            cleanCandidateNumber(raw)?.let { return it }
+        }
+        return null
+    }
+
     private fun extractPhoneNumber(call: Call): String? {
-        val handle = call.details?.handle
+        val details = call.details
+
+        // 1. Check handle (and clean SIP URI if present)
+        val handle = details?.handle
         if (handle != null) {
-            val schemeSpecific = handle.schemeSpecificPart
-            if (!schemeSpecific.isNullOrBlank()) {
-                return schemeSpecific
-            }
+            val s = handle.schemeSpecificPart ?: handle.toString()
+            cleanCandidateNumber(s)?.let { return it }
         }
-        val gatewayAddress = call.details?.gatewayInfo?.originalAddress
+
+        // 2. Check gatewayInfo originalAddress
+        val gatewayAddress = details?.gatewayInfo?.originalAddress
         if (gatewayAddress != null) {
-            val s = gatewayAddress.schemeSpecificPart
-            if (!s.isNullOrBlank()) {
-                return s
-            }
+            val s = gatewayAddress.schemeSpecificPart ?: gatewayAddress.toString()
+            cleanCandidateNumber(s)?.let { return it }
         }
-        val callerName = call.details?.callerDisplayName
-        if (!callerName.isNullOrBlank()) {
+
+        // 3. Check vendor extras from extras and intentExtras
+        extractFromBundle(details?.extras)?.let { return it }
+        extractFromBundle(details?.intentExtras)?.let { return it }
+
+        // 4. Check callerDisplayName
+        val callerName = cleanCandidateNumber(details?.callerDisplayName)
+        if (callerName != null) {
             return callerName
         }
+
         return null
     }
 

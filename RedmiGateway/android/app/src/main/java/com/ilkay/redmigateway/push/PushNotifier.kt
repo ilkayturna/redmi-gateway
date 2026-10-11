@@ -26,7 +26,7 @@ import org.json.JSONObject
  *   ordinary notification is pushed. At home the iPhone fetches entries itself (Bluetooth wake),
  *   so nothing is sent twice.
  */
-object PushNotifier : CallManager.CallListener, CallJournal.Listener, SmsJournal.Listener {
+object PushNotifier : CallManager.CallListener, CallJournal.Listener, SmsJournal.Listener, CallManager.WaitingListener {
     private const val PREFS = "phonebridge_push"
     private const val KEY_SMS_CONTENT = "sms_content_in_push"
     private val PUSH_AAD = "phonebridge-push".toByteArray(Charsets.UTF_8)
@@ -49,30 +49,42 @@ object PushNotifier : CallManager.CallListener, CallJournal.Listener, SmsJournal
         if (started) return
         started = true
         CallManager.addListener(this)
+        CallManager.addWaitingListener(this)
         CallJournal.get(context).addListener(this)
         SmsJournal.get(context).addListener(this)
     }
 
+    override fun onWaitingCallChanged(callId: String?, number: String?) {
+        if (callId == null || callId == pushedCallId) return
+        handler.postDelayed({ maybePushCall(callId, number) }, 1500)
+    }
+
     override fun onCallStateChanged(callId: String, state: String, number: String?) {
+        if (state == "idle" && CallManager.waitingCallId == null) {
+            pushedCallId = null
+        }
         if (state != "ringing" || CallManager.currentDirection != "incoming" || callId == pushedCallId) return
-        handler.postDelayed({ maybePushCall(callId) }, 1500)
+        handler.postDelayed({ maybePushCall(callId, number) }, 1500)
     }
 
     override fun onLogMessage(message: String) = Unit
 
-    private fun maybePushCall(callId: String) {
+    private fun maybePushCall(callId: String, number: String? = null) {
         if (!ApnsSender.isReady || callId == pushedCallId) return
-        if (CallManager.currentCallId != callId || CallManager.currentCallState != "ringing") return
+        val isCurrentRinging = CallManager.currentCallId == callId && CallManager.currentCallState == "ringing"
+        val isWaiting = CallManager.waitingCallId == callId
+        if (!isCurrentRinging && !isWaiting) return
         if (IncomingCallPresenter.presentedOnIPhoneCallId == callId) return
         val key = PairingStore.pairedClient()?.key ?: return
         pushedCallId = callId
+        val phoneNum = number ?: (if (isWaiting) CallManager.waitingNumber else CallManager.currentPhoneNumber) ?: ""
         val body = JSONObject()
             .put("id", callId)
-            .put("n", CallManager.currentPhoneNumber ?: "")
+            .put("n", phoneNum)
             .put("t", System.currentTimeMillis())
         val sealed = BridgeCrypto.seal(BridgeCrypto.derive(key, "push"), body.toString().toByteArray(Charsets.UTF_8), PUSH_AAD)
         ApnsSender.sendVoip(JSONObject().put("p", BridgeCrypto.b64(sealed)))
-        CallManager.log("Incoming call pushed to the iPhone through Apple")
+        CallManager.log("Incoming call (waiting=$isWaiting) pushed to the iPhone through Apple")
     }
 
     override fun onSmsJournalEntry(entry: SmsJournal.Entry) {

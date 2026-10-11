@@ -14,6 +14,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.provider.ContactsContract
 import android.net.Uri
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -22,16 +23,19 @@ import androidx.core.content.ContextCompat
 import com.ilkay.redmigateway.R
 import com.ilkay.redmigateway.audio.CallAudioRelay
 import com.ilkay.redmigateway.databinding.ActivityCallBinding
+import com.ilkay.redmigateway.server.ContactResolver
+import com.ilkay.redmigateway.server.GatewayWebSocketServer
 import com.ilkay.redmigateway.telecom.CallManager
 import com.ilkay.redmigateway.telecom.GatewayInCallService
 import com.ilkay.redmigateway.telecom.IncomingCallPresenter
+import com.ilkay.redmigateway.telecom.RedmiRinger
 
 /**
  * A polished in-call experience when this app is the Redmi's default dialer.
  * Supports swipe-to-answer/reject, clear audio ownership status, 2x2 control grid,
  * DTMF keypad, and proximity screen-off.
  */
-class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRelay.Listener, SensorEventListener {
+class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRelay.Listener, SensorEventListener, ContactResolver.Listener {
     private lateinit var binding: ActivityCallBinding
 
     private var sensorManager: SensorManager? = null
@@ -70,6 +74,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
         super.onStart()
         CallManager.addListener(this)
         CallAudioRelay.addListener(this)
+        ContactResolver.addListener(this)
         CallManager.addWaitingListener(waitingListener)
         IncomingCallPresenter.onChanged = {
             runOnUiThread { onCallStateChanged(CallManager.currentCallId ?: "none", CallManager.currentCallState, CallManager.currentPhoneNumber) }
@@ -81,9 +86,16 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        updateSpeakerLabel()
+        onCallStateChanged(CallManager.currentCallId ?: "none", CallManager.currentCallState, CallManager.currentPhoneNumber)
+    }
+
     override fun onStop() {
         CallManager.removeListener(this)
         CallAudioRelay.removeListener(this)
+        ContactResolver.removeListener(this)
         IncomingCallPresenter.onChanged = null
         CallManager.removeWaitingListener(waitingListener)
         sensorManager?.unregisterListener(this)
@@ -113,6 +125,15 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
         }
     }
 
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if ((keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) &&
+            CallManager.currentCallState == "ringing") {
+            RedmiRinger.silence()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
     override fun onSensorChanged(event: SensorEvent?) {
         if (event?.sensor?.type == Sensor.TYPE_PROXIMITY) {
             val distance = event.values[0]
@@ -120,7 +141,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
             val isNear = distance < maxRange && distance < 5f
             val isSpeaker = GatewayInCallService.isSpeakerOn()
 
-            if (isNear && !isSpeaker && CallManager.currentCallState == "active") {
+            if (isNear && !isSpeaker && CallManager.currentCallState in setOf("active", "dialing", "connecting")) {
                 if (proximityWakeLock?.isHeld == false) {
                     proximityWakeLock?.acquire(10 * 60 * 1000L) // 10 minutes max
                 }
@@ -239,20 +260,32 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
             binding.waitingCard.visibility = View.GONE
             return
         }
-        binding.waitingTitle.text = "Bekleyen arama: ${lookupName(number) ?: number?.takeIf { it.isNotBlank() } ?: "Gizli numara"}"
+        val cached = ContactResolver.getCached(number)
+        binding.waitingTitle.text = "Bekleyen arama: ${cached ?: number?.takeIf { it.isNotBlank() } ?: "Gizli numara"}"
         binding.waitingCard.visibility = View.VISIBLE
         binding.waitingReject.setOnClickListener { CallManager.rejectWaiting() }
         binding.waitingAnswer.setOnClickListener { CallManager.answer(callId) }
-    }
 
-    private fun lookupName(number: String?): String? {
-        if (number.isNullOrBlank() || checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return null
-        return runCatching {
-            val lookup = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))
-            contentResolver.query(lookup, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null)?.use { c ->
-                if (c.moveToFirst()) c.getString(0) else null
+        if (cached == null && !number.isNullOrBlank()) {
+            GatewayWebSocketServer.requestContactResolution(number)
+            if (checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
+                Thread {
+                    val name = runCatching {
+                        val lookup = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))
+                        contentResolver.query(lookup, arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME), null, null, null)?.use { c ->
+                            if (c.moveToFirst()) c.getString(0) else null
+                        }
+                    }.getOrNull()
+                    if (!name.isNullOrBlank()) {
+                        runOnUiThread {
+                            if (CallManager.waitingCallId == callId) {
+                                binding.waitingTitle.text = "Bekleyen arama: $name"
+                            }
+                        }
+                    }
+                }.start()
             }
-        }.getOrNull()
+        }
     }
 
     private fun setupAudioTransfer() {
@@ -322,24 +355,40 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
     override fun onCallStateChanged(callId: String, state: String, number: String?) {
         runOnUiThread {
             if (state == "idle" || state == "disconnected") {
+                if (CallManager.isCallLive()) {
+                    return@runOnUiThread
+                }
                 finish()
                 return@runOnUiThread
             }
-            binding.number.text = number?.takeIf { it.isNotBlank() } ?: "Gizli numara"
-            if (number != lastResolvedNumber) {
-                lastResolvedNumber = number
-                resolveContact(number)
+            val isConf = CallManager.isConference
+            if (isConf) {
+                binding.contactName.visibility = View.VISIBLE
+                binding.contactName.text = "Konferans Görüşme"
+                val summary = CallManager.getConferenceParticipantSummary()
+                binding.number.text = summary ?: (number?.takeIf { it.isNotBlank() } ?: "Konferans Görüşmesi")
+                binding.number.textSize = 20f
+                binding.contactPhoto.visibility = View.GONE
+            } else {
+                binding.number.text = number?.takeIf { it.isNotBlank() } ?: "Gizli numara"
+                if (number != lastResolvedNumber) {
+                    lastResolvedNumber = number
+                    resolveContact(number)
+                }
             }
-            binding.state.text = when (state) {
-                "ringing" -> "Gelen Arama"
-                "active" -> "Görüşme Sürüyor"
-                "dialing", "connecting" -> "Aranıyor..."
-                "holding" -> "Beklemede"
+            binding.state.text = when {
+                isConf -> "Konferans Görüşmesi"
+                state == "ringing" -> "Gelen Arama"
+                state == "active" -> "Görüşme Sürüyor"
+                state == "dialing" || state == "connecting" -> "Aranıyor..."
+                state == "holding" -> "Beklemede"
                 else -> "Arama Bağlanıyor"
             }
             val incoming = state == "ringing"
             if (state == "active") {
-                if (activeSinceMillis == 0L) activeSinceMillis = System.currentTimeMillis()
+                if (activeSinceMillis == 0L) {
+                    activeSinceMillis = CallManager.activeSinceMillis.takeIf { it > 0L } ?: System.currentTimeMillis()
+                }
                 binding.callDuration.visibility = View.VISIBLE
                 durationHandler.removeCallbacks(durationTicker)
                 durationHandler.post(durationTicker)
@@ -356,6 +405,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
             updateSpeakerLabel()
 
             binding.help.text = when {
+                isConf -> "Konferans görüşmesini bu telefondan da sonlandırabilirsin."
                 incoming && IncomingCallPresenter.presentedOnIPhoneCallId == callId ->
                     "iPhone'da da çalıyor. Burada ya da iPhone'da yanıtlayabilirsin."
                 incoming -> "Burada yanıtla. iPhone bağlıysa arama orada da görünür."
@@ -365,32 +415,67 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
     }
 
     override fun onLogMessage(message: String) = Unit
+ 
+    override fun onContactResolved(number: String, name: String) {
+        runOnUiThread {
+            val normalizedTarget = ContactResolver.normalize(number)
+            val currentNum = CallManager.currentPhoneNumber
+            if (currentNum != null && ContactResolver.normalize(currentNum) == normalizedTarget) {
+                binding.contactName.text = name
+                binding.contactName.visibility = View.VISIBLE
+                binding.number.textSize = 18f
+            }
+            val waitingNum = CallManager.waitingNumber
+            if (waitingNum != null && ContactResolver.normalize(waitingNum) == normalizedTarget) {
+                binding.waitingTitle.text = "Bekleyen arama: $name"
+            }
+        }
+    }
 
     private fun resolveContact(number: String?) {
         binding.contactName.visibility = View.GONE
         binding.contactPhoto.visibility = View.GONE
         binding.number.textSize = 28f
-        if (number.isNullOrBlank() || checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return
-        runCatching {
-            val lookup = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))
-            contentResolver.query(lookup, arrayOf(
-                ContactsContract.PhoneLookup.DISPLAY_NAME,
-                ContactsContract.PhoneLookup.PHOTO_THUMBNAIL_URI
-            ), null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val name = cursor.getString(0)
-                    if (!name.isNullOrBlank()) {
-                        binding.contactName.text = name
-                        binding.contactName.visibility = View.VISIBLE
-                        binding.number.textSize = 18f
-                    }
-                    cursor.getString(1)?.let { photo ->
-                        binding.contactPhoto.setImageURI(Uri.parse(photo))
-                        binding.contactPhoto.visibility = View.VISIBLE
+        if (number.isNullOrBlank()) return
+
+        val cached = ContactResolver.getCached(number)
+        if (cached != null) {
+            binding.contactName.text = cached
+            binding.contactName.visibility = View.VISIBLE
+            binding.number.textSize = 18f
+        } else {
+            GatewayWebSocketServer.requestContactResolution(number)
+        }
+
+        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return
+        Thread {
+            runCatching {
+                val lookup = Uri.withAppendedPath(ContactsContract.PhoneLookup.CONTENT_FILTER_URI, Uri.encode(number))
+                contentResolver.query(lookup, arrayOf(
+                    ContactsContract.PhoneLookup.DISPLAY_NAME,
+                    ContactsContract.PhoneLookup.PHOTO_THUMBNAIL_URI
+                ), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val name = cursor.getString(0)
+                        val photo = cursor.getString(1)
+                        runOnUiThread {
+                            val currentNum = CallManager.currentPhoneNumber
+                            if (currentNum != null && ContactResolver.normalize(currentNum) == ContactResolver.normalize(number)) {
+                                if (!name.isNullOrBlank()) {
+                                    binding.contactName.text = name
+                                    binding.contactName.visibility = View.VISIBLE
+                                    binding.number.textSize = 18f
+                                }
+                                if (!photo.isNullOrBlank()) {
+                                    binding.contactPhoto.setImageURI(Uri.parse(photo))
+                                    binding.contactPhoto.visibility = View.VISIBLE
+                                }
+                            }
+                        }
                     }
                 }
             }
-        }
+        }.start()
     }
 
     private fun updateSpeakerLabel() {

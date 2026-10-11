@@ -12,6 +12,7 @@ import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.provider.Settings
+import android.telecom.TelecomManager
 import android.util.Log
 import com.ilkay.redmigateway.RedmiGatewayApp
 import com.ilkay.redmigateway.audio.CallAudioRelay
@@ -64,7 +65,7 @@ object RedmiRinger {
             else -> WAIT_NEARBY_MS
         }
         if (wait == 0L) {
-            start("no iPhone to ring")
+            start(if (!IncomingCallPresenter.quietWhenIPhoneRings) "normal immediate ringing" else "no iPhone to ring")
         } else {
             Log.i(TAG, "Waiting up to ${wait / 1000} s for the iPhone before ringing the Redmi")
             handler.postDelayed(ringNow, wait)
@@ -84,6 +85,15 @@ object RedmiRinger {
         handler.removeCallbacks(ringNow)
         stopSound()
         callId = null
+    }
+
+    /** User pressed volume key or requested silencing ringer without ending the call. */
+    fun silence() = handler.post {
+        handler.removeCallbacks(ringNow)
+        stopSound()
+        runCatching {
+            context.getSystemService(TelecomManager::class.java)?.silenceRinger()
+        }.onFailure { Log.w(TAG, "Could not silence TelecomManager ringer: ${it.message}") }
     }
 
     private fun start(reason: String) {

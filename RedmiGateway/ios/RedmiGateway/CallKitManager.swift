@@ -45,7 +45,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     override private init() {
         let config = CXProviderConfiguration(localizedName: "Telefon Geçidi")
         config.supportsVideo = false
-        config.maximumCallsPerCallGroup = 1
+        config.maximumCallsPerCallGroup = 5
         // A second group lets iOS show a waiting call during the current one.
         config.maximumCallGroups = 2
         config.supportedHandleTypes = [.phoneNumber, .generic]
@@ -456,8 +456,8 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         }
         update.hasVideo = false
         update.supportsDTMF = true
-        update.supportsHolding = false
-        update.supportsGrouping = false
+        update.supportsHolding = true
+        update.supportsGrouping = true
         update.supportsUngrouping = false
         return update
     }
@@ -606,6 +606,24 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         for digit in action.digits {
             GatewayConnection.shared.sendDtmf(digit: String(digit), callId: rawId)
         }
+        action.fulfill()
+    }
+
+    func provider(_ provider: CXProvider, perform action: CXSetHeldCallAction) {
+        let uuid = action.callUUID
+        let rawId = callIdByUuid[uuid] ?? ""
+        GatewayConnection.shared.send([
+            "type": "hold_call",
+            "callId": rawId,
+            "hold": action.isOnHold
+        ])
+        action.fulfill()
+    }
+
+    func provider(_ provider: CXProvider, perform action: CXSetGroupCallAction) {
+        GatewayConnection.shared.send([
+            "type": "merge_calls"
+        ])
         action.fulfill()
     }
 

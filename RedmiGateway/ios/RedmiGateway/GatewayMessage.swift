@@ -151,3 +151,22 @@ struct SmsSendResultMessage: Decodable {
     let requestId: String?
     let error: String?
 }
+
+struct ResolveContactMessage: Decodable {
+    let number: String
+    let requestId: String?
+}
+
+struct ContactInfoMessage: Encodable {
+    let type: String
+    let number: String
+    let name: String?
+    let requestId: String?
+
+    init(number: String, name: String?, requestId: String? = nil) {
+        self.type = "contact_info"
+        self.number = number
+        self.name = name
+        self.requestId = requestId
+    }
+}

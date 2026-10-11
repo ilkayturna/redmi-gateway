@@ -16,6 +16,7 @@ import com.ilkay.redmigateway.security.SecureChannel
 import com.ilkay.redmigateway.sms.SmsReceiver
 import com.ilkay.redmigateway.sms.SmsSender
 import com.ilkay.redmigateway.sms.SmsStore
+import android.telecom.Call
 import com.ilkay.redmigateway.telecom.CallManager
 import com.ilkay.redmigateway.telecom.IncomingCallPresenter
 import org.java_websocket.WebSocket
@@ -46,6 +47,13 @@ class GatewayWebSocketServer(
         const val MIN_PROTOCOL = 1
         private const val MAX_FAILURES = 5
         private const val LOCKOUT_MS = 60_000L
+
+        @Volatile var current: GatewayWebSocketServer? = null
+            private set
+
+        fun requestContactResolution(number: String) {
+            current?.requestContactResolution(number)
+        }
     }
 
     interface ServerListener {
@@ -76,6 +84,7 @@ class GatewayWebSocketServer(
     }
 
     override fun onStart() {
+        current = this
         Log.i(TAG, "WebSocket server started on port $port")
         CallManager.addListener(this)
         CallManager.addWaitingListener(this)
@@ -288,6 +297,20 @@ class GatewayWebSocketServer(
             "answer" -> sendAck(peer, "answer", CallManager.answer(json.optString("callId").ifBlank { null }))
             "reject" -> sendAck(peer, "reject", CallManager.reject(json.optString("callId").ifBlank { null }))
             "hangup" -> sendAck(peer, "hangup", CallManager.hangup(json.optString("callId").ifBlank { null }))
+            "hold_call" -> {
+                val callId = json.optString("callId").ifBlank { null }
+                val hold = json.optBoolean("hold", true)
+                val call = if (callId != null) CallManager.getCall(callId) else CallManager.activeCall
+                val ok = if (call != null) {
+                    runCatching {
+                        if (hold) call.hold() else call.unhold()
+                        true
+                    }.onFailure { Log.w(TAG, "hold_call failed", it) }.getOrDefault(false)
+                } else false
+                sendAck(peer, "hold_call", ok)
+            }
+            "merge_calls" -> sendAck(peer, "merge_calls", CallManager.merge())
+            "swap_calls" -> sendAck(peer, "swap_calls", CallManager.swap())
             "dial" -> {
                 val ok = CallManager.dial(context, json.optString("number"))
                 if (ok) peer.lastDialAt = SystemClock.elapsedRealtime()
@@ -347,6 +370,13 @@ class GatewayWebSocketServer(
                         CallAudioLab.snapshot(context.getSystemService(android.media.AudioManager::class.java)))
                 } else CallAudioLab.handle(context, op)
                 send(peer, result.put("type", "lab_result"))
+            }
+            "contact_info", "contact_resolved" -> {
+                val number = json.optString("number")
+                val name = json.optString("name").ifBlank { null }
+                if (number.isNotBlank() && name != null) {
+                    ContactResolver.put(number, name)
+                }
             }
             else -> send(peer, JSONObject().put("type", "error").put("code", "unknown_command").put("command", type))
         }
@@ -535,8 +565,15 @@ class GatewayWebSocketServer(
 
     fun authenticatedCount(): Int = peers.values.count { it.authenticated }
 
+    fun requestContactResolution(number: String) {
+        if (number.isBlank()) return
+        val payload = JSONObject().put("type", "resolve_contact").put("number", number)
+        broadcast(payload)
+    }
+
     fun stopServer() {
         try {
+            if (current === this) current = null
             CallManager.removeListener(this)
             CallManager.removeWaitingListener(this)
             CallAudioRelay.removeListener(this)

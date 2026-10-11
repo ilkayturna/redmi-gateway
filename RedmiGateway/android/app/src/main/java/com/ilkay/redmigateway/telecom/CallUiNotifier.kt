@@ -6,18 +6,29 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.provider.ContactsContract
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import com.ilkay.redmigateway.ui.CallActivity
+import com.ilkay.redmigateway.ui.PhoneActivity
+import java.util.concurrent.ConcurrentHashMap
 
 /** The default dialer's visible call controls. Telecom continues to own the ringtone. */
 object CallUiNotifier : CallManager.CallListener {
     private const val CHANNEL = "cellular_calls"
+    private const val MISSED_CHANNEL = "missed_calls"
     private const val NOTIFICATION_ID = 4301
     private val mainHandler = Handler(Looper.getMainLooper())
     private var appContext: Context? = null
+
+    private val ringingCallNumbers = ConcurrentHashMap<String, String?>()
+    private val activeCallIds = ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var lastRingingId: String? = null
+    @Volatile private var lastRingingNumber: String? = null
+    @Volatile private var lastWasActive: Boolean = false
 
     fun start(context: Context) {
         if (appContext != null) return
@@ -37,11 +48,46 @@ object CallUiNotifier : CallManager.CallListener {
         mainHandler.post {
             val context = appContext ?: return@post
             val manager = context.getSystemService(NotificationManager::class.java)
+
+            if (state == "ringing") {
+                val key = if (callId.isNotBlank() && callId != "none") callId else "current"
+                val num = number ?: CallManager.currentPhoneNumber
+                ringingCallNumbers[key] = num
+                lastRingingId = key
+                lastRingingNumber = num
+                lastWasActive = false
+            } else if (state == "active") {
+                val key = if (callId.isNotBlank() && callId != "none") callId else "current"
+                activeCallIds.add(key)
+                lastWasActive = true
+            }
+
             if (state == "idle" || state == "disconnected" || state == "disconnecting") {
-                manager.cancel(NOTIFICATION_ID)
+                // Check if this was a missed call (rang without ever becoming active)
+                val key = if (callId.isNotBlank() && callId != "none") callId else lastRingingId
+                if (key != null) {
+                    val missedNum = ringingCallNumbers.remove(key) ?: lastRingingNumber
+                    val becameActive = activeCallIds.remove(key) || lastWasActive
+                    if (missedNum != null && !becameActive) {
+                        postMissedCallNotification(context, key, missedNum)
+                    }
+                }
+                lastRingingId = null
+                lastRingingNumber = null
+                lastWasActive = false
+
+                if (CallManager.isCallLive()) {
+                    return@post
+                }
+                manager?.cancel(NOTIFICATION_ID)
                 return@post
             }
-            val caller = number?.takeIf { it.isNotBlank() } ?: "Gizli numara"
+            val isConf = CallManager.isConference
+            val caller = when {
+                isConf -> number?.takeIf { it.isNotBlank() } ?: "Konferans Görüşme"
+                number.isNullOrBlank() -> "Gizli numara"
+                else -> number
+            }
             val person = Person.Builder().setName(caller).setImportant(true).build()
             val screen = PendingIntent.getActivity(
                 context, 1,
@@ -68,7 +114,7 @@ object CallUiNotifier : CallManager.CallListener {
                 ).setFullScreenIntent(screen, true)
             } else {
                 builder.setContentTitle(caller)
-                    .setContentText("Görüşme sürüyor")
+                    .setContentText(if (isConf) "Konferans görüşmesi sürüyor" else "Görüşme sürüyor")
                     .addAction(
                         android.R.drawable.ic_menu_close_clear_cancel,
                         "Sonlandır",
@@ -92,8 +138,75 @@ object CallUiNotifier : CallManager.CallListener {
         )
     }
 
+    private fun resolveCallerName(context: Context, number: String?): String {
+        if (number.isNullOrBlank()) return "Gizli numara"
+        if (context.checkSelfPermission(android.Manifest.permission.READ_CONTACTS) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            val name = runCatching {
+                val uri = Uri.withAppendedPath(
+                    ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+                    Uri.encode(number)
+                )
+                context.contentResolver.query(
+                    uri,
+                    arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME),
+                    null, null, null
+                )?.use { c ->
+                    if (c.moveToFirst()) c.getString(0) else null
+                }
+            }.getOrNull()
+            if (!name.isNullOrBlank()) return name
+        }
+        return number
+    }
+
+    private fun postMissedCallNotification(context: Context, callId: String, number: String?) {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        val caller = resolveCallerName(context, number)
+        val notifId = 4400 + (callId.hashCode() and 0x7FFF)
+        val contentIntent = PendingIntent.getActivity(
+            context,
+            notifId,
+            Intent(context, PhoneActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val builder = NotificationCompat.Builder(context, MISSED_CHANNEL)
+            .setSmallIcon(android.R.drawable.sym_call_missed)
+            .setContentTitle("Cevapsız Arama")
+            .setContentText(caller)
+            .setContentIntent(contentIntent)
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_MISSED_CALL)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+
+        if (!number.isNullOrBlank()) {
+            val dialIntent = PendingIntent.getActivity(
+                context,
+                notifId + 1,
+                Intent(Intent.ACTION_DIAL, Uri.parse("tel:${Uri.encode(number)}")),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(
+                android.R.drawable.sym_action_call,
+                "Geri Ara",
+                dialIntent
+            )
+        }
+
+        runCatching {
+            manager.notify(notifId, builder.build())
+            CallManager.log("Cevapsız arama bildirimi gösterildi: $caller ($number)")
+        }.onFailure {
+            CallManager.log("Cevapsız arama bildirimi gösterilemedi: ${it.message}")
+        }
+    }
+
     private fun createChannel(context: Context) {
-        val channel = NotificationChannel(
+        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+        val callChannel = NotificationChannel(
             CHANNEL, "Telefon aramaları", NotificationManager.IMPORTANCE_HIGH
         ).apply {
             description = "Redmi'ye gelen ve Redmi'den yapılan aramalar"
@@ -101,7 +214,14 @@ object CallUiNotifier : CallManager.CallListener {
             // Android Telecom rings the handset. A second notification tone would duplicate it.
             setSound(null, null)
         }
-        context.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        val missedChannel = NotificationChannel(
+            MISSED_CHANNEL, "Cevapsız aramalar", NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "Redmi'deki cevapsız arama bildirimleri"
+            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+        }
+        manager.createNotificationChannel(callChannel)
+        manager.createNotificationChannel(missedChannel)
     }
 }
 
