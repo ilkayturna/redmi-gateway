@@ -19,10 +19,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
+      # The runner image already ships the Android SDK and exports ANDROID_HOME, so
+      # no extra setup action is needed (setup-android failed here and only added a
+      # download step).
 
       # The unit tests guard the audio path (jitter buffer, call manager). They were
-      # broken for a while because nothing ran them in CI; this job keeps them honest.
+      # broken for a while because nothing ran them in CI; this step keeps them honest.
       - name: Unit tests
         working-directory: RedmiGateway/android
         run: |
@@ -30,6 +32,8 @@ jobs:
           chmod +x gradlew
           # The committed local.properties points at a developer machine's SDK.
           rm -f local.properties
+          echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-unset}"
           ./gradlew :app:testDebugUnitTest --console=plain
 
       - name: Assemble the debug APK
