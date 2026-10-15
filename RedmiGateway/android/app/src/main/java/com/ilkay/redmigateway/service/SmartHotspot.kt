@@ -39,6 +39,8 @@ object SmartHotspot {
     private const val LOST_MS = 15_000L
     private const val TRY_MS = 30_000L
     private const val SCAN_EVERY_MS = 60_000L
+    /** The iPhone is on the hotspot: the same search continues, just on a slower cadence. */
+    private const val CLIENT_SCAN_EVERY_MS = 90_000L
     private const val SCAN_MAX_AGE_MS = 90_000L
     private const val BACKOFF_MS = 10 * 60_000L
     private const val MIN_LEVEL_DBM = -75
@@ -207,7 +209,8 @@ object SmartHotspot {
         if (!started || !enabled) return
         val clientConnected = GatewayService.hasAuthenticatedClient()
         val inCall = CallManager.currentCallState !in setOf("idle", "disconnected")
-        if (clientConnected || inCall) return
+        // A running call is never interrupted: no scan, no hotspot change (data rule 3).
+        if (inCall) return
 
         val known = knownNetworks
         if (known.isEmpty()) return
@@ -216,6 +219,12 @@ object SmartHotspot {
 
         val wifi = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
         if (!wifi.isWifiEnabled) return
+
+        // The iPhone being on the hotspot must not hide a saved network. This chip cannot serve the
+        // hotspot and scan at full rate, so the same search runs on a slower cadence while a client
+        // is connected: arriving home, the hotspot then closes and the iPhone joins that network
+        // instead of spending mobile data for the rest of the evening.
+        val scanEvery = if (clientConnected) CLIENT_SCAN_EVERY_MS else SCAN_EVERY_MS
 
         val fresh = now * 1000 - SCAN_MAX_AGE_MS * 1000
         val candidate = runCatching { wifi.scanResults }.getOrDefault(emptyList())
@@ -229,14 +238,15 @@ object SmartHotspot {
             .maxByOrNull { it.second }?.first
 
         if (candidate != null) {
-            Log.i(TAG, "Known Wi-Fi $candidate in range; hotspot off to join it")
+            Log.i(TAG, "Known Wi-Fi $candidate in range" +
+                if (clientConnected) " (iPhone on the hotspot); hotspot off to join it" else "; hotspot off to join it")
             trying = candidate
             tryDeadline = now + TRY_MS
             stopHotspot()
             return
         }
 
-        if (now - lastScanAt >= SCAN_EVERY_MS) {
+        if (now - lastScanAt >= scanEvery) {
             lastScanAt = now
             @Suppress("DEPRECATION")
             runCatching { wifi.startScan() }
