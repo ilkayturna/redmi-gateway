@@ -32,9 +32,11 @@ Son güncelleme: 15.10.2026
 
 ## KURAL 3 — Bağlı istemci/aktif çağrı varken hotspot kapanmaz
 
-- Bir iPhone istemcisi bağlıysa veya çağrı sürüyorsa hotspot **kapanmaz** (çağrı ortasında kopma olmasın).
-
-**Korunacak kod:** `SmartHotspot.kt` içindeki `if (clientConnected || inCall) return` koruması.
+- **Aktif çağrı varken hotspot ASLA kapanmaz** (çağrı ortasında kopma olmasın). `stopHotspot()` çağrısından hemen önce çağrı durumu yeniden kontrol edilir.
+- **Bağlı istemci varken:** çağrı yoksa ve tanıdık ağ menzilde + `wifi_on=1` ise hotspot **kapanır** (kullanıcının kota kuralı önceliklidir). İstemci bağlıyken tarama seyrek yapılır (`CLIENT_SCAN_EVERY_MS = 90 sn`; normal `60 sn`).
+- **Tanıdık ağ menzilde ama `wifi_on=0`** (kullanıcı Wi-Fi anahtarını kapatmış) ise hotspot **KORUNUR** — istasyon ayağa kalkamayacağı için hotspot'u düşürmek iPhone'un tek linkini keser, hiçbir şey kazandırmaz. Bu durumda kullanıcıya sürekli bildirimde ipucu gösterilir:
+  `Ev/iş ağı "X" menzilde · Wi-Fi'ı aç, iPhone mobil veri harcamasın`
+- Uygulama **`setWifiEnabled` ÇAĞIRMAZ** (Kural 1).
 
 ---
 
@@ -53,10 +55,20 @@ Son güncelleme: 15.10.2026
 
 ---
 
-## KURAL 6 — Donanım gerçeği: STA + SAP aynı anda yok
+## KURAL 6 — Donanım gerçeği: STA + SAP
 
-- Redmi Note 8 (Snapdragon 665 / WCN3980) aynı anda hem Wi-Fi istemcisi hem hotspot **olamaz**.
-- Bu yüzden hotspot açmak için Wi-Fi kapanır. Bu **kabul edilmiş donanım kısıtıdır**, hata değildir.
+- Redmi Note 8 (Snapdragon 665 / WCN3980) **sürekli durumda** hem Wi-Fi istemcisi hem hotspot olamaz.
+- **Devir teslim sırasında kısa süreli örtüşme mümkündür.** Denetim kanıtı (15.10.2026): 22:42:49'da STA doğrulanmış internetle bağlıyken SAP da `EVENT_IFACE_SERVING_STATE_ACTIVE` ile servis ediyordu; AP, uygulamanın "hotspot off to save mobile data" satırından **112 ms sonra** durdu. Bu örtüşme, `wifi && hotspot && !inCall → stopHotspot` yolunun neden çalışabildiğini açıklar.
+- Bu nedenle hotspot açmak için Wi-Fi kapanır (kullanıcının gözlemi doğru); **Wi-Fi anahtarının açık olması** devir teslimin ön koşuludur — uygulama Android 10+ kısıtı nedeniyle Wi-Fi'ı kendisi açamaz.
+
+---
+
+## KURAL 7 — Hotspot taraması Wi-Fi kapalıyken de çalışır
+
+- Bu cihazda hotspot açıkken `WifiManager.isWifiEnabled()` **false** döner (istasyon kapalı). Eski kod bu yüzden tarama yolunu ölü koda çeviriyordu.
+- Doğru kapı: `if (!wifi.isWifiEnabled && !isHotspotOn()) return`
+- `wifi_scan_always_enabled=1` sayesinde Wi-Fi kapalıyken de **taze tarama sonucu** gelir (kanıt: `Saved network ... in range but Wi-Fi is switched off; hotspot stays` + `ScanResult` yaşının 126 sn → 29 sn'ye düşmesi).
+- Kullanıcı ayarını okumak için `Settings.Global "wifi_on"` kullanılır (`isWifiEnabled` bu durumda yanlış cevap verir).
 
 ---
 
