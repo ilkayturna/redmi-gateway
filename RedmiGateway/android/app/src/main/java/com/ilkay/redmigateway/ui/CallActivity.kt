@@ -19,6 +19,7 @@ import android.telecom.Call
 import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -66,6 +67,10 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
 
     /** Route state before the last speaker tap, so a late switch can be told from a real failure. */
     private var speakerWasOn = false
+
+    /** The iPhone link came or went; the transfer keys must follow it while the call is up. */
+    private val reachabilityListener: () -> Unit = { updateAudioCard(CallAudioRelay.owner) }
+
     private val speakerRecheck = Runnable {
         if (!isFinishing && !isDestroyed) {
             val nowSpeaker = GatewayInCallService.isSpeakerOn()
@@ -115,6 +120,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
         CallManager.addListener(this)
         CallAudioRelay.addListener(this)
         ContactResolver.addListener(this)
+        com.ilkay.redmigateway.service.IPhoneReachability.addListener(reachabilityListener)
         CallManager.addWaitingListener(waitingListener)
         IncomingCallPresenter.onChanged = {
             runOnUiThread { onCallStateChanged(CallManager.currentCallId ?: "none", CallManager.currentCallState, CallManager.currentPhoneNumber) }
@@ -138,6 +144,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
         CallManager.removeListener(this)
         CallAudioRelay.removeListener(this)
         ContactResolver.removeListener(this)
+        com.ilkay.redmigateway.service.IPhoneReachability.removeListener(reachabilityListener)
         IncomingCallPresenter.onChanged = null
         CallManager.removeWaitingListener(waitingListener)
         sensorManager?.unregisterListener(this)
@@ -260,10 +267,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
             when (CallAudioRelay.owner) {
                 CallAudioRelay.Owner.IPHONE, CallAudioRelay.Owner.PREPARING_IPHONE ->
                     CallAudioRelay.transferAudioToRedmi()
-                CallAudioRelay.Owner.REDMI -> {
-                    CallAudioRelay.requestIPhoneAudio()
-                    binding.audioStatusDetail.text = "iPhone'a soruluyor..."
-                }
+                CallAudioRelay.Owner.REDMI -> requestIPhoneAudio()
             }
         }
 
@@ -386,12 +390,26 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
             when (CallAudioRelay.owner) {
                 CallAudioRelay.Owner.IPHONE, CallAudioRelay.Owner.PREPARING_IPHONE ->
                     CallAudioRelay.transferAudioToRedmi()
-                CallAudioRelay.Owner.REDMI -> {
-                    CallAudioRelay.requestIPhoneAudio()
-                    binding.audioStatusDetail.text = "iPhone'a soruluyor. O sırada görüşme Redmi'de sürer."
-                }
+                CallAudioRelay.Owner.REDMI -> requestIPhoneAudio()
             }
         }
+    }
+
+    /** True only when there is an authenticated iPhone socket, i.e. a link that can carry audio. */
+    private fun iPhoneAudioLinkUp(): Boolean = com.ilkay.redmigateway.service.GatewayService.hasAuthenticatedClient()
+
+    /**
+     * Hands the call audio to the iPhone. With no authenticated link there is nothing to hand it
+     * to, so say so instead of going silent: the user pressed this once and nothing happened.
+     */
+    private fun requestIPhoneAudio() {
+        if (!iPhoneAudioLinkUp()) {
+            Toast.makeText(this, "iPhone bağlantısı yok", Toast.LENGTH_SHORT).show()
+            binding.audioStatusDetail.text = "iPhone bağlı değil; önce iPhone uygulaması bağlanmalı."
+            return
+        }
+        CallAudioRelay.requestIPhoneAudio()
+        binding.audioStatusDetail.text = "iPhone'a soruluyor. O sırada görüşme Redmi'de sürer."
     }
 
     /** Shows only the real owner reported by the relay, never an intent. */
@@ -401,7 +419,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
             // While the iPhone owns the call, Redmi mute/speaker would act on a muted device.
             binding.mute.isEnabled = !onIPhone
             binding.speaker.isEnabled = !onIPhone
-            val iPhoneConnected = com.ilkay.redmigateway.service.GatewayService.hasAuthenticatedClient()
+            val iPhoneConnected = iPhoneAudioLinkUp()
             when (owner) {
                 CallAudioRelay.Owner.IPHONE -> {
                     binding.audioStatusCard.strokeColor = ContextCompat.getColor(this, R.color.neon_sky)
@@ -411,6 +429,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
                     binding.audioStatusTitle.setTextColor(ContextCompat.getColor(this, R.color.neon_sky))
                     binding.audioStatusDetail.text = "Bu telefonun mikrofonu ve ahizesi kapalı."
                     binding.audioTransferButton.visibility = View.VISIBLE
+                    binding.audioTransferButton.isEnabled = true
                     binding.audioTransferButton.text = "Redmi'ye al"
                     binding.audioTransferButton.setTextColor(ContextCompat.getColor(this, R.color.neon_sky))
                     binding.audioTransferButton.strokeColor = ContextCompat.getColorStateList(this, R.color.neon_sky)
@@ -424,6 +443,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
                     binding.audioStatusTitle.setTextColor(ContextCompat.getColor(this, R.color.neon_sky))
                     binding.audioStatusDetail.text = "iPhone sesi doğrulanana kadar görüşme bu telefonda sürer."
                     binding.audioTransferButton.visibility = View.VISIBLE
+                    binding.audioTransferButton.isEnabled = true
                     binding.audioTransferButton.text = "Redmi'de kal"
                     binding.audioTransferButton.setTextColor(ContextCompat.getColor(this, R.color.neon_sky))
                     binding.audioTransferButton.strokeColor = ContextCompat.getColorStateList(this, R.color.neon_sky)
@@ -443,13 +463,23 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
                         else -> if (iPhoneConnected) "Ahize veya hoparlörden konuşabilirsin." else
                             "iPhone bağlı değil."
                     }
-                    binding.audioTransferButton.visibility = if (iPhoneConnected) View.VISIBLE else View.GONE
-                    binding.audioTransferButton.text = "iPhone'a aktar"
-                    binding.audioTransferButton.setTextColor(ContextCompat.getColor(this, R.color.call_answer))
-                    binding.audioTransferButton.strokeColor = ContextCompat.getColorStateList(this, R.color.call_answer)
-                    binding.gridTransferLabel.text = "iPhone'a Aktar"
+                    // With no authenticated iPhone socket the key must not look ready: it says why
+                    // and stays passive instead of doing nothing when tapped.
+                    binding.audioTransferButton.visibility = View.VISIBLE
+                    binding.audioTransferButton.isEnabled = iPhoneConnected
+                    binding.audioTransferButton.text = if (iPhoneConnected) "iPhone'a aktar" else "iPhone bağlı değil"
+                    val transferColor = if (iPhoneConnected) R.color.call_answer else R.color.text_muted
+                    binding.audioTransferButton.setTextColor(ContextCompat.getColor(this, transferColor))
+                    binding.audioTransferButton.strokeColor = ContextCompat.getColorStateList(this, transferColor)
+                    binding.gridTransferLabel.text = if (iPhoneConnected) "iPhone'a Aktar" else "iPhone bağlı değil"
                 }
             }
+            // The grid key owns a custom ripple background, so Material's disabled tint never shows;
+            // dim the key and its label explicitly. Bringing audio back to Redmi needs no iPhone link.
+            val gridUsable = owner != CallAudioRelay.Owner.REDMI || iPhoneConnected
+            binding.gridTransferButton.isEnabled = gridUsable
+            binding.gridTransferButton.alpha = if (gridUsable) 1f else 0.45f
+            binding.gridTransferLabel.alpha = if (gridUsable) 1f else 0.45f
             binding.gridTransferButton.contentDescription = binding.gridTransferLabel.text
         }
     }
