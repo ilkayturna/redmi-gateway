@@ -411,6 +411,14 @@ object CallAudioRelay : CallManager.CallListener {
         when (owner) {
             Owner.REDMI -> Unit
             Owner.PREPARING_IPHONE -> {
+                // "ringing" after an answer is the rollback path: there is no audio to carry, and
+                // the AudioRecord/AudioTrack keep counting silence frames, so an unchecked
+                // verification would hand a ringing call to the iPhone (a ghost cutover). The
+                // session stays armed so a later answer can arm the same relay again.
+                if (CallManager.currentCallState == "ringing") {
+                    if (mediaRunning) releaseMediaAndKeepSession("call_ringing_again")
+                    return
+                }
                 if (!mediaRunning) {
                     // The current window is still open: read it as a rate instead of waiting for the
                     // one second boundary, which used to add up to half a second to the handover.
@@ -437,7 +445,8 @@ object CallAudioRelay : CallManager.CallListener {
                     val reads = cutoverReads.get()
                     val writesRate = (writes * 1000L / elapsedMs).toInt()
                     val readsRate = (reads * 1000L / elapsedMs).toInt()
-                    val healthy = writesRate >= MIN_FRAMES_PER_SECOND &&
+                    // A call that is not live (on hold, or being torn down) never takes the audio.
+                    val healthy = live && writesRate >= MIN_FRAMES_PER_SECOND &&
                         readsRate >= MIN_FRAMES_PER_SECOND && iphoneFresh && iphoneHearing
                     if (healthy) {
                         if (applyIsolation()) {
@@ -448,6 +457,7 @@ object CallAudioRelay : CallManager.CallListener {
                         }
                     } else if (elapsed > VERIFY_TIMEOUT_MS) {
                         val reason = when {
+                            !live -> "call_not_live"
                             writesRate < MIN_FRAMES_PER_SECOND -> "uplink_path_unavailable"
                             readsRate < MIN_FRAMES_PER_SECOND -> "downlink_unavailable"
                             !iphoneFresh -> "iphone_audio_lost"
