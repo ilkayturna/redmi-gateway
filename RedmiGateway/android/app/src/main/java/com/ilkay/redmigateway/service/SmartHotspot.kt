@@ -13,6 +13,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
 import com.ilkay.redmigateway.RedmiGatewayApp
 import com.ilkay.redmigateway.telecom.CallManager
@@ -68,6 +69,20 @@ object SmartHotspot {
     /** Wi-Fi networks the Redmi has joined; only these switch the hotspot off. */
     val knownNetworks: Set<String>
         get() = prefs.getStringSet(KEY_KNOWN, emptySet()).orEmpty().toSet()
+
+    /**
+     * A saved network is in range while the Wi-Fi toggle is off, so nothing can join it and the
+     * iPhone keeps spending mobile data on the hotspot. Only the user can flip that toggle (an app
+     * cannot on Android 10+), so the ongoing notification names the network instead.
+     */
+    @Volatile var networkWaitingForWifi: String? = null
+        private set
+
+    private fun setWaitingNetwork(ssid: String?) {
+        if (networkWaitingForWifi == ssid) return
+        networkWaitingForWifi = ssid
+        GatewayService.refreshStatus()
+    }
 
     fun remember(ssids: Collection<String>) {
         val clean = ssids.map { it.trim().removeSurrounding("\"") }.filter { it.isNotEmpty() && it != WifiManager.UNKNOWN_SSID }
@@ -158,6 +173,8 @@ object SmartHotspot {
         if (!started) return
         val now = SystemClock.elapsedRealtime()
         val wifi = wifiNetwork != null
+        // A Wi-Fi connection makes the "turn Wi-Fi on" hint stale.
+        if (wifi) setWaitingNetwork(null)
         if (wifi) {
             if (wifiSince == 0L) wifiSince = now
             lostSince = 0L
@@ -218,7 +235,12 @@ object SmartHotspot {
         if (eligible.isEmpty()) return
 
         val wifi = context.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return
-        if (!wifi.isWifiEnabled) return
+        // The hotspot runs with the station interface off, so isWifiEnabled() is false while this
+        // phone serves the AP (verified here: `Wifi is disabled`, wifi_on=0, soft AP on wlan2).
+        // Scanning still works in that state - this build reports "Wifi scanning is always
+        // available", and scan results come back with the saved networks in range - so the old
+        // check hid every saved network exactly when the hotspot was the thing to switch off.
+        if (!wifi.isWifiEnabled && !isHotspotOn()) return
 
         // The iPhone being on the hotspot must not hide a saved network. This chip cannot serve the
         // hotspot and scan at full rate, so the same search runs on a slower cadence while a client
@@ -238,6 +260,22 @@ object SmartHotspot {
             .maxByOrNull { it.second }?.first
 
         if (candidate != null) {
+            // The hotspot runs with the station down. Whether Android brings the station back after
+            // the hotspot stops follows the stored Wi-Fi toggle, and a plain app cannot flip that on
+            // Android 10+ (WifiServiceImpl requires NETWORK_SETTINGS). Measured on this device: with
+            // the toggle off the station never came up, the join failed and the hotspot returned
+            // 40 s later - a needless outage for the iPhone that is on that hotspot. So the hotspot
+            // only gives way when the station can actually take over.
+            if (!wifiEnabledByUser()) {
+                Log.i(TAG, "Saved network $candidate in range but Wi-Fi is switched off; hotspot stays")
+                setWaitingNetwork(candidate)
+                return
+            }
+            // A call that started while we were deciding keeps its link (data rule 3).
+            if (CallManager.currentCallState !in setOf("idle", "disconnected")) {
+                Log.i(TAG, "Known Wi-Fi $candidate in range; keeping the hotspot for the running call")
+                return
+            }
             Log.i(TAG, "Known Wi-Fi $candidate in range" +
                 if (clientConnected) " (iPhone on the hotspot); hotspot off to join it" else "; hotspot off to join it")
             trying = candidate
@@ -254,6 +292,15 @@ object SmartHotspot {
     }
 
     private fun connectivity() = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+    /**
+     * The stored Wi-Fi toggle ("wifi_on"), which is what decides whether Android starts the station
+     * interface again once the hotspot stops. [WifiManager.isWifiEnabled] cannot answer this: it
+     * reads false while this phone serves the hotspot, even with the toggle on.
+     */
+    private fun wifiEnabledByUser(): Boolean = runCatching {
+        Settings.Global.getInt(context.contentResolver, "wifi_on", 0) == 1
+    }.getOrDefault(false)
 
     private fun isHotspotOn(): Boolean = runCatching {
         val wifi = context.getSystemService(Context.WIFI_SERVICE) as WifiManager

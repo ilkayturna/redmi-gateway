@@ -516,6 +516,14 @@ object CallManager {
                 call = ringing[0]
             }
         }
+        // The same answer can arrive twice: the command repeated, or the iPhone's Bluetooth retry
+        // after a missing ack. Telecom keeps the call RINGING until the radio confirms it, so
+        // without this the radio would be asked to answer twice and the confirmation window would
+        // start over, delaying the recovery of a genuinely failed answer.
+        if (call != null && announcedAnswerCallId != null && announcedAnswerCallId == callIds[call]) {
+            log("Answer already sent for call ${callIds[call]}; ignoring the repeat")
+            return true
+        }
         // Whoever answered - this phone or the iPhone - the Redmi stops ringing now. Waiting for
         // the Telecom callback is what kept it ringing after an answer on the iPhone.
         if (calls.any { it !== waitingCall && it.state == Call.STATE_RINGING }) {

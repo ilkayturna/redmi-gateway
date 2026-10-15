@@ -95,7 +95,9 @@ final class CallKitManager: NSObject, CXProviderDelegate {
                 let number = numbers[uuid]
                 GatewayConnection.shared.log("Answer not confirmed by the Redmi; showing the call as incoming again")
                 GatewayConnection.shared.lastCallError = "Arama Redmi'de yanıtlanamadı."
-                end(uuid, reason: .failed)
+                // Unanswered, not failed: nobody ever connected, and Recents should not show a
+                // failed call for one that is still ringing and about to be presented again.
+                end(uuid, reason: .unanswered)
                 let again = uuidFor(rawId: rawId, state: "ringing")
                 states[again] = "ringing"
                 if let number, !number.isEmpty { numbers[again] = number }

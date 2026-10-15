@@ -102,8 +102,8 @@ public final class GatewayConnection: ObservableObject {
     private var pingTask: Task<Void, Never>?
     private var syncCallsHasMore = false
     private var smsTimeouts: [String: Task<Void, Never>] = [:]
-    /// One ack watchdog per call command; see startControlWatchdog.
-    private var controlWatchdogs: [String: Task<Void, Never>] = [:]
+    /// Call commands waiting for their ack, oldest first; see startControlWatchdog.
+    private var controlWatchdogs: [(key: String, action: String, task: Task<Void, Never>)] = []
     private var lastPathSignature = ""
     private var catchUpTask: UIBackgroundTaskIdentifier = .invalid
     private var closeAfterCatchUp = false
@@ -835,7 +835,7 @@ public final class GatewayConnection: ObservableObject {
 
     private func handleAck(_ ack: AckMessage) {
         // The command reached the Redmi; the watchdog must not send it over Bluetooth as well.
-        controlWatchdogs.removeValue(forKey: ack.action)?.cancel()
+        settleControlWatchdog(action: ack.action)
         guard !ack.success else { return }
         switch ack.action {
         case "dial":
@@ -917,20 +917,35 @@ public final class GatewayConnection: ObservableObject {
     /// though the socket accepted it, so the command goes over Bluetooth once: without this a lost
     /// answer left the other phone ringing while this iPhone showed the call as answered.
     private func startControlWatchdog(action: String, callId: String) {
-        controlWatchdogs.removeValue(forKey: action)?.cancel()
-        controlWatchdogs[action] = Task { @MainActor [weak self] in
+        let key = "\(action)|\(callId)"
+        cancelControlWatchdog(key: key)
+        let task = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 700_000_000)
             guard let self, !Task.isCancelled else { return }
-            self.controlWatchdogs.removeValue(forKey: action)
+            self.cancelControlWatchdog(key: key)
             self.log("No ack for \(action); sending it over Bluetooth")
             self.sendOverBluetooth(action: action, callId: callId, reportFailure: true)
         }
+        controlWatchdogs.append((key: key, action: action, task: task))
+    }
+
+    /// The ack names the action only and acks arrive in the order the commands were sent, so the
+    /// oldest command still waiting for that action is the one it answers.
+    private func settleControlWatchdog(action: String) {
+        guard let index = controlWatchdogs.firstIndex(where: { $0.action == action }) else { return }
+        controlWatchdogs.remove(at: index).task.cancel()
+    }
+
+    private func cancelControlWatchdog(key: String) {
+        guard let index = controlWatchdogs.firstIndex(where: { $0.key == key }) else { return }
+        controlWatchdogs.remove(at: index).task.cancel()
     }
 
     /// Bluetooth carries a control command when the sealed link cannot.
     private func sendOverBluetooth(action: String, callId: String, reportFailure: Bool = false) {
-        // An explicit send supersedes the watchdog, so a command is never delivered twice.
-        controlWatchdogs.removeValue(forKey: action)?.cancel()
+        // This command's own watchdog is done with, so it is never delivered twice; other commands
+        // waiting for an ack of the same action keep their watchdog.
+        cancelControlWatchdog(key: "\(action)|\(callId)")
         guard BLECentralManager.shared.isReady else {
             log("\(action) not sent: Redmi unreachable")
             if reportFailure { reportControlFailure(action) }

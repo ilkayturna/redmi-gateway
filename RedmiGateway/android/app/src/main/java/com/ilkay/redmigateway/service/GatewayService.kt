@@ -54,6 +54,12 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
             val service = instance ?: return
             service.handler.post { service.applyForegroundTypes(active) }
         }
+
+        /** The status line changed for a reason other than reachability (the smart hotspot hint). */
+        fun refreshStatus() {
+            val service = instance ?: return
+            service.handler.post { if (isRunning) service.updateNotification(service.statusText()) }
+        }
     }
 
     private var webSocketServer: GatewayWebSocketServer? = null
@@ -238,7 +244,12 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     }
 
     /** The ongoing notification: call audio on the iPhone, otherwise how the iPhone is reached. */
-    private fun statusText() = if (callAudioOnIPhone) "Görüşme sesi iPhone'da" else IPhoneReachability.notificationText()
+    private fun statusText(): String = when {
+        callAudioOnIPhone -> "Görüşme sesi iPhone'da"
+        else -> SmartHotspot.networkWaitingForWifi
+            ?.let { "Ev/iş ağı \"$it\" menzilde · Wi-Fi'ı aç, iPhone mobil veri harcamasın" }
+            ?: IPhoneReachability.notificationText()
+    }
 
     override fun onServerError(error: String) {
         CallManager.log("Server Error: $error")
