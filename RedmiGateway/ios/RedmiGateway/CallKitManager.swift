@@ -100,6 +100,11 @@ final class CallKitManager: NSObject, CXProviderDelegate {
                 pickupAfterAnswer = nil
                 cleanup(uuid)
                 takeCallOnIPhone()
+            } else {
+                // A call this iPhone never presented; the Redmi also announces the answer a second
+                // time when its radio confirms it. Without this the second event would leave a
+                // phantom call behind.
+                cleanup(uuid)
             }
         case "dialing", "connecting":
             if outgoing.contains(uuid), !pickups.contains(uuid) {
@@ -177,6 +182,11 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         switch states[uuid] {
         case "active": return incoming.contains(uuid) ? answeredHere.contains(uuid) : outgoing.contains(uuid)
         case "dialing", "connecting": return outgoing.contains(uuid) && !pickups.contains(uuid)
+        case "ringing":
+            // Answered here a moment ago; the Redmi's "active" event is still on its way. The audio
+            // engine may start as soon as the Redmi sends its endpoint, so the sound is already
+            // flowing when the call goes active ("the sound jumps to the iPhone at once").
+            return incoming.contains(uuid) && answeredHere.contains(uuid)
         default: return false
         }
     }
@@ -345,6 +355,14 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         if let pending = pendingDial {
             pendingDial = nil
             if Date().timeIntervalSince(pending.at) < 20 { startOutgoingCall(phoneNumber: pending.number) }
+        }
+        // The link came back while this iPhone was carrying the call (a network move mid-call):
+        // ask for the audio again here rather than waiting for the Redmi's state broadcast, so the
+        // conversation is never left silent after the two phones change networks.
+        if let uuid = audioCallUuid, !audioRequested, isAudioEligible(uuid),
+           GatewayConnection.shared.isAuthenticated {
+            audioRequested = true
+            GatewayConnection.shared.sendAudioStart()
         }
     }
 

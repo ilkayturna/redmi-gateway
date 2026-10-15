@@ -6,6 +6,8 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.telecom.Call
 import android.telecom.TelecomManager
 import android.telecom.VideoProfile
@@ -17,6 +19,14 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 object CallManager {
     private const val TAG = "CallManager"
+
+    /**
+     * How long an answer may be announced to the other phone before the cellular radio has to
+     * confirm it (Telecom STATE_ACTIVE). A real answer is confirmed well inside a second; only a
+     * failed one stays ringing, and then the announcement is taken back so both phones ring again
+     * instead of the call going silent on both.
+     */
+    private const val ANSWER_CONFIRM_MS = 2_000L
 
     interface CallListener {
         fun onCallStateChanged(callId: String, state: String, number: String?)
@@ -46,6 +56,23 @@ object CallManager {
     /** Wall-clock creation time of the current call; the CallLog entry carries the same time. */
     @Volatile var addedAtMillis: Long = 0L
         private set
+
+    /**
+     * The call whose answer was announced to the other phone before Telecom confirmed it.
+     *
+     * Telecom reports STATE_ACTIVE only once the cellular network has set the call up, which the
+     * 15.10.2026 log showed taking seconds (the iPhone kept ringing, and it kept its audio engine
+     * idle, the whole time). Announcing the answer the moment it is executed silences the other
+     * phone in one network round trip; [ANSWER_CONFIRM_MS] later the real state takes over again.
+     */
+    @Volatile private var announcedAnswerCallId: String? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val answerConfirmTimeout = Runnable {
+        if (announcedAnswerCallId == null) return@Runnable
+        log("The radio did not confirm the answer within ${ANSWER_CONFIRM_MS} ms; showing the real state")
+        announcedAnswerCallId = null
+        updatePrimaryCallAndNotify("answer_not_confirmed")
+    }
 
     val isConference: Boolean
         get() = isConference(activeCall) || calls.any { isConference(it) && isCallLive(it) }
@@ -218,7 +245,7 @@ object CallManager {
                     return
                 }
                 if (mapped != "ringing") {
-                    RedmiRinger.stop()
+                    RedmiRinger.stop("call_state_$mapped")
                 }
                 updatePrimaryCallAndNotify("state_changed")
             }
@@ -336,8 +363,13 @@ object CallManager {
         if (primary != null) {
             activeCall = primary
             currentCallId = callIds[primary] ?: UUID.randomUUID().toString().also { callIds[primary] = it }
-            val mappedState = mapCallState(primary.state)
-            currentCallState = mappedState
+            val realState = mapCallState(primary.state)
+            // An answer already announced to the other phone stands until Telecom confirms it. A
+            // "ringing" event arriving in that window is stale: publishing it would restart the
+            // ringer on the phone that just answered.
+            val holdAnswerAnnouncement = realState == "ringing" && announcedAnswerCallId == currentCallId
+            if (!holdAnswerAnnouncement) clearAnswerAnnouncement()
+            currentCallState = if (holdAnswerAnnouncement) "active" else realState
 
             val isConf = isConference(primary)
             val number = if (isConf) {
@@ -355,7 +387,9 @@ object CallManager {
                 currentDirection = "outgoing"
             }
 
-            if (mappedState == "active" && activeSinceMillis == 0L) {
+            // activeSinceMillis only follows what the radio really confirmed: a merely announced
+            // answer must not make a failed call look answered in the call journal.
+            if (realState == "active" && activeSinceMillis == 0L) {
                 activeSinceMillis = System.currentTimeMillis()
             }
             if (addedAtMillis == 0L) {
@@ -387,7 +421,8 @@ object CallManager {
                 currentPhoneNumber = null
                 activeSinceMillis = 0L
                 addedAtMillis = 0L
-                RedmiRinger.stop()
+                clearAnswerAnnouncement()
+                RedmiRinger.stop("call_ended")
                 notifyStateChanged()
                 promoteWaiting()
             }
@@ -438,20 +473,37 @@ object CallManager {
             }
             return true
         }
-        val call = if (expectedCallId != null) {
+        var staleCallId = false
+        var call = if (expectedCallId != null) {
             calls.firstOrNull { callIds[it] == expectedCallId } ?: activeCall
         } else {
             activeCall
         }
+        if (call != null && expectedCallId != null &&
+            expectedCallId != callIds[call] && expectedCallId != currentCallId) {
+            // The iPhone can answer with an id this Redmi no longer uses: it keeps its own id for a
+            // call the Redmi re-created, or falls back to the id-less "gateway_call" placeholder.
+            // With exactly one ringing call there is nothing else the answer can mean, and refusing
+            // it is what left the Redmi ringing after an answer on the iPhone.
+            val ringing = calls.filter { it !== waitingCall && it.state == Call.STATE_RINGING }
+            if (ringing.size == 1) {
+                log("Answer carries the unknown call id $expectedCallId; taking the ringing call ${callIds[ringing[0]]}")
+                staleCallId = true
+                call = ringing[0]
+            }
+        }
+        // Whoever answered - this phone or the iPhone - the Redmi stops ringing now. Waiting for
+        // the Telecom callback is what kept it ringing after an answer on the iPhone.
+        if (calls.any { it !== waitingCall && it.state == Call.STATE_RINGING }) {
+            RedmiRinger.stop(if (staleCallId) "peer_answered_stale_id" else "peer_answered")
+        }
         if (call != null &&
-            (expectedCallId == null || expectedCallId == callIds[call] || expectedCallId == currentCallId) &&
+            (staleCallId || expectedCallId == null || expectedCallId == callIds[call] || expectedCallId == currentCallId) &&
             call.state == Call.STATE_RINGING) {
             log("Executing ANSWER on call: ${callIds[call]}")
-            // The iPhone may have answered first and asked us to pick up: silence the Redmi at once
-            // instead of waiting for the Telecom state callback.
-            RedmiRinger.stop()
             return try {
                 call.answer(VideoProfile.STATE_AUDIO_ONLY)
+                announceAnswer(callIds[call])
                 true
             } catch (e: Exception) {
                 log("Error answering call: ${e.message}")
@@ -461,6 +513,31 @@ object CallManager {
             log("Cannot answer: call ID or state does not match a ringing call")
             return false
         }
+    }
+
+    /**
+     * Tells every listener - the iPhone over WebSocket or Bluetooth, the call screen, the
+     * notification - that the call is active, without waiting for Telecom to confirm the cellular
+     * setup. [ANSWER_CONFIRM_MS] later [updatePrimaryCallAndNotify] publishes what Telecom says.
+     */
+    @Synchronized
+    private fun announceAnswer(callId: String?) {
+        val id = callId ?: return
+        if (id != currentCallId) return
+        announcedAnswerCallId = id
+        mainHandler.removeCallbacks(answerConfirmTimeout)
+        mainHandler.postDelayed(answerConfirmTimeout, ANSWER_CONFIRM_MS)
+        if (currentCallState == "active") return
+        currentCallState = "active"
+        log("Announced the answer to the other phone without waiting for Telecom")
+        notifyStateChanged()
+    }
+
+    /** Drops a pending answer announcement; the state listeners see is Telecom's own again. */
+    private fun clearAnswerAnnouncement() {
+        if (announcedAnswerCallId == null) return
+        announcedAnswerCallId = null
+        mainHandler.removeCallbacks(answerConfirmTimeout)
     }
 
     fun reject(expectedCallId: String? = null): Boolean {
@@ -474,6 +551,9 @@ object CallManager {
             (expectedCallId == null || expectedCallId == callIds[call] || expectedCallId == currentCallId) &&
             call.state == Call.STATE_RINGING) {
             log("Executing REJECT on call: ${callIds[call]}")
+            // A decline on the iPhone is as final as an answer: stop the Redmi ringer now instead
+            // of waiting for Telecom to report the disconnected call.
+            RedmiRinger.stop("peer_rejected")
             return try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     call.reject(Call.REJECT_REASON_DECLINED)

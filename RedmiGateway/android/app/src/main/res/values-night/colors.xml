@@ -16,4 +16,13 @@
     <color name="pb_on_accent">#10161B</color>
     <color name="pb_attention_bg">#2B2517</color>
     <color name="pb_attention_stroke">#5C4B25</color>
+    <!-- Phone surface tokens: one step per surface, so rows can separate by elevation alone -->
+    <color name="pb_field_bg">#1E272E</color>
+    <color name="pb_field_stroke">#2E3A44</color>
+    <color name="pb_key_bg">#26323B</color>
+    <color name="pb_key_stroke">#33424D</color>
+    <color name="pb_divider">#2A353E</color>
+    <color name="pb_empty_circle">#1C242A</color>
+    <color name="pb_bubble_in">#243039</color>
+    <color name="pb_row_selector">#1FFFFFFF</color>
 </resources>

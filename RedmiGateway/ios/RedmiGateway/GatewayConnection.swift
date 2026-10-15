@@ -881,15 +881,26 @@ public final class GatewayConnection: ObservableObject {
     func sendRingingAck(callId: String) { control("ringing_ack", callId: callId) }
 
     private func control(_ action: String, callId: String) {
-        if state == .authenticated {
-            send(["type": action, "callId": callId])
-        } else if BLECentralManager.shared.isReady {
+        // An answer or decline must reach the Redmi, or the other phone keeps ringing. A sealed
+        // frame is dropped silently when the socket or its key is not ready yet, so the Bluetooth
+        // link carries the command in that case instead of the command being lost.
+        if state == .authenticated, sendOverSealedLink(["type": action, "callId": callId]) { return }
+        if BLECentralManager.shared.isReady {
             BLECentralManager.shared.sendCallControl(action: action, callId: callId) { [weak self] success in
                 self?.log("Bluetooth \(action): \(success ? "ok" : "failed")")
             }
         } else {
             log("\(action) not sent: Redmi unreachable")
         }
+    }
+
+    /// Sends one command over the authenticated socket; false when nothing could carry it.
+    private func sendOverSealedLink(_ payload: [String: Any]) -> Bool {
+        guard let task = webSocketTask, let channel,
+              let json = try? JSONSerialization.data(withJSONObject: payload),
+              let frame = channel.seal(json) else { return false }
+        task.send(.string(frame)) { _ in }
+        return true
     }
 
     func sendDial(number: String) {

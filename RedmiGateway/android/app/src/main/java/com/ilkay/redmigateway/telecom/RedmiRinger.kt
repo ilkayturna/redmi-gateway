@@ -9,6 +9,7 @@ import android.media.ToneGenerator
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.provider.Settings
@@ -42,6 +43,8 @@ object RedmiRinger {
     private var callId: String? = null
     private var silentRequested = false
     private var ringing = false
+    /** When the Redmi started ringing; the silence latency in every RINGER_OFF line. */
+    private var ringingSince = 0L
     private var ringtone: Ringtone? = null
     private var vibrating = false
     private var waitingTone: ToneGenerator? = null
@@ -76,17 +79,34 @@ object RedmiRinger {
     fun onIPhonePresented(id: String) = handler.post {
         if (id != callId) return@post
         handler.removeCallbacks(ringNow)
-        if (ringing) Log.i(TAG, "iPhone shows the call; Redmi ringer off")
+        if (ringing) Log.i(TAG, "RINGER_OFF reason=iphone_showing after ${rangFor()}ms")
         stopSound()
     }
 
-    /** The call was answered, rejected or ended, on either phone. */
-    fun stop() = handler.post {
+    /**
+     * The call was answered, declined or ended, on either phone.
+     *
+     * The transport calls this from its own thread the moment the other phone reports the answer,
+     * so the ringtone stops right there instead of taking another trip through the main queue: the
+     * other phone must fall silent in well under 300 ms, and it is measured from the log timestamps
+     * of "Executing ANSWER" and "RINGER_OFF".
+     */
+    fun stop(reason: String = "answered_or_ended") {
+        if (Looper.myLooper() == Looper.getMainLooper()) stopNow(reason) else handler.post { stopNow(reason) }
+    }
+
+    private fun stopNow(reason: String) {
         handler.removeCallbacks(ringNow)
-        if (ringing) Log.i(TAG, "Redmi ringer off (answered or ended on either phone)")
+        if (ringing) {
+            Log.i(TAG, "RINGER_OFF reason=$reason after ${rangFor()}ms (answered or ended on either phone)")
+        } else if (callId != null || ringtone != null || vibrating) {
+            Log.i(TAG, "RINGER_OFF reason=$reason (was not ringing)")
+        }
         stopSound()
         callId = null
     }
+
+    private fun rangFor(): Long = if (ringingSince > 0L) SystemClock.elapsedRealtime() - ringingSince else 0L
 
     /** User pressed volume key or requested silencing ringer without ending the call. */
     fun silence() = handler.post {
@@ -101,6 +121,7 @@ object RedmiRinger {
         handler.removeCallbacks(ringNow)
         if (callId == null || ringing) return
         ringing = true
+        ringingSince = SystemClock.elapsedRealtime()
         val audio = context.getSystemService(AudioManager::class.java)
         val mode = audio?.ringerMode ?: AudioManager.RINGER_MODE_NORMAL
         Log.i(TAG, "Redmi rings: $reason (mode=$mode, silentRequested=$silentRequested)")
@@ -138,6 +159,7 @@ object RedmiRinger {
         if (vibrating) runCatching { context.getSystemService(Vibrator::class.java)?.cancel() }
         vibrating = false
         ringing = false
+        ringingSince = 0L
     }
 
     /** A second call waits while the first one continues. */

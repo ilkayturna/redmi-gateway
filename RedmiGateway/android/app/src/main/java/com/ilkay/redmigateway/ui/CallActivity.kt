@@ -255,6 +255,8 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
 
     private fun updateMuteState() {
         binding.muteLabel.text = if (isMuted) "Sesi Aç" else "Sessiz"
+        // The label carries the state; mirror it so TalkBack announces the button once, correctly.
+        binding.mute.contentDescription = binding.muteLabel.text
         if (isMuted) {
             binding.mute.setIconResource(R.drawable.ic_mic_off)
             binding.mute.setBackgroundResource(R.drawable.bg_glass_circle_active)
@@ -271,6 +273,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
     private fun updateSpeakerLabel() {
         val isSpeaker = GatewayInCallService.isSpeakerOn()
         binding.speakerLabel.text = if (isSpeaker) "Ahize" else "Hoparlör"
+        binding.speaker.contentDescription = binding.speakerLabel.text
         if (isSpeaker) {
             binding.speaker.setBackgroundResource(R.drawable.bg_glass_circle_active)
             binding.speaker.setIconTintResource(R.color.call_bg_start)
@@ -286,6 +289,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
         binding.dtmfContainer.visibility = if (visible) View.VISIBLE else View.GONE
         binding.controlsGrid.visibility = if (visible) View.GONE else View.VISIBLE
         binding.keypadLabel.text = if (visible) "Gizle" else "Tuşlar"
+        binding.keypadToggle.contentDescription = if (visible) "Tuş takımını kapat" else "Tuş takımını aç"
         if (visible) {
             binding.keypadToggle.setBackgroundResource(R.drawable.bg_glass_circle_active)
             binding.keypadToggle.setIconTintResource(R.color.call_bg_start)
@@ -420,6 +424,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
                     binding.gridTransferLabel.text = "iPhone'a Aktar"
                 }
             }
+            binding.gridTransferButton.contentDescription = binding.gridTransferLabel.text
         }
     }
 
@@ -442,7 +447,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
                 binding.contactName.text = "Konferans Görüşme"
                 val summary = CallManager.getConferenceParticipantSummary()
                 binding.number.text = summary ?: (number?.takeIf { it.isNotBlank() } ?: "Konferans Görüşmesi")
-                binding.number.textSize = 18f
+                binding.number.textSize = 17f
                 binding.avatarContainer.visibility = View.GONE
             } else {
                 binding.avatarContainer.visibility = View.VISIBLE
@@ -472,6 +477,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
                 binding.holdLabel.text = "Beklet"
                 binding.holdLabel.setTextColor(ContextCompat.getColor(this, R.color.call_text_slate))
             }
+            binding.holdButton.contentDescription = binding.holdLabel.text
 
             val incoming = state == "ringing"
             if (state == "active") {
@@ -515,7 +521,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
             if (currentNum != null && ContactResolver.normalize(currentNum) == normalizedTarget) {
                 binding.contactName.text = name
                 binding.contactName.visibility = View.VISIBLE
-                binding.number.textSize = 18f
+                binding.number.textSize = 17f
             }
             val waitingNum = CallManager.waitingNumber
             if (waitingNum != null && ContactResolver.normalize(waitingNum) == normalizedTarget) {
@@ -556,7 +562,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
                                 if (!name.isNullOrBlank()) {
                                     binding.contactName.text = name
                                     binding.contactName.visibility = View.VISIBLE
-                                    binding.number.textSize = 18f
+                                    binding.number.textSize = 17f
                                 }
                                 if (!photo.isNullOrBlank()) {
                                     binding.contactPhoto.setImageURI(Uri.parse(photo))

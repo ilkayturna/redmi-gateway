@@ -80,6 +80,11 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
 
     private enum class Kind { INCOMING, OUTGOING, MISSED, OTHER }
 
+    private companion object {
+        /** Dialpad row pitch in dp; a 70dp key inside it leaves the 14dp gap between circles. */
+        const val PAD_ROW_DP = 84
+    }
+
     private lateinit var binding: ActivityPhoneBinding
     private lateinit var views: PhoneViews
     private val handler = Handler(Looper.getMainLooper())
@@ -403,7 +408,7 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
             binding.phoneCall.contentDescription = "${nameFor(conversation)} ara"
         } else {
             binding.phoneTitle.text = tab.title
-            binding.phoneTitle.textSize = 28f
+            binding.phoneTitle.textSize = 26f
             binding.phoneTitleDetail.visibility = View.GONE
         }
         updateStatus()
@@ -537,33 +542,47 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         dividerHeight = 0
         selector = android.graphics.drawable.ColorDrawable(Color.TRANSPARENT)
         clipToPadding = false
-        setPadding(0, 0, 0, views.dp(88))
+        // The stock scrollbar renders as a pale sliver on a dark surface; drop it entirely.
+        isVerticalScrollBarEnabled = false
+        isHorizontalScrollBarEnabled = false
+        overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+        // Leave room for the compose button so it never covers the last row.
+        setPadding(0, views.dp(4), 0, views.dp(104))
     }
 
     private fun showEmpty(icon: Int, text: String, actionLabel: String? = null, action: (() -> Unit)? = null) {
         val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(views.dp(32), 0, views.dp(32), views.dp(48))
+            setPadding(views.dp(40), 0, views.dp(40), views.dp(72))
         }
-        column.addView(ImageView(this).apply {
+        val badge = FrameLayout(this).apply {
+            background = ContextCompat.getDrawable(this@PhoneActivity, R.drawable.pb_empty_circle)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        badge.addView(ImageView(this).apply {
             setImageResource(icon)
             imageTintList = ColorStateList.valueOf(views.color(R.color.text_muted))
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        }, LinearLayout.LayoutParams(views.dp(48), views.dp(48)))
+        }, FrameLayout.LayoutParams(views.dp(40), views.dp(40), Gravity.CENTER))
+        column.addView(badge, LinearLayout.LayoutParams(views.dp(88), views.dp(88)))
         column.addView(TextView(this).apply {
             this.text = text
-            textSize = 16f
+            textSize = 15f
+            maxLines = 3
             gravity = Gravity.CENTER
             setTextColor(views.color(R.color.text_secondary))
-            setPadding(0, views.dp(12), 0, views.dp(12))
+            setPadding(0, views.dp(20), 0, 0)
         })
         if (actionLabel != null && action != null) {
             column.addView(MaterialButton(this).apply {
                 this.text = actionLabel
                 isAllCaps = false
+                textSize = 15f
+                minHeight = views.dp(48)
+                cornerRadius = views.dp(24)
                 setOnClickListener { action() }
-            })
+            }, LinearLayout.LayoutParams(-2, -2).apply { topMargin = views.dp(20) })
         }
         binding.phoneContent.addView(column, FrameLayout.LayoutParams(-1, -1))
     }
@@ -710,25 +729,26 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
             background = ContextCompat.getDrawable(this@PhoneActivity, R.drawable.pb_field)
             hint = "Kişilerde ara"
             setSingleLine(true)
-            textSize = 16f
+            textSize = 15f
+            includeFontPadding = false
             setTextColor(views.color(R.color.text_primary))
             setHintTextColor(views.color(R.color.text_muted))
             setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_pb_search, 0, 0, 0)
-            compoundDrawablePadding = views.dp(10)
-            compoundDrawableTintList = ColorStateList.valueOf(views.color(R.color.text_secondary))
+            compoundDrawablePadding = views.dp(12)
+            compoundDrawableTintList = ColorStateList.valueOf(views.color(R.color.text_muted))
             setPadding(views.dp(16), 0, views.dp(16), 0)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PERSON_NAME
             setText(contactQuery)
             contentDescription = "Kişilerde ara"
         }
         column.addView(search, LinearLayout.LayoutParams(-1, views.dp(48)).apply {
-            setMargins(views.dp(16), views.dp(4), views.dp(16), views.dp(4))
+            setMargins(views.dp(16), views.dp(6), views.dp(16), views.dp(2))
         })
         val empty = TextView(this).apply {
             textSize = 15f
             gravity = Gravity.CENTER
             setTextColor(views.color(R.color.text_secondary))
-            setPadding(views.dp(24), views.dp(32), views.dp(24), 0)
+            setPadding(views.dp(24), views.dp(40), views.dp(24), 0)
         }
         column.addView(empty, LinearLayout.LayoutParams(-1, -2))
         val adapter = RowAdapter(contactItems()) { row, item -> bindContact(row, item as Person) }
@@ -783,33 +803,55 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         val column = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(views.dp(24), 0, views.dp(24), views.dp(12))
+            setPadding(views.dp(20), 0, views.dp(20), views.dp(8))
         }
+        // The number lives on its own fixed-height band so the keypad never shifts while typing.
+        val numberField = FrameLayout(this)
         val number = EditText(this).apply {
             background = null
-            textSize = 34f
+            textSize = 40f
+            includeFontPadding = false
             gravity = Gravity.CENTER
             setSingleLine(true)
             showSoftInputOnFocus = false
             inputType = InputType.TYPE_CLASS_PHONE
             setTextColor(views.color(R.color.text_primary))
             setHintTextColor(views.color(R.color.text_muted))
-            hint = "Numara girin"
+            setPadding(0, 0, 0, 0)
             setText(draftNumber)
             setSelection(text.length)
             contentDescription = "Aranacak numara"
         }
-        column.addView(number, LinearLayout.LayoutParams(-1, -2).apply { topMargin = views.dp(8) })
+        // The placeholder is its own view: the hint must not inherit the 40sp number size.
+        val placeholder = TextView(this).apply {
+            text = "Numara girin"
+            textSize = 18f
+            includeFontPadding = false
+            gravity = Gravity.CENTER
+            setTextColor(views.color(R.color.text_muted))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        numberField.addView(number, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER).apply { bottomMargin = views.dp(8) })
+        numberField.addView(placeholder, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER).apply { bottomMargin = views.dp(8) })
+        // 56dp accent rule pinned to the bottom of the band: the typed number reads as underlined.
+        numberField.addView(View(this).apply {
+            background = GradientDrawable().apply {
+                cornerRadius = views.dp(1).toFloat()
+                setColor(views.color(R.color.accent))
+            }
+        }, FrameLayout.LayoutParams(views.dp(56), views.dp(2), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
+        column.addView(numberField, LinearLayout.LayoutParams(-1, views.dp(72)))
+
         val match = TextView(this).apply {
             textSize = 15f
+            includeFontPadding = false
             gravity = Gravity.CENTER
             setTextColor(views.color(R.color.accent))
-            minHeight = views.dp(32)
+            minHeight = views.dp(40)
             background = views.selectable()
         }
-        column.addView(match, LinearLayout.LayoutParams(-2, -2))
+        column.addView(match, LinearLayout.LayoutParams(-2, -2).apply { topMargin = views.dp(2) })
         keypadMatch = match
-        column.addView(View(this), LinearLayout.LayoutParams(-1, 0, 1f))
 
         fun insert(text: String) {
             val start = number.selectionStart.coerceAtLeast(0)
@@ -817,15 +859,24 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
             number.text.replace(start, end, text)
         }
         val keyViews = ArrayList<View>()
-        val rowViews = ArrayList<View>()
+        val rowViews = ArrayList<LinearLayout>()
         val keys = listOf(
             "1" to "", "2" to "ABC", "3" to "DEF",
             "4" to "GHİ", "5" to "JKL", "6" to "MNO",
             "7" to "PQRS", "8" to "TUV", "9" to "WXYZ",
             "*" to "", "0" to "+", "#" to ""
         )
+        // The pad owns the leftover height and splits it into four equal rows, so there is
+        // never a dead band above the keys and the call key stays pinned to the bottom.
+        val pad = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
         for (rowKeys in keys.chunked(3)) {
-            val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val line = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+            }
             for ((digit, letters) in rowKeys) {
                 val key = keypadKey(digit, letters)
                 key.setOnClickListener {
@@ -835,13 +886,17 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
                 }
                 if (digit == "0") key.setOnLongClickListener { insert("+"); true }
                 val cell = FrameLayout(this)
-                cell.addView(key, FrameLayout.LayoutParams(views.dp(76), views.dp(76), Gravity.CENTER))
+                cell.addView(key, FrameLayout.LayoutParams(views.dp(70), views.dp(70), Gravity.CENTER))
                 line.addView(cell, LinearLayout.LayoutParams(0, -1, 1f))
                 keyViews.add(key)
             }
-            column.addView(line, LinearLayout.LayoutParams(-1, views.dp(88)))
+            // Fixed row pitch: the 14dp that is left over becomes the gap between keys.
+            pad.addView(line, LinearLayout.LayoutParams(-1, views.dp(PAD_ROW_DP)))
             rowViews.add(line)
         }
+        // The pad takes all the leftover height. Its rows have a fixed 84dp pitch, so whatever
+        // is left over becomes equal air above and below the block instead of one dead band.
+        column.addView(pad, LinearLayout.LayoutParams(-1, 0, 1f))
 
         val bottom = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -890,15 +945,19 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         deleteCell.addView(delete, FrameLayout.LayoutParams(views.dp(56), views.dp(56), Gravity.CENTER))
         bottom.addView(deleteCell, LinearLayout.LayoutParams(0, -1, 1f))
         column.addView(bottom, LinearLayout.LayoutParams(-1, views.dp(88)))
-        rowViews.add(bottom)
 
-        // Keys shrink when the screen is short (a notice or a call card above), so the call key
-        // always stays in view.
+        // Key diameter follows the row height the pad actually got, clamped to a 48dp touch
+        // target so a short screen (notice card + call card) can never shrink the keys away.
+        // Row pitch follows the height the pad actually got. 84dp pitch with a 70dp key keeps a
+        // Google-Dialer-like gap between circles; a short screen (notice + call card) shrinks
+        // both together, and the 48dp floor keeps every key a legal touch target.
         fun fit() {
-            val used = column.paddingTop + column.paddingBottom + number.height + views.dp(8) + match.height
-            val row = ((column.height - used) / rowViews.size).coerceAtMost(views.dp(88))
-            if (row <= 0) return
-            val size = (row - views.dp(10)).coerceIn(views.dp(48), views.dp(76))
+            val available = pad.height
+            if (available <= 0) return
+            val rows = rowViews.size
+            val row = if (available >= views.dp(PAD_ROW_DP) * rows) views.dp(PAD_ROW_DP)
+            else (available / rows).coerceAtLeast(views.dp(54))
+            val size = (row - views.dp(14)).coerceIn(views.dp(48), views.dp(70))
             var changed = false
             for (line in rowViews) {
                 if (line.layoutParams.height != row) {
@@ -906,22 +965,25 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
                     changed = true
                 }
             }
-            for (key in keyViews + call) {
-                val wanted = if (key === call) (size - views.dp(4)).coerceAtLeast(views.dp(48)) else size
-                if (key.layoutParams.width != wanted) {
-                    key.layoutParams.width = wanted
-                    key.layoutParams.height = wanted
+            for (key in keyViews) {
+                val params = key.layoutParams as? FrameLayout.LayoutParams ?: continue
+                if (params.width != size || params.height != size) {
+                    // Mutate in place: a fresh LayoutParams would drop the CENTER gravity.
+                    params.width = size
+                    params.height = size
+                    params.gravity = Gravity.CENTER
                     changed = true
                 }
             }
-            if (changed) column.requestLayout()
+            if (changed) pad.requestLayout()
         }
-        column.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
-            if (bottom - top != oldBottom - oldTop) column.post { fit() }
+        pad.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top != oldBottom - oldTop) pad.post { fit() }
         }
 
         fun update() {
             draftNumber = number.text.toString()
+            placeholder.visibility = if (draftNumber.isEmpty()) View.VISIBLE else View.GONE
             delete.visibility = if (draftNumber.isEmpty()) View.INVISIBLE else View.VISIBLE
             updateKeypadMatch(number)
         }
@@ -946,7 +1008,7 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         }
         key.addView(TextView(this).apply {
             text = digit
-            textSize = 28f
+            textSize = 30f
             includeFontPadding = false
             gravity = Gravity.CENTER
             setTextColor(views.color(R.color.text_primary))
@@ -954,11 +1016,12 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         if (letters.isNotEmpty()) {
             key.addView(TextView(this).apply {
                 text = letters
-                textSize = 10f
-                letterSpacing = 0.15f
+                textSize = 11f
+                includeFontPadding = false
+                letterSpacing = 0.06f
                 gravity = Gravity.CENTER
                 setTextColor(views.color(R.color.text_secondary))
-            })
+            }, LinearLayout.LayoutParams(-2, -2).apply { topMargin = views.dp(1) })
         }
         return key
     }
@@ -1085,6 +1148,9 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
             isStackFromBottom = true
             transcriptMode = AbsListView.TRANSCRIPT_MODE_NORMAL
             clipToPadding = false
+            isVerticalScrollBarEnabled = false
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
             setPadding(views.dp(12), views.dp(8), views.dp(12), views.dp(8))
         }
         val adapter = object : BaseAdapter() {
@@ -1100,9 +1166,10 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
                 if (item is Header) {
                     val view = convertView as? TextView ?: TextView(this@PhoneActivity).apply {
                         textSize = 12f
+                        letterSpacing = 0.06f
                         gravity = Gravity.CENTER
-                        setTextColor(views.color(R.color.text_secondary))
-                        setPadding(0, views.dp(14), 0, views.dp(6))
+                        setTextColor(views.color(R.color.text_muted))
+                        setPadding(0, views.dp(18), 0, views.dp(8))
                         layoutParams = AbsListView.LayoutParams(-1, -2)
                     }
                     view.text = item.text
@@ -1139,16 +1206,18 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         val container = recycled ?: LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = AbsListView.LayoutParams(-1, -2)
-            setPadding(0, views.dp(3), 0, views.dp(3))
+            setPadding(0, views.dp(2), 0, views.dp(2))
             addView(TextView(this@PhoneActivity).apply {
                 textSize = 16f
+                includeFontPadding = false
                 setTextIsSelectable(true)
-                setPadding(views.dp(14), views.dp(9), views.dp(14), views.dp(9))
+                setPadding(views.dp(16), views.dp(10), views.dp(16), views.dp(10))
                 maxWidth = (resources.displayMetrics.widthPixels * 0.78).toInt()
             }, LinearLayout.LayoutParams(-2, -2))
             addView(TextView(this@PhoneActivity).apply {
                 textSize = 11f
-                setPadding(views.dp(6), views.dp(2), views.dp(6), 0)
+                includeFontPadding = false
+                setPadding(views.dp(6), views.dp(3), views.dp(6), 0)
             }, LinearLayout.LayoutParams(-2, -2))
         }
         val text = container.getChildAt(0) as TextView
@@ -1157,8 +1226,8 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         text.text = message.body
         text.setTextColor(views.color(if (message.sent) R.color.pb_on_accent else R.color.text_primary))
         text.background = GradientDrawable().apply {
-            cornerRadius = views.dp(18).toFloat()
-            setColor(views.color(if (message.sent) R.color.accent else R.color.pb_surface_variant))
+            cornerRadius = views.dp(20).toFloat()
+            setColor(views.color(if (message.sent) R.color.accent else R.color.pb_bubble_in))
         }
         val time = SimpleDateFormat("HH:mm", turkish).format(Date(message.time))
         meta.text = if (message.failed) "$time · Gönderilemedi" else time

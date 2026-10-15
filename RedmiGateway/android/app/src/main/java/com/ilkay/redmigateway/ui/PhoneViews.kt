@@ -26,7 +26,14 @@ import androidx.core.content.ContextCompat
 import com.ilkay.redmigateway.R
 import java.util.Locale
 
-/** Rows, avatars and headers shared by the phone screens. */
+/**
+ * Rows, avatars and headers shared by the phone screens.
+ *
+ * The whole list surface follows one 4dp spacing scale and a two-step type ramp
+ * (16sp medium title / 14sp secondary line) so recents, contacts and messages all
+ * read as the same product. Trailing metadata (time) is a sibling of the title, so
+ * it stays optically aligned with the name no matter how tall the row grows.
+ */
 internal class PhoneViews(private val context: Context) {
     class Avatar(val root: FrameLayout, val image: ImageView, val initial: TextView)
 
@@ -40,18 +47,38 @@ internal class PhoneViews(private val context: Context) {
         val action: ImageButton
     )
 
+    /** Shared geometry, in dp. Every screen uses these instead of ad-hoc numbers. */
+    object Metrics {
+        const val GUTTER = 16
+        const val ROW_MIN_HEIGHT = 76
+        const val AVATAR_SIZE = 48
+        const val TOUCH_TARGET = 48
+        const val HEADER_TOP = 20
+        const val HEADER_BOTTOM = 8
+    }
+
     private val density = context.resources.displayMetrics.density
     private val photos = LruCache<String, Bitmap>(96)
     private val missingPhotos = HashSet<String>()
     private val turkish = Locale("tr", "TR")
+
+    /**
+     * Avatar colours. Chosen to sit on the dark phone surface without glowing, while
+     * still holding 4.5:1 contrast against the white initial letter on top of them.
+     */
     private val palette = intArrayOf(
-        0xFF3B6FB6.toInt(), 0xFF2E8B6E.toInt(), 0xFF8A5CB8.toInt(), 0xFFC0662B.toInt(),
-        0xFF4A7F2A.toInt(), 0xFFB5475F.toInt(), 0xFF2F8A9C.toInt(), 0xFF7C6A36.toInt()
+        0xFF3F6FD8.toInt(), 0xFF1B8A67.toInt(), 0xFF7A54C8.toInt(), 0xFFC2691F.toInt(),
+        0xFF4A8231.toInt(), 0xFFB94A62.toInt(), 0xFF227E96.toInt(), 0xFF8A6320.toInt()
     )
+
+    private val medium = Typeface.create("sans-serif-medium", Typeface.NORMAL)
 
     fun dp(value: Int) = (value * density).toInt()
 
     fun color(id: Int) = ContextCompat.getColor(context, id)
+
+    /** The one weight used for titles, nav labels and section headers. */
+    fun mediumTypeface(): Typeface = medium
 
     fun selectable(borderless: Boolean = false): Drawable? {
         val attr = if (borderless) android.R.attr.selectableItemBackgroundBorderless else android.R.attr.selectableItemBackground
@@ -60,7 +87,7 @@ internal class PhoneViews(private val context: Context) {
         return ContextCompat.getDrawable(context, value.resourceId)
     }
 
-    fun avatar(): Avatar {
+    fun avatar(size: Int = Metrics.AVATAR_SIZE): Avatar {
         val root = FrameLayout(context).apply {
             outlineProvider = object : ViewOutlineProvider() {
                 override fun getOutline(view: View, outline: Outline) = outline.setOval(0, 0, view.width, view.height)
@@ -71,8 +98,9 @@ internal class PhoneViews(private val context: Context) {
         val initial = TextView(context).apply {
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
-            textSize = 18f
-            typeface = Typeface.DEFAULT_BOLD
+            textSize = 19f
+            includeFontPadding = false
+            typeface = medium
         }
         val image = ImageView(context)
         root.addView(initial, FrameLayout.LayoutParams(-1, -1))
@@ -101,13 +129,13 @@ internal class PhoneViews(private val context: Context) {
                 avatar.image.setImageDrawable(null)
             }
             else -> {
-                avatar.root.background = ColorDrawable(color(R.color.text_muted))
+                avatar.root.background = ColorDrawable(color(R.color.pb_surface_variant))
                 avatar.initial.text = ""
                 avatar.image.visibility = View.VISIBLE
                 avatar.image.scaleType = ImageView.ScaleType.FIT_CENTER
-                avatar.image.setPadding(dp(10), dp(10), dp(10), dp(10))
+                avatar.image.setPadding(dp(12), dp(12), dp(12), dp(12))
                 avatar.image.setImageResource(R.drawable.ic_pb_person)
-                avatar.image.imageTintList = ColorStateList.valueOf(Color.WHITE)
+                avatar.image.imageTintList = ColorStateList.valueOf(color(R.color.text_muted))
             }
         }
     }
@@ -126,60 +154,79 @@ internal class PhoneViews(private val context: Context) {
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(72)
-            setPadding(dp(16), dp(8), dp(8), dp(8))
+            minimumHeight = dp(Metrics.ROW_MIN_HEIGHT)
+            setPadding(dp(Metrics.GUTTER), dp(10), dp(8), dp(10))
             background = selectable()
             layoutParams = AbsListView.LayoutParams(-1, -2)
         }
         val avatar = avatar()
-        root.addView(avatar.root, LinearLayout.LayoutParams(dp(44), dp(44)))
+        root.addView(avatar.root, LinearLayout.LayoutParams(dp(Metrics.AVATAR_SIZE), dp(Metrics.AVATAR_SIZE)))
+
         val texts = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), 0, dp(8), 0)
+            setPadding(dp(Metrics.GUTTER), 0, dp(8), 0)
         }
         val title = TextView(context).apply {
             textSize = 16f
+            typeface = medium
+            includeFontPadding = false
             setTextColor(color(R.color.text_primary))
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         }
-        texts.addView(title)
+        // Time sits on the name's baseline instead of floating in the middle of the row.
+        val trailing = TextView(context).apply {
+            textSize = 12f
+            includeFontPadding = false
+            setTextColor(color(R.color.text_secondary))
+            visibility = View.GONE
+        }
+        val nameLine = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        nameLine.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
+        nameLine.addView(trailing, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) })
+        texts.addView(nameLine, LinearLayout.LayoutParams(-1, -2))
+
         val line = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val icon = ImageView(context).apply { visibility = View.GONE }
-        line.addView(icon, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(4) })
+        val icon = ImageView(context).apply {
+            visibility = View.GONE
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        line.addView(icon, LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(6) })
         val subtitle = TextView(context).apply {
             textSize = 14f
+            includeFontPadding = false
             setTextColor(color(R.color.text_secondary))
             maxLines = 1
             ellipsize = TextUtils.TruncateAt.END
         }
         line.addView(subtitle, LinearLayout.LayoutParams(0, -2, 1f))
-        texts.addView(line, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(2) })
+        texts.addView(line, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
         root.addView(texts, LinearLayout.LayoutParams(0, -2, 1f))
-        val trailing = TextView(context).apply {
-            textSize = 13f
-            setTextColor(color(R.color.text_secondary))
-            visibility = View.GONE
-        }
-        root.addView(trailing, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
+
         val action = ImageButton(context).apply {
             background = selectable(borderless = true)
             imageTintList = ColorStateList.valueOf(color(R.color.text_secondary))
             isFocusable = false
             visibility = View.GONE
         }
-        root.addView(action, LinearLayout.LayoutParams(dp(48), dp(48)))
+        root.addView(action, LinearLayout.LayoutParams(dp(Metrics.TOUCH_TARGET), dp(Metrics.TOUCH_TARGET)))
         return Row(root, avatar, title, icon, subtitle, trailing, action)
     }
 
+    /** Section header (day or initial letter). */
     fun header(): TextView = TextView(context).apply {
         textSize = 13f
-        typeface = Typeface.DEFAULT_BOLD
-        setTextColor(color(R.color.text_secondary))
-        setPadding(dp(16), dp(18), dp(16), dp(6))
+        typeface = medium
+        letterSpacing = 0.06f
+        setTextColor(color(R.color.text_muted))
+        includeFontPadding = false
+        setPadding(dp(Metrics.GUTTER), dp(Metrics.HEADER_TOP), dp(Metrics.GUTTER), dp(Metrics.HEADER_BOTTOM))
         layoutParams = AbsListView.LayoutParams(-1, -2)
         isFocusable = false
     }

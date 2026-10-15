@@ -129,6 +129,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
     private val preparedWrites = ConcurrentHashMap<BluetoothDevice, MutableList<PreparedWriteEntry>>()
 
     private var isAdvertising = false
+    private var advertiseStarting = false
     private var isServerRunning = false
     private var shouldBeRunning = false
     private var isReceiverRegistered = false
@@ -163,11 +164,18 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
             isAdvertising = true
+            advertiseStarting = false
             Log.i(TAG, "BLE advertising started successfully")
+            // A start that raced a freshly linked iPhone is undone here, where its result is known.
+            if (beaconCallback == null && shouldBeRunning && iPhoneLinked()) {
+                Log.i(TAG, "iPhone linked while advertising started; stopping it")
+                stopAdvertising()
+            }
         }
 
         override fun onStartFailure(errorCode: Int) {
             isAdvertising = false
+            advertiseStarting = false
             Log.w(TAG, "BLE advertising failed to start, error code: $errorCode")
         }
     }
@@ -615,8 +623,33 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
 
         try {
             advertiser?.startAdvertising(settings, advertiseData, scanResponse, advertiseCallback)
+            advertiseStarting = true
         } catch (e: Exception) {
+            advertiseStarting = false
             Log.e(TAG, "Failed to start BLE advertising: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Advertise only while the iPhone has to find this Redmi again.
+     *
+     * A paired iPhone that already holds a Bluetooth link or an authenticated socket needs no
+     * advertisement, yet the balanced advertiser kept transmitting four times a second on three
+     * channels for the whole call. That is radio time and heat on a phone whose Wi-Fi retries
+     * already run at 25 %. Advertising comes back the moment the link drops, so reconnecting is
+     * unchanged. The call wake beacon owns the advertiser while it runs.
+     */
+    private fun syncIdleAdvertising() {
+        if (!shouldBeRunning) return
+        if (beaconCallback != null) return
+        if (iPhoneLinked()) {
+            if (isAdvertising) {
+                Log.i(TAG, "iPhone is linked; BLE advertising paused until it must find this Redmi")
+                stopAdvertising()
+            }
+        } else if (!isAdvertising && !advertiseStarting) {
+            Log.i(TAG, "iPhone has no link; BLE advertising on")
+            startAdvertising()
         }
     }
 
@@ -695,6 +728,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
                 // A short grace first: Bluetooth restarts and range blips reconnect by themselves.
                 schedulePulse(RECONNECT_GRACE_MS)
             }
+            syncIdleAdvertising()
         }
     }
 
@@ -717,6 +751,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
             if (beaconIsUrgent == isUrgent) return
             stopCallBeacon()
         }
+        // One legacy advertising set: the wake beacon needs the advertiser itself.
+        stopAdvertising()
         val key = PairingStore.pairedClient()?.key ?: return
         val advertiser = bluetoothAdapter?.bluetoothLeAdvertiser ?: return
         val uuid = BridgeCrypto.derive(key, "beacon").copyOf(16)
@@ -775,16 +811,19 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         mainHandler.removeCallbacks(beaconCheck)
         runCatching { if (hasAdvertisePermission()) bluetoothAdapter?.bluetoothLeAdvertiser?.stopAdvertising(callback) }
         Log.i(TAG, "Call wake beacon off")
+        // The beacon held the advertiser; hand it back if the iPhone still has to find this Redmi.
+        mainHandler.post { syncIdleAdvertising() }
     }
 
     private fun stopAdvertising() {
-        if (isAdvertising) {
+        if (isAdvertising || advertiseStarting) {
             try {
                 advertiser?.stopAdvertising(advertiseCallback)
             } catch (e: Exception) {
                 Log.w(TAG, "Error stopping BLE advertising: ${e.message}")
             }
             isAdvertising = false
+            advertiseStarting = false
         }
     }
 

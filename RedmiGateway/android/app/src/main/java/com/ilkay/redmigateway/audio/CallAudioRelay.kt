@@ -85,6 +85,12 @@ object CallAudioRelay : CallManager.CallListener {
     private const val UPLINK_RATE = 48000
     private const val UPLINK_FRAME_BYTES = FRAME_SAMPLES * 3 * 2 * 2 // 48 kHz stereo 16-bit
     private const val UPLINK_BUFFER_FRAMES = 6 // ~120 ms AudioTrack buffer (6 * 20 ms frames)
+    private const val FRAME_MS = 20L
+    // The writer keeps only this cushion inside the track. The track's own buffer stays at six
+    // frames of headroom, but a full buffer is latency: a burst of network frames used to be pushed
+    // into the track as fast as it arrived (measured maxWriteMs=71, i.e. the loop was blocked on a
+    // full track), which added up to the whole 120 ms to the uplink and starved the loop.
+    private const val UPLINK_PRIME_FRAMES = 4 // ~80 ms of device cushion, filled once at cutover
     private const val RAMP_SAMPLES = 32
     private val RAMP_UP = FloatArray(RAMP_SAMPLES) { i ->
         (0.5 * (1.0 - cos(PI * i / RAMP_SAMPLES))).toFloat()
@@ -94,14 +100,26 @@ object CallAudioRelay : CallManager.CallListener {
     private const val PREPARE_TIMEOUT_MS = 8_000L
     // The iPhone answers and starts sending within a second; a shorter window hands the audio over
     // fast ("the sound jumps to the iPhone at once") while still checking both directions.
-    private const val VERIFY_WINDOW_MS = 700L
+    private const val VERIFY_WINDOW_MS = 400L
     private const val VERIFY_TIMEOUT_MS = 2_500L
-    private const val MONITOR_INTERVAL_MS = 250L
+    private const val MONITOR_INTERVAL_MS = 150L
     private const val IPHONE_SILENCE_LIMIT_MS = 1800L
     private const val MIN_FRAMES_PER_SECOND = 38
+    // The iPhone streams within a second of answering. Waiting for a full one second window to
+    // close delayed the cutover by up to 500 ms, so a partial window is read as a rate as soon as
+    // it holds this much speech. The threshold above and the freshness rule are unchanged.
+    private const val ARRIVAL_WINDOW_MIN_MS = 400L
+    private const val ARRIVAL_WINDOW_MIN_FRAMES = 18
 
     private val lastValidPcm = ByteArray(FRAME_BYTES)
     private val plcBuf = ByteArray(FRAME_BYTES)
+    // Reused packet scratch, one owner thread each. Sealed layout: 10 byte header,
+    // 12 byte nonce, 640 byte payload, 16 byte tag.
+    private val rxHeader = ByteArray(SEALED_HEADER_BYTES)
+    private val rxSealedPcm = ByteArray(BridgeCrypto.NONCE_BYTES + FRAME_BYTES + BridgeCrypto.TAG_BYTES)
+    private val rxSealedKeepalive = ByteArray(BridgeCrypto.NONCE_BYTES + BridgeCrypto.TAG_BYTES)
+    private val txHeader = ByteArray(SEALED_HEADER_BYTES)
+    private val txNonce = ByteArray(BridgeCrypto.NONCE_BYTES)
     private var plcConsecutiveFrames = 0
     private var hasValidPcmHistory = false
 
@@ -189,6 +207,11 @@ object CallAudioRelay : CallManager.CallListener {
     private val insertedSilenceWrites = AtomicInteger()
     private val partialUplinkWrites = AtomicInteger()
     private val downlinkReads = AtomicInteger()
+    // Counters since the cutover began. The per second window above is reset on every roll, so it
+    // cannot measure the first partial window; these two make the handover decision at
+    // VERIFY_WINDOW_MS instead of at the next one second boundary.
+    private val cutoverWrites = AtomicInteger()
+    private val cutoverReads = AtomicInteger()
     private var lastHealthLogAt = 0L
     @Volatile private var maxWriteMs = 0L
     private var windowIPhone = 0
@@ -232,6 +255,8 @@ object CallAudioRelay : CallManager.CallListener {
             "sealed" to (mediaKey != null),
             "rejectedPackets" to rejectedPackets.get(),
             "underruns" to queue.underruns,
+            "jitterTargetFrames" to queue.targetFrames,
+            "jitterTargetMs" to queue.targetFrames * FRAME_MS.toInt(),
             "maxWriteMs" to maxWriteMs
         )
     }
@@ -351,6 +376,7 @@ object CallAudioRelay : CallManager.CallListener {
         windowStartedAt = SystemClock.elapsedRealtime()
         iphoneFrames.set(0); uplinkWrites.set(0); downlinkReads.set(0)
         uplinkPcmWrites.set(0); insertedSilenceWrites.set(0); partialUplinkWrites.set(0)
+        cutoverWrites.set(0); cutoverReads.set(0)
     }
 
     /** Runs on the worker thread every 250 ms while a session exists. */
@@ -372,7 +398,8 @@ object CallAudioRelay : CallManager.CallListener {
             val queue = uplinkQueue.snapshot()
             Log.i(TAG, "RELAY_HEALTH owner=$owner iphone=$windowIPhone/s uplink=$windowWrites/s " +
                 "pcm=$windowPcmWrites/s silence=$windowSilenceWrites/s partial=$windowPartialWrites/s " +
-                "downlink=$windowReads/s queued=${queue.queued} dropped=${queue.dropped} " +
+                "downlink=$windowReads/s queued=${queue.queued} targetFrames=${queue.targetFrames} " +
+                "dropped=${queue.dropped} " +
                 "expired=${queue.expired} underruns=${queue.underruns} maxWriteMs=$maxWriteMs " +
                 "maxAuthenticatedArrivalGapMs=${queue.maxAuthenticatedArrivalGapMs} " +
                 "maxAuthenticatedArrivalBurstFrames=${queue.maxAuthenticatedArrivalBurstFrames}")
@@ -386,33 +413,48 @@ object CallAudioRelay : CallManager.CallListener {
             Owner.REDMI -> Unit
             Owner.PREPARING_IPHONE -> {
                 if (!mediaRunning) {
-                    if (live && iphoneFresh && windowIPhone >= MIN_FRAMES_PER_SECOND) {
+                    // The current window is still open: read it as a rate instead of waiting for the
+                    // one second boundary, which used to add up to half a second to the handover.
+                    val windowMs = now - windowStartedAt
+                    val windowCount = iphoneFrames.get()
+                    val windowReady = windowMs >= ARRIVAL_WINDOW_MIN_MS &&
+                        windowCount >= ARRIVAL_WINDOW_MIN_FRAMES
+                    val windowRate = if (windowMs > 0) (windowCount * 1000L / windowMs).toInt() else 0
+                    if (live && iphoneFresh && windowReady && windowRate >= MIN_FRAMES_PER_SECOND) {
                         startMedia()
                     } else if (now - preparingSince > PREPARE_TIMEOUT_MS && live) {
                         releaseMediaAndKeepSession("iphone_audio_not_ready")
                     }
                     return
                 }
-                // Media running: wait for a full verification window, then decide.
+                // Media running: the handover needs VERIFY_WINDOW_MS of audio in both directions.
+                // Measured against the counters that start at the cutover, not against the last
+                // closed one second window, so the decision lands at 400-550 ms instead of at
+                // 1000-1150 ms. The thresholds and the freshness rules are unchanged.
                 val elapsed = now - cutoverStartedAt
-                if (elapsed >= VERIFY_WINDOW_MS && windowStartedAt >= cutoverStartedAt) {
-                    val healthy = windowWrites >= MIN_FRAMES_PER_SECOND &&
-                        windowReads >= MIN_FRAMES_PER_SECOND && iphoneFresh && iphoneHearing
+                if (elapsed >= VERIFY_WINDOW_MS) {
+                    val elapsedMs = elapsed.coerceAtLeast(1L)
+                    val writes = cutoverWrites.get()
+                    val reads = cutoverReads.get()
+                    val writesRate = (writes * 1000L / elapsedMs).toInt()
+                    val readsRate = (reads * 1000L / elapsedMs).toInt()
+                    val healthy = writesRate >= MIN_FRAMES_PER_SECOND &&
+                        readsRate >= MIN_FRAMES_PER_SECOND && iphoneFresh && iphoneHearing
                     if (healthy) {
                         if (applyIsolation()) {
                             setOwner(Owner.IPHONE, "iphone_confirmed")
-                            CallManager.log("Call audio moved to iPhone (uplink=$windowWrites/s downlink=$windowReads/s)")
+                            CallManager.log("Call audio moved to iPhone (uplink=$writesRate/s downlink=$readsRate/s)")
                         } else {
                             releaseMediaAndKeepSession("isolation_failed")
                         }
                     } else if (elapsed > VERIFY_TIMEOUT_MS) {
                         val reason = when {
-                            windowWrites < MIN_FRAMES_PER_SECOND -> "uplink_path_unavailable"
-                            windowReads < MIN_FRAMES_PER_SECOND -> "downlink_unavailable"
+                            writesRate < MIN_FRAMES_PER_SECOND -> "uplink_path_unavailable"
+                            readsRate < MIN_FRAMES_PER_SECOND -> "downlink_unavailable"
                             !iphoneFresh -> "iphone_audio_lost"
                             else -> "iphone_not_receiving"
                         }
-                        Log.w(TAG, "Cutover verification failed: $reason writes=$windowWrites reads=$windowReads iphone=$windowIPhone")
+                        Log.w(TAG, "Cutover verification failed: $reason writes=$writesRate/s reads=$readsRate/s iphone=$windowIPhone")
                         releaseMediaAndKeepSession(reason)
                     }
                 }
@@ -495,6 +537,11 @@ object CallAudioRelay : CallManager.CallListener {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val buffer = ByteArray(2048)
         val packet = DatagramPacket(buffer, buffer.size)
+        // Scratch owned by this thread only: the packet path used to build five arrays per 20 ms
+        // frame, and a collection during a call lands as a late AudioTrack write.
+        val header = rxHeader
+        val sealedPcm = rxSealedPcm
+        val sealedKeepalive = rxSealedKeepalive
         while (!datagram.isClosed) {
             try {
                 packet.setLength(buffer.size)
@@ -505,7 +552,7 @@ object CallAudioRelay : CallManager.CallListener {
             }
             val expected = session
             if (expected == 0 || packet.length < HEADER_BYTES) continue
-            val packetSession = ByteBuffer.wrap(buffer, 0, 4).order(ByteOrder.BIG_ENDIAN).int
+            val packetSession = readInt(buffer, 0)
             if (packetSession != expected) continue
             val allowed = expectedClientAddress
             if (allowed != null && packet.address != allowed) continue
@@ -514,11 +561,18 @@ object CallAudioRelay : CallManager.CallListener {
             val pcm: ByteArray?
             if (key != null) {
                 if (packet.length < SEALED_HEADER_BYTES + BridgeCrypto.TAG_BYTES) continue
-                val counter = ByteBuffer.wrap(buffer, 4, 4).order(ByteOrder.BIG_ENDIAN).int.toLong() and 0xFFFFFFFFL
+                val counter = readCounter(buffer)
                 if (counter <= lastRxCounter) continue
                 type = buffer[8]
-                val header = buffer.copyOfRange(0, SEALED_HEADER_BYTES)
-                val sealed = nonce(UPLINK_TAG, counter, expected) + buffer.copyOfRange(SEALED_HEADER_BYTES, packet.length)
+                val ciphertext = packet.length - SEALED_HEADER_BYTES
+                val sealed = when (ciphertext) {
+                    FRAME_BYTES + BridgeCrypto.TAG_BYTES -> sealedPcm
+                    BridgeCrypto.TAG_BYTES -> sealedKeepalive
+                    else -> ByteArray(BridgeCrypto.NONCE_BYTES + ciphertext)
+                }
+                writeNonce(sealed, UPLINK_TAG, counter, expected)
+                System.arraycopy(buffer, SEALED_HEADER_BYTES, sealed, BridgeCrypto.NONCE_BYTES, ciphertext)
+                System.arraycopy(buffer, 0, header, 0, SEALED_HEADER_BYTES)
                 val plain = BridgeCrypto.open(key, sealed, header)
                 if (plain == null) {
                     rejectedPackets.incrementAndGet()
@@ -543,9 +597,32 @@ object CallAudioRelay : CallManager.CallListener {
         }
     }
 
-    private fun nonce(tag: ByteArray, counter: Long, sessionId: Int): ByteArray =
-        ByteBuffer.allocate(BridgeCrypto.NONCE_BYTES).order(ByteOrder.BIG_ENDIAN)
-            .put(tag).putInt(counter.toInt()).putInt(sessionId).array()
+    /** Nonce layout shared with the iPhone: 4 byte direction tag, counter, session id (big endian). */
+    private fun writeNonce(target: ByteArray, tag: ByteArray, counter: Long, sessionId: Int) {
+        System.arraycopy(tag, 0, target, 0, 4)
+        target[4] = (counter ushr 24).toByte()
+        target[5] = (counter ushr 16).toByte()
+        target[6] = (counter ushr 8).toByte()
+        target[7] = counter.toByte()
+        target[8] = (sessionId ushr 24).toByte()
+        target[9] = (sessionId ushr 16).toByte()
+        target[10] = (sessionId ushr 8).toByte()
+        target[11] = sessionId.toByte()
+    }
+
+    /** Big endian, matching ByteBuffer with order BIG_ENDIAN. */
+    private fun writeInt(target: ByteArray, offset: Int, value: Int) {
+        target[offset] = (value ushr 24).toByte()
+        target[offset + 1] = (value ushr 16).toByte()
+        target[offset + 2] = (value ushr 8).toByte()
+        target[offset + 3] = value.toByte()
+    }
+
+    private fun readInt(bytes: ByteArray, offset: Int): Int =
+        ((bytes[offset].toInt() and 0xFF) shl 24) or ((bytes[offset + 1].toInt() and 0xFF) shl 16) or
+            ((bytes[offset + 2].toInt() and 0xFF) shl 8) or (bytes[offset + 3].toInt() and 0xFF)
+
+    private fun readCounter(bytes: ByteArray): Long = readInt(bytes, 4).toLong() and 0xFFFFFFFFL
 
     private fun sameKey(a: ByteArray?, b: ByteArray?): Boolean =
         if (a == null || b == null) a === b else a.contentEquals(b)
@@ -591,11 +668,16 @@ object CallAudioRelay : CallManager.CallListener {
         val out = ByteArray(UPLINK_FRAME_BYTES)
         plcConsecutiveFrames = 0
         hasValidPcmHistory = false
+        // Absolute 20 ms deadlines keep this loop at the PCM rate instead of at the arrival rate.
+        // A burst leaves the queue deeper instead of flooding the track, so the blocking write
+        // returns at once, the uplink latency stays at (queue depth + one cushion) and a stalled
+        // writer catches up by refilling the cushion instead of by sending audio early.
+        var nextWriteAt = 0L
+        var primeFramesRemaining = UPLINK_PRIME_FRAMES - 1
 
         while (mediaRunning && uplink === track) {
-            // The blocking track write paces this loop at real time; the queue only absorbs
-            // network jitter. A missing frame becomes concealed audio/silence rather than a stall,
-            // and after an underrun the bounded queue primes again before speech resumes.
+            // A missing frame becomes concealed audio/silence rather than a stall, and after an
+            // underrun the bounded queue primes again before speech resumes.
             val frame = uplinkQueue.poll(SystemClock.elapsedRealtime())
 
             val playbackPcm: ByteArray
@@ -669,12 +751,23 @@ object CallAudioRelay : CallManager.CallListener {
             }
 
             val bytes = upsampler.process(playbackPcm, 0, FRAME_SAMPLES, out)
+            if (nextWriteAt != 0L) {
+                if (primeFramesRemaining > 0) {
+                    primeFramesRemaining--
+                } else {
+                    val wait = nextWriteAt - SystemClock.elapsedRealtime()
+                    if (wait > 0) SystemClock.sleep(wait)
+                }
+            }
             val started = SystemClock.elapsedRealtime()
             val written = track.write(out, 0, bytes, AudioTrack.WRITE_BLOCKING)
-            val ms = SystemClock.elapsedRealtime() - started
+            val finished = SystemClock.elapsedRealtime()
+            nextWriteAt = if (nextWriteAt == 0L) started + FRAME_MS else nextWriteAt + FRAME_MS
+            val ms = finished - started
             if (written < 0) {
                 Log.w(TAG, "Uplink write failed: $written")
-                SystemClock.sleep(20)
+                SystemClock.sleep(FRAME_MS)
+                nextWriteAt = SystemClock.elapsedRealtime() + FRAME_MS
                 continue
             }
             if (ms > maxWriteMs) maxWriteMs = ms
@@ -682,6 +775,7 @@ object CallAudioRelay : CallManager.CallListener {
                 // Ownership still measures a working sink, while diagnostics distinguish real
                 // received PCM (including naturally silent samples) from substituted silence.
                 uplinkWrites.incrementAndGet()
+                cutoverWrites.incrementAndGet()
                 if (frame == null) insertedSilenceWrites.incrementAndGet() else uplinkPcmWrites.incrementAndGet()
             } else {
                 // A positive short write did not deliver a full 20 ms frame.
@@ -700,6 +794,7 @@ object CallAudioRelay : CallManager.CallListener {
                 continue
             }
             downlinkReads.incrementAndGet()
+            cutoverReads.incrementAndGet()
             val target = peer ?: continue
             val datagram = socket ?: break
             // Session, key and counter are taken together so a re-arm cannot mix them.
@@ -718,9 +813,15 @@ object CallAudioRelay : CallManager.CallListener {
         val key = mediaKey ?: return ByteBuffer.allocate(HEADER_BYTES + read).order(ByteOrder.BIG_ENDIAN)
             .putInt(sessionId).putShort(counter.toShort()).put(PAYLOAD_PCM16).put(0)
             .put(pcm, 0, read).array()
-        val header = ByteBuffer.allocate(SEALED_HEADER_BYTES).order(ByteOrder.BIG_ENDIAN)
-            .putInt(sessionId).putInt(counter.toInt()).put(PAYLOAD_PCM16).put(0).array()
-        val sealed = BridgeCrypto.seal(key, pcm.copyOf(read), header, nonce(DOWNLINK_TAG, counter, sessionId))
+        val header = txHeader
+        writeInt(header, 0, sessionId)
+        writeInt(header, 4, counter.toInt())
+        header[8] = PAYLOAD_PCM16
+        header[9] = 0
+        writeNonce(txNonce, DOWNLINK_TAG, counter, sessionId)
+        // seal() only reads its plaintext, so a short read is the one case that needs a copy.
+        val plaintext = if (read == pcm.size) pcm else pcm.copyOf(read)
+        val sealed = BridgeCrypto.seal(key, plaintext, header, txNonce)
         return header + sealed.copyOfRange(BridgeCrypto.NONCE_BYTES, sealed.size)
     }
 

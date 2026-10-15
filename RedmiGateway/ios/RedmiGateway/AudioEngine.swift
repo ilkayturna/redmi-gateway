@@ -51,6 +51,8 @@ final class AudioEngine {
     private var lastDownlink: Date?
     private var lastPcmSentAt: Date?
     private var recoveryRequested = false
+    /// Playback budget drops are silent; the diagnostics log has to show them to be fixable.
+    private var loggedPlaybackDrops = 0
 
     // The tap deposits directly into this bounded queue, so a stalled network queue
     // cannot retain an unbounded number of async closures containing microphone PCM.
@@ -243,6 +245,7 @@ final class AudioEngine {
             self.lastDownlink = nil
             self.lastPcmSentAt = Date()
             self.recoveryRequested = false
+            self.loggedPlaybackDrops = 0
 
             // Interactive voice: Wi-Fi queues these packets as voice (WMM AC_VO), which keeps
             // latency low on busy hotspots and shared networks.
@@ -294,6 +297,10 @@ final class AudioEngine {
             timer.setEventHandler { [weak self] in
                 guard let self, self.activeGeneration == generation else { return }
                 self.sendPacket(type: 0, pcm: Data())
+                if self.playbackBuffer.droppedFrames > self.loggedPlaybackDrops {
+                    self.loggedPlaybackDrops = self.playbackBuffer.droppedFrames
+                    self.log("Downlink playback budget full: \(self.loggedPlaybackDrops) frame(s) dropped")
+                }
                 if let last = self.lastPcmSentAt, Date().timeIntervalSince(last) > 3, !self.recoveryRequested {
                     self.recoveryRequested = true
                     DispatchQueue.main.async { [weak self] in self?.requestRecovery("microphone stream stopped") }
@@ -339,6 +346,7 @@ final class AudioEngine {
             self.playbackBuffer.reset()
             self.lastPcmSentAt = nil
             self.lastDownlink = nil
+            self.loggedPlaybackDrops = 0
         }
     }
 

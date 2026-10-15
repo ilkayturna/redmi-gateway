@@ -12,6 +12,19 @@
         <item name="android:windowLightNavigationBar">true</item>
     </style>
 
+    <!-- Bottom navigation labels: 12sp, medium weight, no all-caps drift. -->
+    <style name="TextAppearance.RedmiGateway.NavLabel" parent="TextAppearance.MaterialComponents.Caption">
+        <item name="android:textSize">12sp</item>
+        <item name="android:letterSpacing">0.015</item>
+        <item name="android:textStyle">normal</item>
+    </style>
+
+    <style name="TextAppearance.RedmiGateway.NavLabel.Active">
+        <item name="android:textSize">12sp</item>
+        <item name="android:letterSpacing">0.015</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+
     <style name="Theme.RedmiGateway.Call" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <item name="colorPrimary">@color/neon_sky</item>
         <item name="colorPrimaryVariant">@color/call_bg_start</item>
