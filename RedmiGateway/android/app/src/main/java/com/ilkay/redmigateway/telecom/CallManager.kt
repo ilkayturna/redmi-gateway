@@ -230,6 +230,7 @@ object CallManager {
 
     fun log(msg: String) {
         Log.d(TAG, msg)
+        com.ilkay.redmigateway.journal.DiagnosticsLog.record("Call", msg)
         for (l in listeners) {
             try {
                 l.onLogMessage(msg)

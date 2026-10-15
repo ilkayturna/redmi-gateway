@@ -41,5 +41,8 @@ class RedmiGatewayApp : Application() {
         getOpaqueDeviceId()
         com.ilkay.redmigateway.server.ContactResolver.loadSeedContacts(this)
         com.ilkay.redmigateway.telecom.IncomingCallPresenter.init(this)
+        // Call events are also written to a file the phone can hand over without a cable.
+        com.ilkay.redmigateway.journal.DiagnosticsLog.init(this)
+        com.ilkay.redmigateway.journal.DiagnosticsLog.record("App", "diagnostics started")
     }
 }

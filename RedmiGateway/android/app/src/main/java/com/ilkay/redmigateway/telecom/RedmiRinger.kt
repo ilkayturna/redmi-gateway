@@ -99,6 +99,7 @@ object RedmiRinger {
         handler.removeCallbacks(ringNow)
         if (ringing) {
             Log.i(TAG, "RINGER_OFF reason=$reason after ${rangFor()}ms (answered or ended on either phone)")
+            com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "RINGER_OFF reason=$reason after ${rangFor()}ms")
         } else if (callId != null || ringtone != null || vibrating) {
             Log.i(TAG, "RINGER_OFF reason=$reason (was not ringing)")
         }
@@ -141,6 +142,7 @@ object RedmiRinger {
         val audio = context.getSystemService(AudioManager::class.java)
         val mode = audio?.ringerMode ?: AudioManager.RINGER_MODE_NORMAL
         Log.i(TAG, "Redmi rings: $reason (mode=$mode, silentRequested=$silentRequested)")
+        com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Redmi rings: $reason (mode=$mode)")
         if (silentRequested) return
         val attributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)

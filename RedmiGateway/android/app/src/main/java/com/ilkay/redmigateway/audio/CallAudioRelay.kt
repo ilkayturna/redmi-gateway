@@ -395,13 +395,15 @@ object CallAudioRelay : CallManager.CallListener {
         if (mediaRunning && now - lastHealthLogAt >= 5000L) {
             lastHealthLogAt = now
             val queue = uplinkQueue.snapshot()
-            Log.i(TAG, "RELAY_HEALTH owner=$owner iphone=$windowIPhone/s uplink=$windowWrites/s " +
+            val health = "RELAY_HEALTH owner=$owner iphone=$windowIPhone/s uplink=$windowWrites/s " +
                 "pcm=$windowPcmWrites/s silence=$windowSilenceWrites/s partial=$windowPartialWrites/s " +
                 "downlink=$windowReads/s queued=${queue.queued} targetFrames=${queue.targetFrames} " +
                 "dropped=${queue.dropped} " +
                 "expired=${queue.expired} underruns=${queue.underruns} maxWriteMs=$maxWriteMs " +
                 "maxAuthenticatedArrivalGapMs=${queue.maxAuthenticatedArrivalGapMs} " +
-                "maxAuthenticatedArrivalBurstFrames=${queue.maxAuthenticatedArrivalBurstFrames}")
+                "maxAuthenticatedArrivalBurstFrames=${queue.maxAuthenticatedArrivalBurstFrames}"
+            Log.i(TAG, health)
+            com.ilkay.redmigateway.journal.DiagnosticsLog.record("Audio", health)
         }
         val live = isLiveCallState(CallManager.currentCallState)
         val iphoneFresh = lastIPhonePcmAt != 0L && now - lastIPhonePcmAt < silenceLimitMs
@@ -509,6 +511,7 @@ object CallAudioRelay : CallManager.CallListener {
         GatewayService.setCallAudioForeground(next != Owner.REDMI)
         if (changed) {
             Log.i(TAG, "AUDIO_OWNER=$next reason=$reason")
+            com.ilkay.redmigateway.journal.DiagnosticsLog.record("Audio", "AUDIO_OWNER=$next reason=$reason")
             for (l in listeners) runCatching { l.onAudioOwnerChanged(next, reason) }
         }
     }

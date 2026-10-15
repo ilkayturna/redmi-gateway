@@ -211,6 +211,7 @@ object SmartHotspot {
         when {
             wifi && hotspot && !inCall && now - wifiSince >= STABLE_MS -> {
                 Log.i(TAG, "Known Wi-Fi in use; hotspot off to save mobile data")
+                com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Known Wi-Fi in use; hotspot off to save mobile data")
                 stopHotspot()
             }
             !wifi && !hotspot && now - lostSince >= LOST_MS -> {
@@ -268,16 +269,19 @@ object SmartHotspot {
             // only gives way when the station can actually take over.
             if (!wifiEnabledByUser()) {
                 Log.i(TAG, "Saved network $candidate in range but Wi-Fi is switched off; hotspot stays")
+                com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Saved network $candidate in range but Wi-Fi is off; hotspot stays")
                 setWaitingNetwork(candidate)
                 return
             }
             // A call that started while we were deciding keeps its link (data rule 3).
             if (CallManager.currentCallState !in setOf("idle", "disconnected")) {
                 Log.i(TAG, "Known Wi-Fi $candidate in range; keeping the hotspot for the running call")
+                com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Known Wi-Fi $candidate in range; keeping hotspot for the call")
                 return
             }
             Log.i(TAG, "Known Wi-Fi $candidate in range" +
                 if (clientConnected) " (iPhone on the hotspot); hotspot off to join it" else "; hotspot off to join it")
+            com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Known Wi-Fi $candidate in range; hotspot off to join it")
             trying = candidate
             tryDeadline = now + TRY_MS
             stopHotspot()

@@ -35,7 +35,7 @@ Son güncelleme: 15.10.2026
 > **Kullanıcının sözleşmesi (DEĞİŞMEDİ):** "Bağlı istemci veya aktif çağrı varken hotspot kapanmaz."
 
 - ✅ **Aktif çağrı varken hotspot ASLA kapanmaz** — sözleşmeye birebir uyuluyor. `stopHotspot()` çağrısından hemen önce çağrı durumu yeniden kontrol edilir.
-- ⚠️ **REVİZYON ADAYI (15.10.2026 — KULLANICI ONAYI BEKLİYOR):** Bağlı istemci varken, **çağrı yoksa** ve tanıdık ağ menzilde + `wifi_on=1` ise hotspot **kapanır**. Gerekçe: kullanıcının asıl amacı "internetim kolay kolay bitmesin" (Kural 2) ve iPhone o ağa geçerek kotayı korur. Bu, yukarıdaki sözleşmenin harfine göre bir **istisnadır**; kullanıcı onaylamazsa eski davranışa dönülür.
+- ✅ **ONAYLANDI (kullanıcı, 15.10.2026):** Redmi tanıdık bir ağın menziline girdiğinde **o ağa bağlanır ve hotspot'u kapatır**; iPhone zaten Wi-Fi ile o tanıdık ağa **otomatik** geçer. Kullanıcının birebir ifadesi: *"redmi; tanıdık bir ağ menziline girince ona bağlanıp hotspotu kapatsın; böylece zaten iphone'da wifi ile tanıdık ağa geçicek otomatik."* Bu nedenle bağlı istemci, tanıdık ağ menzildeyken hotspot'un kapanmasını **engellemez**; kota koruması (Kural 2) önceliklidir.
 - **Tanıdık ağ menzilde ama `wifi_on=0`** ise hotspot **KORUNUR** — istasyon ayağa kalkamayacağı için hotspot'u düşürmek iPhone'un tek linkini keser. Bu durumda kullanıcıya bildirimde ipucu gösterilir:
   `Ev/iş ağı "X" menzilde · Wi-Fi'ı aç, iPhone mobil veri harcamasın`
 - Uygulama **`setWifiEnabled` ÇAĞIRMAZ** (Kural 1). İstemci bağlıyken tarama seyrek yapılır (`CLIENT_SCAN_EVERY_MS = 90 sn`; normal `60 sn`).
