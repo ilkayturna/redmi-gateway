@@ -102,6 +102,8 @@ public final class GatewayConnection: ObservableObject {
     private var pingTask: Task<Void, Never>?
     private var syncCallsHasMore = false
     private var smsTimeouts: [String: Task<Void, Never>] = [:]
+    /// One ack watchdog per call command; see startControlWatchdog.
+    private var controlWatchdogs: [String: Task<Void, Never>] = [:]
     private var lastPathSignature = ""
     private var catchUpTask: UIBackgroundTaskIdentifier = .invalid
     private var closeAfterCatchUp = false
@@ -832,6 +834,8 @@ public final class GatewayConnection: ObservableObject {
     }
 
     private func handleAck(_ ack: AckMessage) {
+        // The command reached the Redmi; the watchdog must not send it over Bluetooth as well.
+        controlWatchdogs.removeValue(forKey: ack.action)?.cancel()
         guard !ack.success else { return }
         switch ack.action {
         case "dial":
@@ -885,7 +889,10 @@ public final class GatewayConnection: ObservableObject {
         // frame is lost both when the socket or its key is not ready (checked here) and when the
         // socket has died without the handshake noticing, which shows up only in the send
         // completion; the Bluetooth link carries the command in either case.
-        if state == .authenticated, sendOverSealedLink(["type": action, "callId": callId]) { return }
+        if state == .authenticated, sendOverSealedLink(["type": action, "callId": callId]) {
+            startControlWatchdog(action: action, callId: callId)
+            return
+        }
         sendOverBluetooth(action: action, callId: callId)
     }
 
@@ -906,15 +913,42 @@ public final class GatewayConnection: ObservableObject {
         return true
     }
 
+    /// The Redmi answers every command with an ack. No ack means the frame died on the way even
+    /// though the socket accepted it, so the command goes over Bluetooth once: without this a lost
+    /// answer left the other phone ringing while this iPhone showed the call as answered.
+    private func startControlWatchdog(action: String, callId: String) {
+        controlWatchdogs.removeValue(forKey: action)?.cancel()
+        controlWatchdogs[action] = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.controlWatchdogs.removeValue(forKey: action)
+            self.log("No ack for \(action); sending it over Bluetooth")
+            self.sendOverBluetooth(action: action, callId: callId, reportFailure: true)
+        }
+    }
+
     /// Bluetooth carries a control command when the sealed link cannot.
-    private func sendOverBluetooth(action: String, callId: String) {
+    private func sendOverBluetooth(action: String, callId: String, reportFailure: Bool = false) {
+        // An explicit send supersedes the watchdog, so a command is never delivered twice.
+        controlWatchdogs.removeValue(forKey: action)?.cancel()
         guard BLECentralManager.shared.isReady else {
             log("\(action) not sent: Redmi unreachable")
+            if reportFailure { reportControlFailure(action) }
             return
         }
         BLECentralManager.shared.sendCallControl(action: action, callId: callId) { [weak self] success in
-            self?.log("Bluetooth \(action): \(success ? "ok" : "failed")")
+            Task { @MainActor in
+                guard let self else { return }
+                self.log("Bluetooth \(action): \(success ? "ok" : "failed")")
+                if !success, reportFailure { self.reportControlFailure(action) }
+            }
         }
+    }
+
+    /// The person has to know when a call command never reached the Redmi.
+    private func reportControlFailure(_ action: String) {
+        guard ["answer", "reject", "hangup"].contains(action) else { return }
+        lastCallError = "Redmi'ye ulaşılamadı; komut iletilemedi."
     }
 
     func sendDial(number: String) {

@@ -25,8 +25,12 @@ object CallManager {
      * confirm it (Telecom STATE_ACTIVE). A real answer is confirmed well inside a second; only a
      * failed one stays ringing, and then the announcement is taken back so both phones ring again
      * instead of the call going silent on both.
+     *
+     * 3 s, not 2: the 15.10.2026 log puts the radio's confirmation as late as ~2.2 s after the
+     * answer, and taking the announcement back on a confirmation that is merely slow rings the
+     * Redmi for a moment inside a live call before the real state arrives.
      */
-    private const val ANSWER_CONFIRM_MS = 2_000L
+    private const val ANSWER_CONFIRM_MS = 3_000L
 
     interface CallListener {
         fun onCallStateChanged(callId: String, state: String, number: String?)

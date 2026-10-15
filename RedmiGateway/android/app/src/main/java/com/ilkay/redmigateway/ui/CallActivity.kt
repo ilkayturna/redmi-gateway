@@ -40,6 +40,11 @@ import com.ilkay.redmigateway.telecom.RedmiRinger
  * instant 72dp action buttons, DTMF keypad, and proximity screen management.
  */
 class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRelay.Listener, SensorEventListener, ContactResolver.Listener {
+    private companion object {
+        /** Grace period before re-reading the audio route after a failed confirmation. */
+        const val SPEAKER_RECHECK_MS = 1000L
+    }
+
     private lateinit var binding: ActivityCallBinding
 
     private var sensorManager: SensorManager? = null
@@ -55,6 +60,20 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
                 val seconds = (System.currentTimeMillis() - activeSinceMillis).coerceAtLeast(0L) / 1000L
                 binding.callDuration.text = "%02d:%02d".format(seconds / 60, seconds % 60)
                 durationHandler.postDelayed(this, 1000L)
+            }
+        }
+    }
+
+    /** Route state before the last speaker tap, so a late switch can be told from a real failure. */
+    private var speakerWasOn = false
+    private val speakerRecheck = Runnable {
+        if (!isFinishing && !isDestroyed) {
+            val nowSpeaker = GatewayInCallService.isSpeakerOn()
+            updateSpeakerLabel()
+            binding.help.text = when {
+                nowSpeaker != speakerWasOn && nowSpeaker -> "Hoparlör açık."
+                nowSpeaker != speakerWasOn -> "Ses ahizede."
+                else -> "Hoparlöre geçilemedi."
             }
         }
     }
@@ -126,6 +145,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
             proximityWakeLock?.release()
         }
         durationHandler.removeCallbacks(durationTicker)
+        durationHandler.removeCallbacks(speakerRecheck)
         super.onStop()
     }
 
@@ -195,6 +215,7 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
         }
 
         binding.speaker.setOnClickListener {
+            speakerWasOn = GatewayInCallService.isSpeakerOn()
             GatewayInCallService.toggleSpeaker { success ->
                 runOnUiThread {
                     if (success) {
@@ -203,7 +224,12 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
                             proximityWakeLock?.release()
                         }
                     } else {
+                        // Telecom can switch the endpoint after the confirmation window closes.
+                        // Leaving the old label behind invites a second tap that reverses a route
+                        // which had in fact changed, so re-read the real route once.
                         binding.help.text = "Hoparlöre geçilemedi"
+                        durationHandler.removeCallbacks(speakerRecheck)
+                        durationHandler.postDelayed(speakerRecheck, SPEAKER_RECHECK_MS)
                     }
                 }
             }

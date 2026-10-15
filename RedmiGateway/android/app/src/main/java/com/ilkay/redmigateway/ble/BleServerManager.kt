@@ -50,6 +50,9 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
     companion object {
         private const val TAG = "BleServerManager"
         private const val SEALED_VERSION: Byte = 2
+        /** ATT_MTU before any exchange: a notification carries at most this minus the 3 byte header. */
+        private const val ATT_DEFAULT_MTU = 23
+        private const val ATT_HEADER_BYTES = 3
         private const val MAX_CONTROL_AGE_MS = 60_000L
         private const val SUBSCRIBE_GRACE_MS = 10_000L
         private const val RECONNECT_GRACE_MS = 20_000L
@@ -69,6 +72,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
                 .put("subscribed", server.subscribedDevices.count { it.value.contains(BleConstants.CHAR_STATE_UUID) })
                 .put("sealed", PairingStore.pairedClient() != null)
                 .put("reconnectPulses", server.reconnectPulses)
+                .put("mtu", server.mtuByDevice.values.minOrNull() ?: ATT_DEFAULT_MTU)
+                .put("skippedNotifications", server.skippedNotifications)
         }
 
         /** Bluetooth links to this Redmi that still listen; in practice only the paired iPhone connects. */
@@ -96,6 +101,10 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         mainHandler.post { charState?.let { notifyCharacteristicToSubscribers(it, buildStateBytes()) } }
     }
     private val mtuByDevice = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    /** Last payload size already reported per device, so the MTU warning is logged once. */
+    private val mtuWarned = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    /** Notifications that could not fit the ATT MTU; visible in diagnostics. */
+    @Volatile private var skippedNotifications = 0
     // A long read continues at an offset; it must see the same sealed bytes as its first part.
     @Volatile private var lastStateRead = ByteArray(0)
 
@@ -205,6 +214,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
 
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
             mtuByDevice[device.address] = mtu
+            mtuWarned.remove(device.address)
             Log.i(TAG, "BLE MTU $mtu")
         }
 
@@ -947,8 +957,20 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         for (device in connectedDevices) {
             val subs = subscribedDevices[device]
             if (toAll || subs?.contains(characteristic.uuid) == true) {
-                val mtu = mtuByDevice[device.address] ?: 23
-                if (bytes.size > mtu - 3) Log.w(TAG, "Notification of ${bytes.size} bytes exceeds MTU $mtu")
+                val mtu = mtuByDevice[device.address] ?: ATT_DEFAULT_MTU
+                val limit = mtu - ATT_HEADER_BYTES
+                if (bytes.size > limit) {
+                    // An ATT notification never carries more than MTU-3 bytes, and the MTU stays at
+                    // its 23 byte default until the iPhone asks for a larger one. The sealed state
+                    // frame is 110 bytes, so it cannot arrive: sending it anyway only spends radio
+                    // time on a link that already retries a quarter of its Wi-Fi frames. Reported
+                    // once per device and size; the iPhone reads the same characteristic on demand.
+                    skippedNotifications++
+                    if (mtuWarned.put(device.address, bytes.size) != bytes.size) {
+                        Log.w(TAG, "Skipped a ${bytes.size} byte notification: MTU $mtu allows $limit")
+                    }
+                    continue
+                }
                 try {
                     gattServer?.notifyCharacteristicChanged(device, characteristic, false)
                 } catch (e: Exception) {
