@@ -15,6 +15,7 @@ import android.text.format.DateFormat
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -31,6 +32,7 @@ import com.ilkay.redmigateway.server.DiagnosticsReport
 import com.ilkay.redmigateway.service.GatewayService
 import com.ilkay.redmigateway.telecom.IncomingCallPresenter
 import org.json.JSONObject
+import java.io.File
 import java.util.Date
 
 /**
@@ -47,6 +49,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var iphoneTitle: TextView
     private lateinit var iphoneDetail: TextView
     private lateinit var hotspotStatus: TextView
+    private lateinit var diagnosticsPath: TextView
+    private lateinit var diagnosticsShare: View
     private val pickKey = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) importKey(uri)
     }
@@ -189,6 +193,24 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Rapor kopyalandı (numara ve mesaj içermez)", Toast.LENGTH_SHORT).show()
         })
         status.addView(button("Geçidi yeniden başlat", outlined = true) { restartGateway() })
+
+        // Call diagnostics: the phone travels without the computer, so the log has to be
+        // readable and shareable straight from this screen.
+        val diagnostics = section("Çağrı teşhis kaydı")
+        diagnostics.addView(body("Çağrı sorunlarını incelemek için tutulur. Son 4000 satır saklanır."))
+        diagnosticsPath = TextView(this).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = Typeface.MONOSPACE
+            setTextColor(color(R.color.text_muted))
+            setPadding(0, dp(4), 0, dp(4))
+            setTextIsSelectable(true)
+            contentDescription = "Teşhis kaydı dosya yolu"
+        }
+        diagnostics.addView(diagnosticsPath)
+        diagnostics.addView(button("Son kayıtları göster", outlined = true) { showDiagnosticsTail() })
+        diagnosticsShare = button("Paylaş", outlined = true) { shareDiagnostics() }
+        diagnostics.addView(diagnosticsShare)
+        diagnostics.addView(button("Temizle", outlined = true) { confirmClearDiagnostics() })
     }
 
     override fun onResume() {
@@ -269,6 +291,12 @@ class MainActivity : AppCompatActivity() {
         val missing = missingPermissions(report.getJSONObject("permissions"))
         row("İzinler", if (missing.isEmpty()) "Tamam" else "Eksik: $missing", missing.isEmpty())
         row("Sürüm", "${app.getString("version")} (${app.getInt("build")}) · protokol ${app.getInt("protocol")}", true)
+
+        val logPath = com.ilkay.redmigateway.journal.DiagnosticsLog.path()
+        val logFile = logPath?.let(::File)
+        diagnosticsPath.text = logPath ?: "Kayıt dosyası henüz oluşmadı; ilk çağrı olayından sonra burada görünür."
+        // Nothing to send until the log exists and has content.
+        diagnosticsShare.isEnabled = logFile?.isFile == true && logFile.length() > 0L
     }
 
     private fun ownerText(owner: String) = when (owner) {
@@ -299,6 +327,68 @@ class MainActivity : AppCompatActivity() {
         runCatching {
             startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
         }.onFailure { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+    }
+
+    // ---- call diagnostics ----
+
+    /** The newest lines, scrollable and selectable so they can also be copied by hand. */
+    private fun showDiagnosticsTail() {
+        val text = com.ilkay.redmigateway.journal.DiagnosticsLog.tail(80)
+        if (text.isBlank()) {
+            Toast.makeText(this, "Henüz kayıt yok. Bir çağrıdan sonra tekrar dene.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val log = TextView(this).apply {
+            this.text = text
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = Typeface.MONOSPACE
+            setTextColor(color(R.color.text_primary))
+            setTextIsSelectable(true)
+        }
+        // Fixed height: the dialog then always scrolls instead of growing past the screen.
+        val frame = FrameLayout(this).apply {
+            setPadding(dp(20), dp(8), dp(20), 0)
+            addView(ScrollView(this@MainActivity).apply {
+                addView(log)
+                // tail() puts the newest line last, so open on the newest event rather than the oldest.
+                post { fullScroll(View.FOCUS_DOWN) }
+            }, FrameLayout.LayoutParams(-1, dp(380)))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Son kayıtlar")
+            .setView(frame)
+            .setPositiveButton("Kapat", null)
+            .show()
+    }
+
+    /** Hands the log to WhatsApp, mail or any other text target. */
+    private fun shareDiagnostics() {
+        val text = com.ilkay.redmigateway.journal.DiagnosticsLog.tail(2000)
+        if (text.isBlank()) {
+            Toast.makeText(this, "Paylaşılacak kayıt yok.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "Telefon Geçidi çağrı teşhis kaydı")
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        runCatching { startActivity(Intent.createChooser(send, "Teşhis kaydını paylaş")) }
+            .onFailure { Toast.makeText(this, "Paylaşacak uygulama bulunamadı.", Toast.LENGTH_SHORT).show() }
+    }
+
+    private fun confirmClearDiagnostics() {
+        AlertDialog.Builder(this)
+            .setTitle("Teşhis kaydı temizlensin mi?")
+            .setMessage("Kayıtlı çağrı teşhis satırları silinir. Bu işlem geri alınamaz.")
+            .setNegativeButton("Vazgeç", null)
+            .setPositiveButton("Temizle") { _, _ ->
+                com.ilkay.redmigateway.journal.DiagnosticsLog.clear()
+                Toast.makeText(this, "Teşhis kaydı temizlendi.", Toast.LENGTH_SHORT).show()
+                // clear() writes on its own thread; re-read the file once it has landed.
+                handler.postDelayed({ refresh() }, 300)
+            }
+            .show()
     }
 
     // ---- small view helpers ----
