@@ -447,6 +447,9 @@ object CallManager {
             (expectedCallId == null || expectedCallId == callIds[call] || expectedCallId == currentCallId) &&
             call.state == Call.STATE_RINGING) {
             log("Executing ANSWER on call: ${callIds[call]}")
+            // The iPhone may have answered first and asked us to pick up: silence the Redmi at once
+            // instead of waiting for the Telecom state callback.
+            RedmiRinger.stop()
             return try {
                 call.answer(VideoProfile.STATE_AUDIO_ONLY)
                 true

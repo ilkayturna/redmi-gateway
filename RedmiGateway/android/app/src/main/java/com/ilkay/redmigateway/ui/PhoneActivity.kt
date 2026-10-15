@@ -41,6 +41,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.ilkay.redmigateway.R
@@ -130,6 +133,13 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
         super.onCreate(savedInstanceState)
         binding = ActivityPhoneBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        // Android 15+ draws edge to edge; keep the tabs clear of the status and navigation bars.
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { view, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
         views = PhoneViews(this)
         onBackPressedDispatcher.addCallback(this, backToThreads)
 
@@ -783,6 +793,8 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
             showSoftInputOnFocus = false
             inputType = InputType.TYPE_CLASS_PHONE
             setTextColor(views.color(R.color.text_primary))
+            setHintTextColor(views.color(R.color.text_muted))
+            hint = "Numara girin"
             setText(draftNumber)
             setSelection(text.length)
             contentDescription = "Aranacak numara"

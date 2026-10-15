@@ -83,6 +83,7 @@ object RedmiRinger {
     /** The call was answered, rejected or ended, on either phone. */
     fun stop() = handler.post {
         handler.removeCallbacks(ringNow)
+        if (ringing) Log.i(TAG, "Redmi ringer off (answered or ended on either phone)")
         stopSound()
         callId = null
     }

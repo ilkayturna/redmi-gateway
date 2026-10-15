@@ -27,10 +27,10 @@ object IncomingCallPresenter {
         appContext = context.applicationContext
     }
 
-    /** User setting, default off: let only the iPhone ring when it confirms the call. */
+    /** User setting, default on: let only the iPhone ring when it confirms the call. */
     var quietWhenIPhoneRings: Boolean
         get() = appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.getBoolean(KEY_QUIET_WHEN_IPHONE, false) ?: false
+            ?.getBoolean(KEY_QUIET_WHEN_IPHONE, true) ?: true
         set(value) {
             appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)?.edit()
                 ?.putBoolean(KEY_QUIET_WHEN_IPHONE, value)?.apply()

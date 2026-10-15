@@ -92,8 +92,10 @@ object CallAudioRelay : CallManager.CallListener {
 
     private const val ARM_TIMEOUT_MS = 90_000L
     private const val PREPARE_TIMEOUT_MS = 8_000L
-    private const val VERIFY_WINDOW_MS = 1_200L
-    private const val VERIFY_TIMEOUT_MS = 3_000L
+    // The iPhone answers and starts sending within a second; a shorter window hands the audio over
+    // fast ("the sound jumps to the iPhone at once") while still checking both directions.
+    private const val VERIFY_WINDOW_MS = 700L
+    private const val VERIFY_TIMEOUT_MS = 2_500L
     private const val MONITOR_INTERVAL_MS = 250L
     private const val IPHONE_SILENCE_LIMIT_MS = 1800L
     private const val MIN_FRAMES_PER_SECOND = 38
