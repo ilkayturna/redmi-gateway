@@ -108,6 +108,22 @@ object RedmiRinger {
 
     private fun rangFor(): Long = if (ringingSince > 0L) SystemClock.elapsedRealtime() - ringingSince else 0L
 
+    /**
+     * An answer was announced but the radio never confirmed it, and the call is still ringing: ring
+     * here again.
+     *
+     * [stop] clears the call reference as well, and nothing else restarts the ringtone (Telecom
+     * leaves ringing to this app and its notification channel has no sound), so without this the
+     * Redmi stayed silent for a call nobody had answered - and the iPhone does not ring again after
+     * its own answer tap either. The caller would hear ringing while both phones stayed quiet.
+     */
+    fun resume(id: String, silent: Boolean) = handler.post {
+        if (callId == id && ringing) return@post
+        callId = id
+        silentRequested = silent
+        start("the answer was not confirmed")
+    }
+
     /** User pressed volume key or requested silencing ringer without ending the call. */
     fun silence() = handler.post {
         handler.removeCallbacks(ringNow)

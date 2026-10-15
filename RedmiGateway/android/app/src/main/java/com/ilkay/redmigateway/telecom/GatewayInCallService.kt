@@ -2,7 +2,9 @@ package com.ilkay.redmigateway.telecom
 
 import android.content.Intent
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.telecom.Call
 import android.telecom.CallAudioState
 import android.telecom.CallEndpoint
@@ -32,6 +34,12 @@ class GatewayInCallService : InCallService() {
             Thread(r, "CallRoute").apply { priority = Thread.NORM_PRIORITY }
         }
 
+        private val mainHandler = Handler(Looper.getMainLooper())
+
+        /** How long a route change may take to show up before it counts as failed. */
+        private const val ROUTE_CONFIRM_ATTEMPTS = 3
+        private const val ROUTE_CONFIRM_DELAY_MS = 150L
+
         /** Mutes the Redmi microphone on the cellular call; the iPhone supplies the uplink. */
         fun setGatewayMuted(muted: Boolean) {
             val service = instance ?: return
@@ -58,6 +66,9 @@ class GatewayInCallService : InCallService() {
                 val toSpeaker = !isSpeakerOn()
                 val targetRoute = if (toSpeaker) CallAudioState.ROUTE_SPEAKER else CallAudioState.ROUTE_EARPIECE
                 fun report(ok: Boolean) = executor.execute { onResult(ok) }
+                // A route request that raised nothing has not necessarily changed anything:
+                // Telecom reports the new endpoint a moment later, so confirm before claiming it.
+                fun confirmRoute() = confirmSpeakerRoute(service, toSpeaker, 0, onResult)
                 fun fallbackAudioRoute() {
                     // Off the main thread, then report back on it.
                     routeExecutor.execute {
@@ -66,7 +77,7 @@ class GatewayInCallService : InCallService() {
                             service.setAudioRoute(targetRoute)
                             true
                         }.onFailure { Log.w(TAG, "Fallback setAudioRoute failed", it) }.getOrDefault(false)
-                        report(ok)
+                        if (ok) confirmRoute() else report(false)
                     }
                 }
 
@@ -82,7 +93,7 @@ class GatewayInCallService : InCallService() {
                         service.requestCallEndpointChange(
                             endpoint, executor,
                             object : OutcomeReceiver<Void?, CallEndpointException> {
-                                override fun onResult(result: Void?) = onResult(true)
+                                override fun onResult(result: Void?) = confirmRoute()
                                 override fun onError(error: CallEndpointException) {
                                     Log.w(TAG, "requestCallEndpointChange error, falling back to setAudioRoute", error)
                                     fallbackAudioRoute()
@@ -94,6 +105,29 @@ class GatewayInCallService : InCallService() {
                     fallbackAudioRoute()
                 }
             }
+        }
+
+        /**
+         * Reports the speaker state only once the route really points where the tap asked.
+         *
+         * The endpoint callback can arrive after the request's result, so re-check a few times
+         * instead of painting the old label; a route that never follows is logged and reported as
+         * a failure so the person sees it did not take.
+         */
+        private fun confirmSpeakerRoute(
+            service: GatewayInCallService,
+            want: Boolean,
+            attempt: Int,
+            onResult: (Boolean) -> Unit
+        ) {
+            val nowSpeaker = isSpeakerOn()
+            if (nowSpeaker == want || attempt >= ROUTE_CONFIRM_ATTEMPTS) {
+                if (nowSpeaker != want) Log.w(TAG, "ROUTE_UNCONFIRMED: asked speaker=$want, still speaker=$nowSpeaker")
+                else Log.i(TAG, "SPEAKER_TOGGLE confirmed speaker=$nowSpeaker after ${attempt * ROUTE_CONFIRM_DELAY_MS} ms")
+                ContextCompat.getMainExecutor(service).execute { onResult(nowSpeaker == want) }
+                return
+            }
+            mainHandler.postDelayed({ confirmSpeakerRoute(service, want, attempt + 1, onResult) }, ROUTE_CONFIRM_DELAY_MS)
         }
 
         /** Asks Telecom to apply the endpoint it already uses; used to re-evaluate call routing. */
@@ -122,6 +156,13 @@ class GatewayInCallService : InCallService() {
         fun setAudioRoute(route: Int) {
             val service = instance ?: return
             val executor = ContextCompat.getMainExecutor(service)
+            // The deprecated call blocks on the audio HAL; it never runs on the main thread here.
+            fun deprecatedRoute() = routeExecutor.execute {
+                runCatching {
+                    @Suppress("DEPRECATION")
+                    service.setAudioRoute(route)
+                }.onFailure { Log.w(TAG, "Could not set audio route to $route", it) }
+            }
             executor.execute {
                 if (Build.VERSION.SDK_INT >= 34) {
                     val targetType = when (route) {
@@ -138,18 +179,15 @@ class GatewayInCallService : InCallService() {
                                 override fun onResult(result: Void?) = Unit
                                 override fun onError(error: CallEndpointException) {
                                     Log.w(TAG, "Could not set audio route to $route via requestCallEndpointChange, falling back", error)
-                                    @Suppress("DEPRECATION")
-                                    service.setAudioRoute(route)
+                                    deprecatedRoute()
                                 }
                             }
                         )
                     } else {
-                        @Suppress("DEPRECATION")
-                        service.setAudioRoute(route)
+                        deprecatedRoute()
                     }
                 } else {
-                    @Suppress("DEPRECATION")
-                    service.setAudioRoute(route)
+                    deprecatedRoute()
                 }
             }
         }

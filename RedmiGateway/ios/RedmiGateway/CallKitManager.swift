@@ -85,6 +85,14 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             } else if let number = event.number, !number.isEmpty, incoming.contains(uuid) {
                 provider.reportCall(with: uuid, updated: callUpdate(number: number))
             }
+            // Answered here, and the Redmi took that announcement back: the radio never confirmed,
+            // so nobody is on the call. Stop the engine instead of leaving the microphone open for
+            // a call that is only ringing again.
+            if incoming.contains(uuid), answeredHere.contains(uuid), audioRequested {
+                GatewayConnection.shared.log("Answer not confirmed by the Redmi; releasing the call audio")
+                stopAudio()
+                GatewayConnection.shared.lastCallError = "Arama Redmi'de yanıtlanamadı."
+            }
         case "active":
             if outgoing.contains(uuid) {
                 if connectedOutgoing.insert(uuid).inserted { provider.reportOutgoingCall(with: uuid, connectedAt: Date()) }
@@ -161,6 +169,13 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     private func end(_ uuid: UUID, reason: CXCallEndedReason) {
+        // Remember the raw id: a stale "ringing" for the same call must not raise a second CallKit
+        // incoming call. The Redmi announces an answer again from "ringing" when its radio does not
+        // confirm it, and without this the iPhone rang a second time for a call just answered here.
+        if let rawId = callIdByUuid[uuid], !rawId.isEmpty, rawId != "gateway_call" {
+            endedCallIds[rawId] = Date()
+            endedCallIds = endedCallIds.filter { Date().timeIntervalSince($0.value) < 600 }
+        }
         provider.reportCall(with: uuid, endedAt: Date(), reason: reason)
         cleanup(uuid)
     }

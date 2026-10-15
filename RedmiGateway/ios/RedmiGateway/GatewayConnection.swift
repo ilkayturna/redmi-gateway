@@ -881,17 +881,12 @@ public final class GatewayConnection: ObservableObject {
     func sendRingingAck(callId: String) { control("ringing_ack", callId: callId) }
 
     private func control(_ action: String, callId: String) {
-        // An answer or decline must reach the Redmi, or the other phone keeps ringing. A sealed
-        // frame is dropped silently when the socket or its key is not ready yet, so the Bluetooth
-        // link carries the command in that case instead of the command being lost.
+        // An answer or decline must reach the Redmi, or the other phone keeps ringing. The sealed
+        // frame is lost both when the socket or its key is not ready (checked here) and when the
+        // socket has died without the handshake noticing, which shows up only in the send
+        // completion; the Bluetooth link carries the command in either case.
         if state == .authenticated, sendOverSealedLink(["type": action, "callId": callId]) { return }
-        if BLECentralManager.shared.isReady {
-            BLECentralManager.shared.sendCallControl(action: action, callId: callId) { [weak self] success in
-                self?.log("Bluetooth \(action): \(success ? "ok" : "failed")")
-            }
-        } else {
-            log("\(action) not sent: Redmi unreachable")
-        }
+        sendOverBluetooth(action: action, callId: callId)
     }
 
     /// Sends one command over the authenticated socket; false when nothing could carry it.
@@ -899,8 +894,27 @@ public final class GatewayConnection: ObservableObject {
         guard let task = webSocketTask, let channel,
               let json = try? JSONSerialization.data(withJSONObject: payload),
               let frame = channel.seal(json) else { return false }
-        task.send(.string(frame)) { _ in }
+        let action = payload["type"] as? String ?? ""
+        let callId = payload["callId"] as? String ?? ""
+        task.send(.string(frame)) { [weak self] error in
+            guard error != nil else { return }
+            Task { @MainActor in
+                self?.log("\(action) frame not sent; trying Bluetooth")
+                self?.sendOverBluetooth(action: action, callId: callId)
+            }
+        }
         return true
+    }
+
+    /// Bluetooth carries a control command when the sealed link cannot.
+    private func sendOverBluetooth(action: String, callId: String) {
+        guard BLECentralManager.shared.isReady else {
+            log("\(action) not sent: Redmi unreachable")
+            return
+        }
+        BLECentralManager.shared.sendCallControl(action: action, callId: callId) { [weak self] success in
+            self?.log("Bluetooth \(action): \(success ? "ok" : "failed")")
+        }
     }
 
     func sendDial(number: String) {

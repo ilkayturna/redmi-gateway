@@ -64,14 +64,34 @@ object CallManager {
      * 15.10.2026 log showed taking seconds (the iPhone kept ringing, and it kept its audio engine
      * idle, the whole time). Announcing the answer the moment it is executed silences the other
      * phone in one network round trip; [ANSWER_CONFIRM_MS] later the real state takes over again.
+     *
+     * Taking the announcement back is a full recovery, not just a state change: the ringing call
+     * starts ringing here again ([RedmiRinger.resume]) and the audio session is released, because
+     * nobody has answered yet and the iPhone does not ring again after its own answer tap.
      */
     @Volatile private var announcedAnswerCallId: String? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private val answerConfirmTimeout = Runnable {
-        if (announcedAnswerCallId == null) return@Runnable
+        val answeredId = announcedAnswerCallId ?: return@Runnable
         log("The radio did not confirm the answer within ${ANSWER_CONFIRM_MS} ms; showing the real state")
         announcedAnswerCallId = null
+        IncomingCallPresenter.onAnswerNotConfirmed(answeredId)
         updatePrimaryCallAndNotify("answer_not_confirmed")
+        if (currentCallState == "ringing" && currentCallId == answeredId) {
+            // The call is still coming in and nobody has answered it. Without this the Redmi stays
+            // silent: stop() also dropped its call reference and Telecom rings nothing itself.
+            val call = getCall(answeredId)
+            val silent = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                call?.details?.extras?.getBoolean(Call.EXTRA_SILENT_RINGING_REQUESTED, false) == true
+            val relay = com.ilkay.redmigateway.audio.CallAudioRelay
+            if (relay.owner != com.ilkay.redmigateway.audio.CallAudioRelay.Owner.REDMI) {
+                // Nobody owns the audio, so the iPhone must not keep its engine (and microphone)
+                // open and the armed session must not sit there until its 90 s timeout.
+                log("Releasing the call audio session: the answer was not confirmed")
+                relay.disarm("answer_not_confirmed")
+            }
+            RedmiRinger.resume(answeredId, silent)
+        }
     }
 
     val isConference: Boolean

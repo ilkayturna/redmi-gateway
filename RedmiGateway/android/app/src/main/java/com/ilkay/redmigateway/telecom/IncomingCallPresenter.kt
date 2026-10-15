@@ -62,4 +62,15 @@ object IncomingCallPresenter {
         presentedOnIPhoneCallId = null
         onChanged?.invoke()
     }
+
+    /**
+     * The radio never confirmed [callId]'s answer, so the iPhone screen no longer stands for it:
+     * forget the confirmation, or the Redmi would stay quiet while [RedmiRinger.resume] rings again
+     * for a call that is still coming in.
+     */
+    fun onAnswerNotConfirmed(callId: String) {
+        if (presentedOnIPhoneCallId != callId) return
+        presentedOnIPhoneCallId = null
+        onChanged?.invoke()
+    }
 }
