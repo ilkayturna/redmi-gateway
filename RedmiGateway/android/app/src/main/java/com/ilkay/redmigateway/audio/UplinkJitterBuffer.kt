@@ -36,10 +36,14 @@ class UplinkJitterBuffer {
         /** Arrival observations are kept this long: fast attack, four second decay. */
         const val HISTORY_WINDOW_MS = 4_000L
         const val HISTORY_SAMPLES = 32
-        const val TRIM_HOLD_MS = 400L
+        const val TRIM_HOLD_MS = 500L
         /** Trimming only starts two frames above the target, so a short spike is not cut away. */
         const val TRIM_SLACK_FRAMES = 2
-        const val PRIME_FRAMES = 2
+        /** A paced link resumes on a two frame reserve; a bursty one waits for up to four. */
+        const val PRIME_FRAMES_MIN = 2
+        const val PRIME_FRAMES_MAX = 4
+        /** Three starved polls (60 ms) mean the gap is real: wait for the reserve again. */
+        const val UNPRIME_AFTER_UNDERRUNS = 3
         const val LOCAL_TARGET_FLOOR = 2
         const val REMOTE_TARGET_FLOOR = 3
         /** 12 * 20 ms = 240 ms: a local link must not feel like a walkie-talkie. */
@@ -65,7 +69,8 @@ class UplinkJitterBuffer {
     private var lastAuthenticatedArrivalAt: Long? = null
     private var maxAuthenticatedArrivalGapMs = 0L
     private var maxAuthenticatedArrivalBurstFrames = 0
-    private var targetFrames = 0
+    // Diagnostics must not report 0 before the first poll: a fresh buffer already aims at the floor.
+    private var targetFrames = LOCAL_TARGET_FLOOR
 
     // Rolling window of "how deep the buffer had to be" observations, newest replaces oldest.
     private val needAt = LongArray(HISTORY_SAMPLES)
@@ -114,8 +119,10 @@ class UplinkJitterBuffer {
             }
             lastAuthenticatedArrivalAt = nowMs
         }
-        // The hard limit only bounds memory; the adaptive trim below controls the latency.
-        val maxQueue = ceiling() + 2
+        // The hard limit is the documented ceiling itself (12 frames local, 24 remote), so even a
+        // huge burst can never leave more than 240 ms / 480 ms queued. The adaptive trim below
+        // only lowers the depth further.
+        val maxQueue = ceiling()
         while (queue.size >= maxQueue) {
             queue.removeFirst()
             dropped++
@@ -150,6 +157,12 @@ class UplinkJitterBuffer {
 
     private fun ceiling() = if (remoteLink) REMOTE_TARGET_CEILING else LOCAL_TARGET_CEILING
 
+    /**
+     * How much reserve playback waits for after a starvation. A paced link needs two frames; one
+     * that just bursted waits for four, because that link is the one that will starve again.
+     */
+    private fun primeFrames() = targetFrames.coerceIn(PRIME_FRAMES_MIN, PRIME_FRAMES_MAX)
+
     @Synchronized fun poll(nowMs: Long): ByteArray? {
         val wasPrimed = primed
         var expired = false
@@ -177,7 +190,7 @@ class UplinkJitterBuffer {
                 highSince = nowMs
             }
         } else highSince = null
-        if (!primed && queue.size >= PRIME_FRAMES) {
+        if (!primed && queue.size >= primeFrames()) {
             primed = true
             consecutiveUnderruns = 0
         }
@@ -188,7 +201,7 @@ class UplinkJitterBuffer {
             if (primed || (expired && wasPrimed)) {
                 underruns++
                 consecutiveUnderruns++
-                if (consecutiveUnderruns >= 6) {
+                if (consecutiveUnderruns >= UNPRIME_AFTER_UNDERRUNS) {
                     primed = false
                 }
             }

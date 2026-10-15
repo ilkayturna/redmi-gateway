@@ -21,15 +21,14 @@ class UplinkJitterBufferTest {
         assertEquals(0, buffer.snapshot().underruns)
     }
 
-    // Catches premature restart after a gap, which leaves only 20 ms of jitter headroom.
-    @Test fun speechStartsOnlyAfterFourFramesHaveArrived() {
+    // Catches premature restart after a gap, which leaves only 20 ms of jitter headroom. A paced
+    // link keeps the adaptive target at its two frame floor, so two frames are the reserve.
+    @Test fun speechStartsOnlyAfterTwoFramesOnAPacedLink() {
         val buffer = UplinkJitterBuffer()
-        repeat(3) { offset ->
-            buffer.offer(frame(offset), offset * 20L)
-            assertNull(buffer.poll(offset * 20L))
-        }
-        buffer.offer(frame(3), 60)
-        assertEquals(0, buffer.poll(60)!![0].toInt())
+        buffer.offer(frame(0), 0)
+        assertNull(buffer.poll(0))
+        buffer.offer(frame(1), 20)
+        assertEquals(0, buffer.poll(20)!![0].toInt())
     }
 
     // Catches an unbounded backlog replaying stale speech after a long network burst.
@@ -53,18 +52,32 @@ class UplinkJitterBufferTest {
         assertEquals(0, buffer.snapshot().dropped)
     }
 
-    // Catches latency growing without recovery when a paced stream keeps a large backlog.
-    @Test fun sustainedExcessLatencyShedsOnlyOneFrameAfterHalfASecond() {
+    // Catches the two failures of an adaptive target: keeping a one-off burst's latency forever,
+    // and shedding the depth a bursty link just proved it needs before that link was idle long
+    // enough to forget the burst.
+    @Test fun burstRaisesTheTargetAndFourQuietSecondsLetItDecay() {
         val buffer = UplinkJitterBuffer()
         repeat(10) { buffer.offer(frame(it), 0) }
-        for (index in 0..25) {
-            assertEquals(index, buffer.poll(index * 20L)!![0].toInt())
-            buffer.offer(frame(index + 10), index * 20L)
+        assertEquals(11, buffer.snapshot().targetFrames)
+        var next = 10
+        var now = 20L
+        while (now < 4_000) {
+            assertTrue(buffer.poll(now) != null)
+            buffer.offer(frame(next++), now)
+            now += 20
         }
-        assertEquals(27, buffer.poll(520)!![0].toInt())
+        // The burst is still inside the four second window: the depth it asked for is kept.
+        assertEquals(11, buffer.snapshot().targetFrames)
+        assertEquals(0, buffer.snapshot().dropped)
+        while (now <= 5_000) {
+            assertTrue(buffer.poll(now) != null)
+            buffer.offer(frame(next++), now)
+            now += 20
+        }
+        // Window expired: the target is back at the floor and the excess is shed, one frame per hold.
+        assertEquals(2, buffer.snapshot().targetFrames)
         assertEquals(1, buffer.snapshot().dropped)
-        assertEquals(28, buffer.poll(540)!![0].toInt())
-        assertEquals(1, buffer.snapshot().dropped)
+        assertEquals(9, buffer.snapshot().queued)
     }
 
     // Catches trimming a normal fresh 120 ms reserve, which causes avoidable speech gaps.
@@ -180,6 +193,51 @@ class UplinkJitterBufferTest {
         buffer.offer(frame(6), 170L)
         buffer.offer(frame(7), 190L) // 4th queued frame triggers priming
         assertEquals(4, buffer.poll(190L)!![0].toInt())
+    }
+
+    // Catches a hard limit that lets the queue sit above the documented ceiling: a burst must never
+    // leave more than 240 ms queued locally, or 480 ms on a remote/VPN link.
+    @Test fun localCeilingIsTwelveFramesAndRemoteIsTwentyFour() {
+        val local = UplinkJitterBuffer()
+        repeat(20) { local.offer(frame(it), 0) }
+        assertEquals(12, local.snapshot().queued)
+        assertEquals(8, local.snapshot().dropped)
+
+        val remote = UplinkJitterBuffer()
+        remote.reset(remote = true)
+        repeat(30) { remote.offer(frame(it), 0) }
+        assertEquals(24, remote.snapshot().queued)
+        assertEquals(6, remote.snapshot().dropped)
+    }
+
+    // Catches trimming inside the reserve the adaptive target allows (target plus two frame slack).
+    @Test fun trimOnlyStartsTwoFramesAboveTheAdaptiveTarget() {
+        val buffer = UplinkJitterBuffer()
+        for (index in 0 until 4) buffer.offer(frame(index), index * 20L)
+        // Four paced frames leave the target at its floor, so four frames are inside the slack.
+        assertEquals(2, buffer.snapshot().targetFrames)
+        var now = 100L
+        for (index in 0 until 60) {
+            buffer.poll(now)
+            buffer.offer(frame(100 + index), now)
+            now += 20
+        }
+        assertEquals(4, buffer.snapshot().queued)
+        assertEquals(0, buffer.snapshot().dropped)
+    }
+
+    // Catches a diagnostics field reporting a depth the buffer does not actually trim against.
+    @Test fun snapshotReportsTheAdaptiveTargetTheBufferTrimsAgainst() {
+        val local = UplinkJitterBuffer()
+        assertEquals(2, local.snapshot().targetFrames)
+        repeat(12) { local.offer(frame(it), 0) }
+        assertEquals(12, local.snapshot().targetFrames)
+
+        val remote = UplinkJitterBuffer()
+        remote.reset(remote = true)
+        assertEquals(3, remote.snapshot().targetFrames)
+        repeat(40) { remote.offer(frame(it), 0) }
+        assertEquals(24, remote.snapshot().targetFrames)
     }
 
     private fun frame(index: Int) = byteArrayOf(index.toByte())

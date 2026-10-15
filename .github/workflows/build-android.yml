@@ -1,0 +1,55 @@
+name: Build Android Telefon Gecidi
+
+on:
+  push:
+    branches: [main, codex/audio-jitter-fix]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Test and assemble the Android app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      # The unit tests guard the audio path (jitter buffer, call manager). They were
+      # broken for a while because nothing ran them in CI; this job keeps them honest.
+      - name: Unit tests
+        working-directory: RedmiGateway/android
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          # The committed local.properties points at a developer machine's SDK.
+          rm -f local.properties
+          ./gradlew :app:testDebugUnitTest --console=plain
+
+      - name: Assemble the debug APK
+        working-directory: RedmiGateway/android
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --console=plain
+
+      - name: Upload the debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: redmigateway-debug-apk
+          path: RedmiGateway/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload the test report when something fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-report
+          path: RedmiGateway/android/app/build/reports/tests/testDebugUnitTest
+          if-no-files-found: ignore
