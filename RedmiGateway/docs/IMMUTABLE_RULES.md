@@ -32,11 +32,13 @@ Son güncelleme: 15.10.2026
 
 ## KURAL 3 — Bağlı istemci/aktif çağrı varken hotspot kapanmaz
 
-- **Aktif çağrı varken hotspot ASLA kapanmaz** (çağrı ortasında kopma olmasın). `stopHotspot()` çağrısından hemen önce çağrı durumu yeniden kontrol edilir.
-- **Bağlı istemci varken:** çağrı yoksa ve tanıdık ağ menzilde + `wifi_on=1` ise hotspot **kapanır** (kullanıcının kota kuralı önceliklidir). İstemci bağlıyken tarama seyrek yapılır (`CLIENT_SCAN_EVERY_MS = 90 sn`; normal `60 sn`).
-- **Tanıdık ağ menzilde ama `wifi_on=0`** (kullanıcı Wi-Fi anahtarını kapatmış) ise hotspot **KORUNUR** — istasyon ayağa kalkamayacağı için hotspot'u düşürmek iPhone'un tek linkini keser, hiçbir şey kazandırmaz. Bu durumda kullanıcıya sürekli bildirimde ipucu gösterilir:
+> **Kullanıcının sözleşmesi (DEĞİŞMEDİ):** "Bağlı istemci veya aktif çağrı varken hotspot kapanmaz."
+
+- ✅ **Aktif çağrı varken hotspot ASLA kapanmaz** — sözleşmeye birebir uyuluyor. `stopHotspot()` çağrısından hemen önce çağrı durumu yeniden kontrol edilir.
+- ⚠️ **REVİZYON ADAYI (15.10.2026 — KULLANICI ONAYI BEKLİYOR):** Bağlı istemci varken, **çağrı yoksa** ve tanıdık ağ menzilde + `wifi_on=1` ise hotspot **kapanır**. Gerekçe: kullanıcının asıl amacı "internetim kolay kolay bitmesin" (Kural 2) ve iPhone o ağa geçerek kotayı korur. Bu, yukarıdaki sözleşmenin harfine göre bir **istisnadır**; kullanıcı onaylamazsa eski davranışa dönülür.
+- **Tanıdık ağ menzilde ama `wifi_on=0`** ise hotspot **KORUNUR** — istasyon ayağa kalkamayacağı için hotspot'u düşürmek iPhone'un tek linkini keser. Bu durumda kullanıcıya bildirimde ipucu gösterilir:
   `Ev/iş ağı "X" menzilde · Wi-Fi'ı aç, iPhone mobil veri harcamasın`
-- Uygulama **`setWifiEnabled` ÇAĞIRMAZ** (Kural 1).
+- Uygulama **`setWifiEnabled` ÇAĞIRMAZ** (Kural 1). İstemci bağlıyken tarama seyrek yapılır (`CLIENT_SCAN_EVERY_MS = 90 sn`; normal `60 sn`).
 
 ---
 
@@ -67,7 +69,8 @@ Son güncelleme: 15.10.2026
 
 - Bu cihazda hotspot açıkken `WifiManager.isWifiEnabled()` **false** döner (istasyon kapalı). Eski kod bu yüzden tarama yolunu ölü koda çeviriyordu.
 - Doğru kapı: `if (!wifi.isWifiEnabled && !isHotspotOn()) return`
-- `wifi_scan_always_enabled=1` sayesinde Wi-Fi kapalıyken de **taze tarama sonucu** gelir (kanıt: `Saved network ... in range but Wi-Fi is switched off; hotspot stays` + `ScanResult` yaşının 126 sn → 29 sn'ye düşmesi).
+- ✅ **KANITLANMIŞ:** Wi-Fi kapatıldığında (istasyon kapalıyken) **taze tarama sonucu gelir.** Kanıt: uygulama logu 3 kez `Saved network ... in range but Wi-Fi is switched off; hotspot stays` + bağımsız ölçümde aynı `ScanResult` yaşının 126 sn → 29 sn'ye düşmesi.
+- ⚠️ **KANITLANMAMIŞ:** "AP fiilen servis ederken de taze sonuç gelir" — o anlarda `dumpsys tethering` son olayı `SERVING_STATE_INACTIVE` idi; kontrollü AP-aktif testi **yapılmadı**. Bu kısım uygulamanın kendi `isHotspotOn()` görüşüne dayanır.
 - Kullanıcı ayarını okumak için `Settings.Global "wifi_on"` kullanılır (`isWifiEnabled` bu durumda yanlış cevap verir).
 
 ---
