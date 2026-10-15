@@ -31,6 +31,8 @@ final class BLECentralManager: NSObject, ObservableObject {
     private static let stateAAD = Data("phonebridge-ble-state".utf8)
     private static let controlAAD = Data("phonebridge-ble-control".utf8)
     private static let maxStateAgeMs: Int64 = 120_000
+    /// How often the call state may be read on purpose; wake-ups can arrive close together.
+    private static let stateReadThrottle: TimeInterval = 2
 
     @Published private(set) var isBluetoothPoweredOn = false
     @Published private(set) var isConnected = false
@@ -48,6 +50,7 @@ final class BLECentralManager: NSObject, ObservableObject {
     private var lastControlSeq: Int64 = 0
     private var lastStateTime: Int64 = 0
     private var lastStateSeq: Int64 = -1
+    private var lastStateReadAt: Date?
 
     private let kGatewayId = "ble_paired_device_id"
     private let kPeripheral = "ble_peripheral_uuid"
@@ -82,12 +85,37 @@ final class BLECentralManager: NSObject, ObservableObject {
         if peripheral?.state != .connected, !central.isScanning {
             central.scanForPeripherals(withServices: [RedmiGatewayBLEConstants.serviceUUID], options: nil)
         }
+        // The call-wake beacon and every reconnect land here. Read at once for a link that is
+        // already up, and once more shortly after for a state the Redmi publishes while the app is
+        // still coming back; the throttle collapses repeated starts into single reads.
+        refreshCallState(reason: "wake or reconnect")
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            self?.refreshCallState(reason: "after wake")
+        }
     }
 
     /// Reads the Redmi's current addresses again (after this iPhone changed networks).
     func refreshDeviceInfo() {
         guard let peripheral, peripheral.state == .connected, let deviceInfoChar else { return }
         peripheral.readValue(for: deviceInfoChar)
+    }
+
+    /// Reads the call state now, at most once every [stateReadThrottle] seconds.
+    ///
+    /// The Redmi skips a state notification whose sealed payload does not fit the connection's
+    /// MTU, so a call that changed while this iPhone was suspended is not pushed at all; the wake
+    /// beacon brings the app back, and reading here refreshes the state at that moment instead of
+    /// at the next notification. No new message type is involved: the Redmi already exposes the
+    /// state characteristic as readable and serves the same sealed payload a notification carries,
+    /// and a value that was already applied is ignored by [handleState]'s own time/sequence check.
+    private func refreshCallState(reason: String) {
+        guard let peripheral, peripheral.state == .connected, let stateChar else { return }
+        let now = Date()
+        if let last = lastStateReadAt, now.timeIntervalSince(last) < Self.stateReadThrottle { return }
+        lastStateReadAt = now
+        GatewayConnection.shared.log("Bluetooth call state read (\(reason))")
+        peripheral.readValue(for: stateChar)
     }
 
     func setGateway(id: String) {
