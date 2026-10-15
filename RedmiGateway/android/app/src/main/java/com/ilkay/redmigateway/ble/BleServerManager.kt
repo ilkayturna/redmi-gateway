@@ -59,6 +59,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         private const val SWIPED_AWAY_GRACE_MS = 3_000L
         private const val BEACON_MAJORS = 4
         private const val PULSE_MS = 10_000L
+        /** How long an outgoing call asks the iPhone to wake before it stops advertising. */
+        private const val OUTGOING_WAKE_MS = 30_000L
         private val BLE_STATE_AAD = "phonebridge-ble-state".toByteArray(Charsets.UTF_8)
         private val BLE_CONTROL_AAD = "phonebridge-ble-control".toByteArray(Charsets.UTF_8)
         @Volatile private var current: BleServerManager? = null
@@ -683,8 +685,21 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
     private fun updateCallBeacon() {
         val ringingHere = CallManager.currentCallState == "ringing" && CallManager.currentDirection == "incoming" &&
             IncomingCallPresenter.presentedOnIPhoneCallId != CallManager.currentCallId
+        // An outgoing call wakes the iPhone the same way an incoming one does. A sleeping iPhone
+        // holds its Bluetooth link but no socket, so the reconnect pulse (which needs no link at
+        // all) never fires and the call audio would stay on the Redmi until somebody opens the app.
+        // Bounded to the first 30 seconds so a long call does not keep the beacon lit.
+        val outgoingHere = CallManager.currentDirection == "outgoing" &&
+            CallManager.currentCallState in setOf("dialing", "connecting", "active") &&
+            com.ilkay.redmigateway.service.GatewayService.authenticatedClientCount() == 0 &&
+            CallManager.addedAtMillis > 0 &&
+            System.currentTimeMillis() - CallManager.addedAtMillis < OUTGOING_WAKE_MS
         val pulsing = android.os.SystemClock.elapsedRealtime() < pulseUntil
-        if ((ringingHere || pulsing) && shouldBeRunning) startCallBeacon(isUrgent = ringingHere) else stopCallBeacon()
+        if ((ringingHere || outgoingHere || pulsing) && shouldBeRunning) {
+            startCallBeacon(isUrgent = ringingHere)
+        } else {
+            stopCallBeacon()
+        }
     }
 
     // ---- Reconnect pulse ----

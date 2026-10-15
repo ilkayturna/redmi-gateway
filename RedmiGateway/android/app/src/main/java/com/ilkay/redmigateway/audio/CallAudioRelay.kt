@@ -166,6 +166,12 @@ object CallAudioRelay : CallManager.CallListener {
 
     // Health counters (written by audio threads, read by the monitor).
     @Volatile private var lastIPhonePcmAt = 0L
+    // Cutover timeline, all measured from the arm and the cutover moment: this is what tells the
+    // iPhone's own startup apart from the gate that waits for its frames.
+    @Volatile private var armedAt = 0L
+    @Volatile private var firstPcmAt = 0L
+    @Volatile private var firstCutoverWriteAt = 0L
+    @Volatile private var firstCutoverReadAt = 0L
     // Sealed sessions only: last time the iPhone reported that it is receiving downlink.
     @Volatile private var lastIPhoneHearingAt = 0L
     private const val FLAG_IPHONE_HEARING = 0x01
@@ -257,6 +263,8 @@ object CallAudioRelay : CallManager.CallListener {
             "underruns" to queue.underruns,
             "jitterTargetFrames" to queue.targetFrames,
             "jitterTargetMs" to queue.targetFrames * FRAME_MS.toInt(),
+            "firstPcmMs" to (if (firstPcmAt == 0L) -1L else firstPcmAt - armedAt),
+            "startMediaMs" to (if (cutoverStartedAt == 0L) -1L else cutoverStartedAt - armedAt),
             "maxWriteMs" to maxWriteMs
         )
     }
@@ -307,6 +315,8 @@ object CallAudioRelay : CallManager.CallListener {
                 preparingSince = SystemClock.elapsedRealtime()
                 setOwner(Owner.PREPARING_IPHONE, "waiting_for_iphone_audio")
             }
+            armedAt = SystemClock.elapsedRealtime()
+            firstPcmAt = 0L
             scheduleMonitor()
         }
         CallManager.log("Call audio session armed")
@@ -323,10 +333,16 @@ object CallAudioRelay : CallManager.CallListener {
         handler.post { releaseAll("manual_redmi") }
     }
 
-    /** Asks the iPhone to take the call audio; it answers with audio_start. */
+    /**
+     * Asks the iPhone to take the call audio; it answers with audio_start. The request travels the
+     * existing way: every listener (the control socket is one) gets the state with this reason.
+     */
     fun requestIPhoneAudio() {
         handler.post {
             if (isLiveCallState(CallManager.currentCallState) && owner == Owner.REDMI) {
+                if (GatewayService.authenticatedClientCount() == 0) {
+                    Log.w(TAG, "No iPhone on the control link; the audio request cannot reach it")
+                }
                 for (l in listeners) runCatching { l.onAudioOwnerChanged(Owner.REDMI, "request_iphone_audio") }
             }
         }
@@ -365,6 +381,12 @@ object CallAudioRelay : CallManager.CallListener {
             if (session != 0) handler.postDelayed(this, MONITOR_INTERVAL_MS)
         }
     }
+
+    /**
+     * One extra decision the moment the iPhone's frames have proven themselves, instead of waiting
+     * for the next 150 ms monitor tick. It never re-arms itself: the monitor keeps the cadence.
+     */
+    private val decideNow = Runnable { if (session != 0) tick() }
 
     private fun scheduleMonitor() {
         handler.removeCallbacks(monitor)
@@ -437,23 +459,29 @@ object CallAudioRelay : CallManager.CallListener {
                     return
                 }
                 // Media running: the handover needs VERIFY_WINDOW_MS of audio in both directions.
-                // Measured against the counters that start at the cutover, not against the last
-                // closed one second window, so the decision lands at 400-550 ms instead of at
-                // 1000-1150 ms. The thresholds and the freshness rules are unchanged.
+                // Each direction is timed from its own first frame, so the AudioTrack/AudioRecord
+                // startup is not counted as a stall; the decision lands at 400-550 ms after the
+                // slower path has actually been running for that long.
                 val elapsed = now - cutoverStartedAt
                 if (elapsed >= VERIFY_WINDOW_MS) {
-                    val elapsedMs = elapsed.coerceAtLeast(1L)
-                    val writes = cutoverWrites.get()
-                    val reads = cutoverReads.get()
-                    val writesRate = (writes * 1000L / elapsedMs).toInt()
-                    val readsRate = (reads * 1000L / elapsedMs).toInt()
+                    val writeSpan = if (firstCutoverWriteAt == 0L) 0L else now - firstCutoverWriteAt
+                    val readSpan = if (firstCutoverReadAt == 0L) 0L else now - firstCutoverReadAt
+                    // Both paths must have delivered a full window before their rate means anything.
+                    val writesRate = if (writeSpan >= VERIFY_WINDOW_MS)
+                        (cutoverWrites.get() * 1000L / writeSpan).toInt() else 0
+                    val readsRate = if (readSpan >= VERIFY_WINDOW_MS)
+                        (cutoverReads.get() * 1000L / readSpan).toInt() else 0
                     // A call that is not live (on hold, or being torn down) never takes the audio.
                     val healthy = live && writesRate >= MIN_FRAMES_PER_SECOND &&
                         readsRate >= MIN_FRAMES_PER_SECOND && iphoneFresh && iphoneHearing
                     if (healthy) {
                         if (applyIsolation()) {
                             setOwner(Owner.IPHONE, "iphone_confirmed")
-                            CallManager.log("Call audio moved to iPhone (uplink=$writesRate/s downlink=$readsRate/s)")
+                            CallManager.log("Call audio moved to iPhone (uplink=$writesRate/s downlink=$readsRate/s " +
+                                "settle=${elapsed}ms firstWrite=${firstCutoverWriteAt - cutoverStartedAt}ms " +
+                                "firstRead=${firstCutoverReadAt - cutoverStartedAt}ms " +
+                                "firstPcm=${if (firstPcmAt == 0L) -1 else firstPcmAt - armedAt}ms " +
+                                "startMedia=${cutoverStartedAt - armedAt}ms)")
                         } else {
                             releaseMediaAndKeepSession("isolation_failed")
                         }
@@ -603,7 +631,13 @@ object CallAudioRelay : CallManager.CallListener {
             if (pcm == null) continue
             val receivedAt = SystemClock.elapsedRealtime()
             lastIPhonePcmAt = receivedAt
-            iphoneFrames.incrementAndGet()
+            if (firstPcmAt == 0L) firstPcmAt = receivedAt
+            val frames = iphoneFrames.incrementAndGet()
+            if (frames == ARRIVAL_WINDOW_MIN_FRAMES && owner == Owner.PREPARING_IPHONE && !mediaRunning) {
+                // The reserve has just arrived: decide on this frame, not at the next monitor tick.
+                handler.removeCallbacks(decideNow)
+                handler.post(decideNow)
+            }
             if (!mediaRunning) continue
             uplinkQueue.offer(pcm, receivedAt, authenticated = key != null)
         }
@@ -664,6 +698,8 @@ object CallAudioRelay : CallManager.CallListener {
         // a duplicate audio_start during the verification window must not blank the measured rate.
         cutoverWrites.set(0)
         cutoverReads.set(0)
+        firstCutoverWriteAt = 0L
+        firstCutoverReadAt = 0L
         badWindows = 0
         resetWindow()
         track.play()
@@ -792,6 +828,7 @@ object CallAudioRelay : CallManager.CallListener {
                 // received PCM (including naturally silent samples) from substituted silence.
                 uplinkWrites.incrementAndGet()
                 cutoverWrites.incrementAndGet()
+                if (firstCutoverWriteAt == 0L) firstCutoverWriteAt = finished
                 if (frame == null) insertedSilenceWrites.incrementAndGet() else uplinkPcmWrites.incrementAndGet()
             } else {
                 // A positive short write did not deliver a full 20 ms frame.
@@ -811,6 +848,7 @@ object CallAudioRelay : CallManager.CallListener {
             }
             downlinkReads.incrementAndGet()
             cutoverReads.incrementAndGet()
+            if (firstCutoverReadAt == 0L) firstCutoverReadAt = SystemClock.elapsedRealtime()
             val target = peer ?: continue
             val datagram = socket ?: break
             // Session, key and counter are taken together so a re-arm cannot mix them.

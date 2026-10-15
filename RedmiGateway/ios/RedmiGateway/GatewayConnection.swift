@@ -830,7 +830,12 @@ public final class GatewayConnection: ObservableObject {
         }
         applyCallEvent(CallEventMessage(state: update.state, number: update.number, callId: update.callId,
                                         direction: update.direction))
-        if update.state == "ringing" || update.state == "active" { reconnectNow(reason: "Bluetooth call state") }
+        // Every live call brings the socket up, not just a ringing or active one: a call dialed on
+        // the Redmi reaches this iPhone while it is still dialing, and waiting for "active" kept
+        // the person from hearing about it - and from moving the audio over - for 18.5 s.
+        if ["ringing", "dialing", "connecting", "active"].contains(update.state) {
+            reconnectNow(reason: "Bluetooth call state")
+        }
     }
 
     private func handleAck(_ ack: AckMessage) {
@@ -849,6 +854,15 @@ public final class GatewayConnection: ObservableObject {
     }
 
     private func handleAudioState(_ audio: AudioStateMessage) {
+        // "iPhone'a aktar" on the Redmi's call screen asks this iPhone to carry the conversation.
+        // The request already rides on the audio_state message the Redmi sends for every owner
+        // change, so no new type, no new command and no protocol bump is needed: an older iPhone
+        // reads it as "the audio stays on the Redmi" and behaves exactly as before.
+        if audio.detail == "request_iphone_audio" {
+            log("The Redmi asked this iPhone to take the call audio")
+            CallKitManager.shared.takeCallOnIPhone()
+            return
+        }
         switch audio.owner ?? (audio.running ? "iphone" : "redmi") {
         case "iphone":
             audioLocation = .iphone

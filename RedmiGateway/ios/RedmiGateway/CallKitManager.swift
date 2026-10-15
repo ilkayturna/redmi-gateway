@@ -317,9 +317,17 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     /// "Görüşmeyi iPhone'a al": continue the Redmi's current call on this iPhone.
+    ///
+    /// Called by the in-app button and by the Redmi's own "iPhone'a aktar" button, which asks over
+    /// the existing audio_state message.
     func takeCallOnIPhone() {
         let connection = GatewayConnection.shared
-        guard let call = connection.currentCall, call.state == .active, connection.isAuthenticated else { return }
+        guard let call = connection.currentCall, call.state == .active, connection.isAuthenticated else {
+            // Told apart from the working case in the log: the Redmi asked, but there is no active
+            // call on the link to move (yet).
+            GatewayConnection.shared.log("Cannot take the call audio: no active call on the link")
+            return
+        }
         if let uuid = currentCallUuid {
             audioCallUuid = uuid
             audioRequested = true
