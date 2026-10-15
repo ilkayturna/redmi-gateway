@@ -29,3 +29,5 @@ RedmiGateway/scripts/lab/mixctl
 .agents/
 .orchestrator/
 scratch/
+
+.kotlin/

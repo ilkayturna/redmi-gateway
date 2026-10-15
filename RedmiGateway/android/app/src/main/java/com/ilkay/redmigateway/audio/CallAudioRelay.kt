@@ -376,7 +376,6 @@ object CallAudioRelay : CallManager.CallListener {
         windowStartedAt = SystemClock.elapsedRealtime()
         iphoneFrames.set(0); uplinkWrites.set(0); downlinkReads.set(0)
         uplinkPcmWrites.set(0); insertedSilenceWrites.set(0); partialUplinkWrites.set(0)
-        cutoverWrites.set(0); cutoverReads.set(0)
     }
 
     /** Runs on the worker thread every 250 ms while a session exists. */
@@ -648,6 +647,10 @@ object CallAudioRelay : CallManager.CallListener {
         maxWriteMs = 0
         mediaRunning = true
         cutoverStartedAt = SystemClock.elapsedRealtime()
+        // Only a real cutover clears these: [resetWindow] also runs when a session is re-armed, and
+        // a duplicate audio_start during the verification window must not blank the measured rate.
+        cutoverWrites.set(0)
+        cutoverReads.set(0)
         badWindows = 0
         resetWindow()
         track.play()
