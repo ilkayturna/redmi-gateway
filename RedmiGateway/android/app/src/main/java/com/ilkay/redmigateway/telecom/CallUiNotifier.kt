@@ -65,12 +65,12 @@ object CallUiNotifier : CallManager.CallListener {
 
             if (state == "idle" || state == "disconnected" || state == "disconnecting") {
                 // Check if this was a missed call (rang without ever becoming active)
-                val key = if (callId.isNotBlank() && callId != "none") callId else lastRingingId
+                val key = callUiKey(callId, lastRingingId)
                 if (key != null) {
                     val missedNum = ringingCallNumbers.remove(key) ?: lastRingingNumber
                     val becameActive = activeCallIds.remove(key) || lastWasActive
-                    if (missedNum != null && !becameActive) {
-                        postMissedCallNotification(context, key, missedNum)
+                    if (wasMissed(missedNum, becameActive)) {
+                        postMissedCallNotification(context, key, missedNum as String)
                     }
                 }
                 lastRingingId = null
@@ -237,3 +237,29 @@ class CallActionReceiver : BroadcastReceiver() {
         }
     }
 }
+
+/**
+ * The key a call is tracked under while it rings and then ends.
+ *
+ * Telecom sometimes reports a call id of "none" or an empty string, and the missed call decision
+ * needs something to look the number up by, so the last id that rang is used instead. When there
+ * is neither, the answer is null and no notification is posted, which is the right outcome: there
+ * is no call to report.
+ *
+ * @param callId the id from the call state callback
+ * @param lastRingingId the id of the call that last rang, or null
+ */
+internal fun callUiKey(callId: String, lastRingingId: String?): String? =
+    if (callId.isNotBlank() && callId != "none") callId else lastRingingId
+
+/**
+ * Whether a call that has just ended was missed.
+ *
+ * A call is missed when it rang, so a number was recorded, and it never became active. A call the
+ * person answered and then hung up is not missed, and neither is one that never rang.
+ *
+ * @param missedNumber the number the ringing call came from, or null if none was recorded
+ * @param becameActive whether the call was ever answered
+ */
+internal fun wasMissed(missedNumber: String?, becameActive: Boolean): Boolean =
+    missedNumber != null && !becameActive
