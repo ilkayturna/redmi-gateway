@@ -199,3 +199,30 @@ Ayrıca kaldırılan sembollerin repo genelinde **hiç kalmadığını** grep'le
 **KURAL:** Bir metriğin **ölçüm başlangıcı/noktası** değiştiyse, önce/sonra sayıları
 karşılaştırılamaz. **Kullanıcının hissettiği** uçtan uca metriği (`take on iPhone requested →
 firstSend`) esas al ve **iki metriği birlikte** raporla.
+
+### 6.5 "Hiç çalışmıyor" → ÖNCE ortam/ön koşul, SONRA kod
+**Hata (16.10.2026):** Kullanıcı *"iPhone'a hiç akmamaya başladı"* dedi. Ben **doğrudan koda**
+baktım, motor ayrımını suçlu buldum ve geri aldım. Doğru bir refleksti (6.3) — **ama**
+`RedmiGateway/docs/HANDOVER.md:37` zaten şöyle diyordu:
+> *"iPhone audio does not work without the fix. … **A ROM update can replace `/vendor`**;
+> run `status` after any system update."*
+
+Ve `vendor_audio_fix.py` kök nedeni ölçmüş: bu ROM, cihazın kullandığı **SIM slot 2** için
+`USECASE_INCALL_MUSIC_UPLINK2`'yi eşlemiyor → her yazma `pcm_prepare` hatası veriyor → HAL
+stream'i **saniyede ~14 kez** yeniden başlatıyor → **"helikopter" sesi** (= kullanıcının
+"cızırtı" dediği şey) ve **düzeltme olmadan iPhone sesi HİÇ çalışmıyor.**
+ROM güncellemesi `/vendor`'u değiştirirse düzeltme **sessizce kaybolur**.
+
+Yani sesin hiç akmamasının sebebi **vendor düzeltmesi** olabilirdi; o durumda **hiçbir kod
+değişikliği** sesi geri getirmezdi ve saatler yanlış yerde harcanırdı.
+
+**KURAL — bir özellik "hiç çalışmıyor"sa, koda bakmadan ÖNCE şu sırayı işlet:**
+1. **Cihaz/ortam ön koşulu** var mı? (vendor yaması, root, izin, ROM sürümü, servis ayakta mı)
+2. **Uygulama kendi kendini raporluyor mu?** (bu projede: tanılama `vendorFix` alanı, Ayarlar
+   ekranı "iPhone ses kanalı (SIM 2)" satırı, `RELAY_HEALTH` sayıları)
+3. **Belirti koda mı ait?** Cızırtı + `pcm_prepare` hatası = **ortam**, kod değil.
+4. **Ancak bundan sonra** diff'lere ve sessizlik yollarına bak.
+
+**Genel ders:** "Derlendi + testler yeşil" ile "cihazda çalışıyor" arasında **ortam** vardır.
+Ve bir özellik "tamamen ölü" ise, sebep genellikle **ikili** bir şeydir (var/yok), ince bir
+zamanlama değil. İkili şeyleri **önce** ele.**
