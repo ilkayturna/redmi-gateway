@@ -56,16 +56,7 @@ class CallJournal private constructor(context: Context) :
             instance ?: CallJournal(context).also { instance = it }
         }
 
-        private fun typeName(type: Int): String = when (type) {
-            CallLog.Calls.INCOMING_TYPE -> "incoming"
-            CallLog.Calls.OUTGOING_TYPE -> "outgoing"
-            CallLog.Calls.MISSED_TYPE -> "missed"
-            CallLog.Calls.REJECTED_TYPE -> "declined"
-            CallLog.Calls.BLOCKED_TYPE -> "blocked"
-            CallLog.Calls.VOICEMAIL_TYPE -> "voicemail"
-            CallLog.Calls.ANSWERED_EXTERNALLY_TYPE -> "answered_elsewhere"
-            else -> "other"
-        }
+        private fun typeName(type: Int): String = callTypeName(type)
     }
 
     private val appContext = context.applicationContext
@@ -254,4 +245,26 @@ class CallJournal private constructor(context: Context) :
         val hasMore = rows.size > safeLimit
         return (if (hasMore) rows.subList(0, safeLimit) else rows) to hasMore
     }
+}
+
+/**
+ * The name the journal gives a call log type.
+ *
+ * The strings are not decoration. The missed call notification is sent when the journal reports
+ * "missed", so a typo here silently stops the iPhone being told about a missed call, and nothing
+ * else would look wrong. Two types collapsing onto the same string would misreport just as
+ * quietly.
+ *
+ * The Android constants are compile time ints, so they are inlined and this works in a unit test
+ * without a device.
+ */
+internal fun callTypeName(type: Int): String = when (type) {
+    android.provider.CallLog.Calls.INCOMING_TYPE -> "incoming"
+    android.provider.CallLog.Calls.OUTGOING_TYPE -> "outgoing"
+    android.provider.CallLog.Calls.MISSED_TYPE -> "missed"
+    android.provider.CallLog.Calls.REJECTED_TYPE -> "declined"
+    android.provider.CallLog.Calls.BLOCKED_TYPE -> "blocked"
+    android.provider.CallLog.Calls.VOICEMAIL_TYPE -> "voicemail"
+    android.provider.CallLog.Calls.ANSWERED_EXTERNALLY_TYPE -> "answered_elsewhere"
+    else -> "other"
 }
