@@ -122,6 +122,8 @@ object CallAudioRelay : CallManager.CallListener {
     private const val ARRIVAL_WINDOW_MIN_FRAMES = 12
     /** Rate sampling interval for the gate: at least one monitor tick, so every tick measures. */
     private const val GATE_SAMPLE_MS = 140L
+    /** Shortest gap between two event driven gate evaluations. */
+    private const val GATE_KICK_MS = 60L
     /** How long a "take the audio" press stays valid while the iPhone has no control link. */
     private const val AUDIO_REQUEST_GRACE_MS = 10_000L
 
@@ -199,6 +201,14 @@ object CallAudioRelay : CallManager.CallListener {
     private var gateSampleAt = 0L
     /** Rate the gate accepted, for the start line in the diagnostics log. */
     @Volatile private var lastGateRate = 0
+    /** Wait, frames and rate as they were the instant the gate opened, not at the cutover. */
+    @Volatile private var gateMsAtStart = -1L
+    @Volatile private var gateFramesAtStart = -1
+    /** Last condition that kept the gate closed, and when it was logged, for the wake-up trace. */
+    private var lastGateBlocker = ""
+    private var lastGateLogAt = 0L
+    /** Last event driven gate evaluation, so a fast stream does not flood the handler. */
+    @Volatile private var lastGateKickAt = 0L
     /** A "take the audio" press that landed while no client was authenticated. */
     @Volatile private var pendingAudioRequestAt = 0L
     // Sealed sessions only: last time the iPhone reported that it is receiving downlink.
@@ -311,6 +321,9 @@ object CallAudioRelay : CallManager.CallListener {
             "pendingAudioRequestMs" to (if (pendingAudioRequestAt == 0L) -1L
                 else SystemClock.elapsedRealtime() - pendingAudioRequestAt),
             "gateRate" to lastGateRate,
+            "gateMs" to gateMsAtStart,
+            "gateFrames" to gateFramesAtStart,
+            "gateBlocker" to lastGateBlocker,
             "firstPcmMs" to (if (firstPcmAt == 0L) -1L else firstPcmAt - armedAt),
             "startMediaMs" to (if (cutoverStartedAt == 0L) -1L else cutoverStartedAt - armedAt),
             "maxWriteMs" to maxWriteMs
@@ -551,7 +564,7 @@ object CallAudioRelay : CallManager.CallListener {
                         gateSampleAt = now
                     }
                     val streamMs = if (firstPcmAt == 0L) 0L else now - firstPcmAt
-                    val ready = CutoverDecision.canStartMedia(
+                    val blocker = CutoverDecision.startMediaBlocker(
                         live = live,
                         iphoneFresh = iphoneFresh,
                         streamMs = streamMs,
@@ -561,11 +574,27 @@ object CallAudioRelay : CallManager.CallListener {
                         minFrames = ARRIVAL_WINDOW_MIN_FRAMES,
                         minFramesPerSecond = MIN_FRAMES_PER_SECOND
                     )
-                    if (ready) {
+                    if (blocker == CutoverDecision.READY) {
+                        // Both are read at this instant: reading the frame count later, at the
+                        // cutover, made a healthy 300 ms gate look like 1520 ms of piled up audio.
                         lastGateRate = recentRate
+                        gateMsAtStart = streamMs
+                        gateFramesAtStart = framesNow
+                        Log.i(TAG, "GATE_OPEN wait=${streamMs}ms frames=$framesNow rate=$recentRate/s")
                         startMedia()
-                    } else if (now - preparingSince > PREPARE_TIMEOUT_MS && live) {
-                        releaseMediaAndKeepSession("iphone_audio_not_ready")
+                    } else {
+                        // Name the condition that waits. Guessing between "the iPhone ramps up
+                        // slowly" and "the gate is too strict" is how a healthy stream got blamed
+                        // for a slow start that was never measured.
+                        if (blocker != lastGateBlocker || now - lastGateLogAt >= 500L) {
+                            lastGateBlocker = blocker
+                            lastGateLogAt = now
+                            Log.i(TAG, "GATE_WAIT reason=$blocker wait=${streamMs}ms " +
+                                "frames=$framesNow rate=$recentRate/s live=$live fresh=$iphoneFresh")
+                        }
+                        if (now - preparingSince > PREPARE_TIMEOUT_MS && live) {
+                            releaseMediaAndKeepSession("iphone_audio_not_ready")
+                        }
                     }
                     return
                 }
@@ -606,8 +635,10 @@ object CallAudioRelay : CallManager.CallListener {
                                 "firstRead=${firstCutoverReadAt - cutoverStartedAt}ms " +
                                 "firstPcm=${if (firstPcmAt == 0L) -1 else firstPcmAt - armedAt}ms " +
                                 "startMedia=${cutoverStartedAt - armedAt}ms " +
-                                "gateMs=${if (firstPcmAt == 0L) -1 else cutoverStartedAt - firstPcmAt}ms " +
-                                "gateFrames=${pcmSinceArm.get()})")
+                                // Read when the gate opened: reading the frame count here, at the
+                                // cutover, made a healthy gate look like 1520 ms of piled up audio.
+                                "gateMs=$gateMsAtStart gateFrames=$gateFramesAtStart " +
+                                "gateRate=$lastGateRate/s)")
                             Log.i(TAG, "Cutover freshness: pcmAge=${uplinkAgeMs}ms readAge=${downlinkAgeMs}ms")
                         } else {
                             releaseMediaAndKeepSession("isolation_failed")
@@ -799,6 +830,16 @@ object CallAudioRelay : CallManager.CallListener {
         val frames = pcmSinceArm.incrementAndGet()
         if (frames == ARRIVAL_WINDOW_MIN_FRAMES && owner == Owner.PREPARING_IPHONE && !mediaRunning) {
             // The reserve has just arrived: decide on this frame, not at the next monitor tick.
+            handler.removeCallbacks(decideNow)
+            handler.post(decideNow)
+        }
+        // The gate is also event driven: the frame that makes the recent rate healthy is the moment
+        // the audio path may open, not the next 150 ms monitor tick. Throttled so a healthy stream
+        // does not re-run the tick fifty times a second.
+        if (owner == Owner.PREPARING_IPHONE && !mediaRunning &&
+            receivedAt - lastGateKickAt >= GATE_KICK_MS
+        ) {
+            lastGateKickAt = receivedAt
             handler.removeCallbacks(decideNow)
             handler.post(decideNow)
         }
