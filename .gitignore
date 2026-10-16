@@ -3,6 +3,10 @@
 *.tar
 *.log
 *.png
+# iOS asset catalog images are source, not build output: the CallKit template and the app
+# icon have to reach CI, and without this exception `*.png` swallowed them silently.
+# AppIcon-1024.png was only tracked because it predates the rule above.
+!RedmiGateway/ios/RedmiGateway/Assets.xcassets/**/*.png
 *.tmp
 *.msi
 *.txt
