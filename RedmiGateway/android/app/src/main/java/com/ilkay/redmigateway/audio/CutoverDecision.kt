@@ -36,4 +36,29 @@ internal object CutoverDecision {
         downlinkAgeMs in 0..FRESHNESS_MS &&
         iphoneFresh &&
         iphoneHearing
+
+    /**
+     * Whether the iPhone's stream is good enough to open the audio path for it.
+     *
+     * [recentRate] is measured over the latest sampling interval, never as the average since the
+     * first frame. The iPhone ramps up - a measured call started at 14 frames per second and
+     * reached 50 - and an average keeps that slow start in the denominator long after the stream
+     * itself is healthy: the handover waited 1431 ms while the last second was already running at
+     * 53 frames per second. The evidence standard is unchanged: this much continuous audio, and
+     * the iPhone reports that it hears the Redmi.
+     */
+    fun canStartMedia(
+        live: Boolean,
+        iphoneFresh: Boolean,
+        streamMs: Long,
+        streamFrames: Int,
+        recentRate: Int,
+        minStreamMs: Long,
+        minFrames: Int,
+        minFramesPerSecond: Int
+    ): Boolean = live &&
+        iphoneFresh &&
+        streamMs >= minStreamMs &&
+        streamFrames >= minFrames &&
+        recentRate >= minFramesPerSecond
 }

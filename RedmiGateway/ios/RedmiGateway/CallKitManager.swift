@@ -158,6 +158,16 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         default:
             break
         }
+
+        // A live call is on the Redmi. Build the call-audio graph now, while nobody is waiting for
+        // it: the measured pickup waited 1.4 s for the first frames, and part of that was the
+        // voice-processing setup running after the button was pressed. Warming here (and again,
+        // harmlessly, at the button) means the press only waits for CallKit to activate the session
+        // and for the engine to start. Nothing captures audio until the engine starts.
+        if ["dialing", "connecting", "active"].contains(state) {
+            audioPathLog("live call; warming the audio graph")
+            AudioEngine.shared.warmUp()
+        }
     }
 
     private func uuidFor(rawId: String, state: String) -> UUID {

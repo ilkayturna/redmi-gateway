@@ -70,6 +70,11 @@ public final class GatewayConnection: ObservableObject {
     private let kLegacyToken = "pairing_token"
     private let kKnownAddresses = "gateway_addresses"
 
+    /// How long the socket is held after the app leaves the screen. iOS grants about half a minute
+    /// of background execution, and this stays inside it: long enough to press "iPhone'a aktar" on
+    /// the Redmi after putting the iPhone down, short enough that nothing runs while it sleeps.
+    private static let backgroundGrace: TimeInterval = 25
+
     /// A Redmi address to try. The Redmi can have several at once (Wi-Fi, its own hotspot, VPN).
     private struct Endpoint: Hashable {
         let host: String
@@ -107,6 +112,8 @@ public final class GatewayConnection: ObservableObject {
     private var lastPathSignature = ""
     private var catchUpTask: UIBackgroundTaskIdentifier = .invalid
     private var closeAfterCatchUp = false
+    /// The bounded grace that keeps the socket alive just after the app leaves the screen.
+    private var idleLinkTask: UIBackgroundTaskIdentifier = .invalid
     /// VoIP push token (PushKit); sent to the Redmi for calls while this iPhone is away.
     private var pushToken: String?
     private var alertPushToken: String?
@@ -1091,6 +1098,8 @@ public final class GatewayConnection: ObservableObject {
         ) { _ in
             Task { @MainActor in
                 let connection = GatewayConnection.shared
+                // Back on screen: the grace has done its job and the link stays.
+                connection.endIdleLinkKeepOpen()
                 connection.discovery.start()
                 connection.reconnectNow(reason: "app opened")
                 connection.requestSync()
@@ -1099,16 +1108,49 @@ public final class GatewayConnection: ObservableObject {
     }
 
     /// iOS suspends the app shortly after it leaves the screen, and a suspended socket looks
-    /// alive while nothing reads it. Without a call, close it deliberately: Bluetooth wakes the
-    /// app for calls, and the journals catch up when the app returns.
+    /// alive while nothing reads it. Without a call, hold it for a short grace and then close it
+    /// deliberately: a person who puts the iPhone down to press "iPhone'a aktar" on the Redmi still
+    /// finds a connected iPhone, and after the grace Bluetooth wakes the app for calls anyway.
     private func enterBackground() {
         guard currentCall == nil, !CallKitManager.shared.hasCalls else { return }
         cancelReconnect()
+        guard webSocketTask != nil else {
+            if pairing != nil { link = .searching }
+            return
+        }
+        if idleLinkTask == .invalid {
+            idleLinkTask = UIApplication.shared.beginBackgroundTask(withName: "idle-link") {
+                Task { @MainActor in GatewayConnection.shared.endIdleLink(reason: "iOS ended the grace") }
+            }
+        }
+        log("Network link held for \(Int(Self.backgroundGrace)) s after leaving the screen")
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.backgroundGrace * 1_000_000_000))
+            guard let self else { return }
+            self.endIdleLink(reason: "grace elapsed")
+        }
+    }
+
+    /// Closes the idle link once the grace is over, or the moment the app is back on screen.
+    private func endIdleLink(reason: String) {
+        if idleLinkTask != .invalid {
+            UIApplication.shared.endBackgroundTask(idleLinkTask)
+            idleLinkTask = .invalid
+        }
+        guard UIApplication.shared.applicationState != .active else { return }
+        guard currentCall == nil, !CallKitManager.shared.hasCalls else { return }
         if webSocketTask != nil {
             closeSocket()
-            log("Network link closed in the background; Bluetooth stays connected")
+            log("Network link closed after the grace (\(reason)); Bluetooth stays connected")
         }
         if pairing != nil { link = .searching }
+    }
+
+    /// The app is on screen again: retire the grace without touching the link.
+    private func endIdleLinkKeepOpen() {
+        guard idleLinkTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(idleLinkTask)
+        idleLinkTask = .invalid
     }
 
     /// The Redmi's beacon woke the app: a call rings, or the app had lost its links (for example
