@@ -404,3 +404,49 @@ schtasks /query /fo LIST | Select-String "ilgili"
 ```
 **KURAL:** Cihaza dokunabilecek bir otomasyon bırakılıyorsa, bırakıldığı anda **çalışmadığı**
 kanıtlanır (süreç + zamanlanmış görev + başlangıç klasörü).
+
+---
+
+## 8. LOG SATIRI — DÖNGÜ İÇİNDEKİ KAYIT, DÖNGÜ HIZINDA YAZAR
+
+> Bu bölüm 16.10.2026'da **kendi eklediğim bir satırın** cihazda bir dakika içinde kusurunu
+> göstermesinden doğdu.
+
+### 8.1 Değerlendirme döngüsü içine kayıt koymadan önce "bu kaç kez çalışır?" diye sor
+
+**Hata (16.10.2026):** `SmartHotspot` kararını tanılama dosyasına yazmak için `TRY_KNOWN_NETWORK`
+dalına bir `DiagnosticsLog.record` eklendi. **Değerlendirme her 20 saniyede çalışıyor**, durum ise
+genelde **değişmemiş** oluyor. Sonuç, cihazda **bir dakika içinde** görüldü:
+
+```
+15:32:13.150  Wi-Fi lost; trying a known network...
+15:32:33.206  Wi-Fi lost; trying a known network...
+15:32:53.227  Wi-Fi lost; trying a known network...
+```
+
+Tanılama dosyası **4000 satırda döngüye giriyor**; dakikada 3 aynı satır **gerçek geçmişi itiyor.**
+Yani bozulan şey sadece gürültü değil — **teşhis edilebilirliğin kendisi.**
+
+**KURAL:**
+1. Bir döngü içine kayıt koyacaksan, **karar/ durum DEĞİŞTİĞİNDE** yaz:
+   ```kotlin
+   private fun recordDecision(action: Action, message: String) {
+       Log.i(TAG, message)                        // logcat: her gecis (orasi dongu icin)
+       if (action == lastRecordedAction) return   // dosya: yalnizca degisim
+       lastRecordedAction = action
+       DiagnosticsLog.record(TAG, message)
+   }
+   ```
+2. **Logcat ile dosya farklı işler:** logcat döngüyü gösterebilir (döner, sorun değil), **dosya
+   geçmişi tutar** — oraya yalnızca **geçiş** yazılır.
+3. **Kural 0.2 log için de geçerli:** "kullanıcı bunu kaç kez görür?" → "dosya bunu kaç kez yazar,
+   neyi iter?"
+4. **Doğrulaması cihazda yapılır ve hızlıdır:** sayacı 2 dakika izle — **artmıyorsa** doğru.
+   ```
+   dosya  : 6 -> 6      (120 sn, ARTMADI)  ✅
+   logcat : 10 satir    (devam ediyor)     ✅
+   ```
+
+**Genel ders:** Log eklemek "zararsız" görünür; ama **döngü içinde** eklendiğinde dosyanın
+**rotasyonunu** hızlandırır ve **tanılamayı yok eder** — yani eklediğin şeyin amacını tersine
+çevirir.
