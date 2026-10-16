@@ -36,8 +36,10 @@ object SmartHotspot {
     private const val KEY_ENABLED = "enabled"
     private const val KEY_KNOWN = "known_ssids"
     private const val CHECK_EVERY_MS = 20_000L
-    private const val STABLE_MS = 15_000L
-    private const val LOST_MS = 15_000L
+    /** How long a Wi-Fi network must hold before the hotspot is turned off again. */
+    internal const val STABLE_MS = 15_000L
+    /** How long Wi-Fi must be gone before the hotspot is turned on. */
+    internal const val LOST_MS = 15_000L
     private const val TRY_MS = 30_000L
     private const val SCAN_EVERY_MS = 60_000L
     /** The iPhone is on the hotspot: the same search continues, just on a slower cadence. */
@@ -208,18 +210,27 @@ object SmartHotspot {
         // is over. Turning it on never hurts: the Wi-Fi is already gone, and the hotspot gives the
         // iPhone its way back to the call audio.
         val inCall = CallManager.currentCallState !in setOf("idle", "disconnected")
-        when {
-            wifi && hotspot && !inCall && now - wifiSince >= STABLE_MS -> {
+        val action = decideHotspotAction(
+            enabled = true,
+            wifi = wifi,
+            hotspot = hotspot,
+            inCall = inCall,
+            wifiStableMs = if (wifi) now - wifiSince else 0L,
+            lostForMs = if (wifi) 0L else now - lostSince,
+        )
+        when (action) {
+            HotspotAction.STOP_HOTSPOT -> {
                 Log.i(TAG, "Known Wi-Fi in use; hotspot off to save mobile data")
                 com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Known Wi-Fi in use; hotspot off to save mobile data")
                 stopHotspot()
             }
-            !wifi && !hotspot && now - lostSince >= LOST_MS -> {
+            HotspotAction.START_HOTSPOT -> {
                 Log.i(TAG, "No Wi-Fi; hotspot on for the iPhone${if (inCall) " (during a call)" else ""}")
                 HotspotRestarter.startIfNeeded(context)
                 lostSince = now
             }
-            !wifi && hotspot && !inCall -> tryKnownNetwork(now)
+            HotspotAction.TRY_KNOWN_NETWORK -> tryKnownNetwork(now)
+            HotspotAction.NONE -> Unit
         }
     }
 
@@ -316,6 +327,46 @@ object SmartHotspot {
             val manager = context.getSystemService("tethering") ?: error("no tethering service")
             manager.javaClass.getMethod("stopTethering", Int::class.javaPrimitiveType).invoke(manager, 0)
         }.onFailure { Log.w(TAG, "Could not stop the hotspot: ${it.javaClass.simpleName}") }
+    }
+}
+
+/** What the hotspot should do on this pass. */
+internal enum class HotspotAction { NONE, STOP_HOTSPOT, START_HOTSPOT, TRY_KNOWN_NETWORK }
+
+/**
+ * The hotspot rules, which are the ones the user asked to keep: a known network means the hotspot
+ * goes off to save mobile data, no network at all means it comes on so the iPhone has a way back,
+ * and neither of those ever happens in the middle of a call because that would cut the iPhone's
+ * link while the call audio is running over it.
+ *
+ * Extracted from evaluate() so it can be asserted on. The rules were only ever described in
+ * comments, and a wrong turn here costs the user mobile data or the call audio, which is exactly
+ * the kind of thing a comment does not protect.
+ *
+ * @param enabled the user's switch for this behaviour
+ * @param wifi true when a Wi-Fi network is currently connected
+ * @param hotspot true when the hotspot is currently up
+ * @param inCall true while a call is anything other than idle or disconnected
+ * @param wifiStableMs how long the current Wi-Fi has been connected, ignored when wifi is false
+ * @param lostForMs how long Wi-Fi has been gone, ignored when wifi is true
+ */
+internal fun decideHotspotAction(
+    enabled: Boolean,
+    wifi: Boolean,
+    hotspot: Boolean,
+    inCall: Boolean,
+    wifiStableMs: Long,
+    lostForMs: Long,
+): HotspotAction {
+    if (!enabled) return HotspotAction.NONE
+    return when {
+        // Off to save mobile data, but only once the network has proven stable and never mid-call.
+        wifi && hotspot && !inCall && wifiStableMs >= SmartHotspot.STABLE_MS -> HotspotAction.STOP_HOTSPOT
+        // Back on so the iPhone can reach this Redmi. This one is allowed during a call.
+        !wifi && !hotspot && lostForMs >= SmartHotspot.LOST_MS -> HotspotAction.START_HOTSPOT
+        // While the hotspot is up, keep looking for a known network to hand back to.
+        !wifi && hotspot && !inCall -> HotspotAction.TRY_KNOWN_NETWORK
+        else -> HotspotAction.NONE
     }
 }
 
