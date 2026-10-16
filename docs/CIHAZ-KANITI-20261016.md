@@ -1316,3 +1316,98 @@ zamanlaması sabit: çağrı bittikten ~3 sn sonra, stream kapanırken.
 Kurulum **27 → 27**: bu bölümdeki her şey **salt okuma** ile toplandı (adb shell okuma +
 screencap). Kullanıcının çektiği ekran görüntüsü dosyası cihazdan silindi; hiçbir ayar,
 kurulum veya `am start` yapılmadı.
+
+---
+
+## 34. "iPhone'a aktar" kararsız döngüye girdi — kullanıcının gördüğü şey (16.10.2026 16:23-16:24)
+
+Kullanıcı Redmi'den arama yaptı, **"iPhone'a aktar"** dedi ve şunu bildirdi:
+*"gitti geldi; bir şeyler oldu. takıldı falan en son iPhone'a geçti falan garip bir şey oldu."*
+Kayıt bunu **birebir** doğruluyor.
+
+### Çağrı ve ses sahipliğinin 21 saniyede 6 kez el değiştirmesi
+```
+16:23:45.899  Call: Initiating outgoing GSM call          (Redmi'den)
+16:23:49.781  Call State Changed: State=active            (karşı taraf cevapladı)
+16:23:52.472  Call: iPhone connected (protocol 2)         <- aktar isteğiyle uyandı
+16:23:52.492  Audio: AUDIO_OWNER=PREPARING_IPHONE
+16:23:54.408  Audio: AUDIO_OWNER=REDMI  reason=iphone_disconnected   (1) geri döndü
+16:23:55.091  Call: media started (gate=300ms frames=18 rate=48/s)
+16:23:55.498  Call: iPhone connected (protocol 2)
+16:23:55.690  Audio: AUDIO_OWNER=REDMI  reason=iphone_disconnected   (2) tam geçerken iptal
+16:23:57.828  Call: media started (gate=448ms)
+16:23:58.225  Audio: AUDIO_OWNER=IPHONE reason=iphone_confirmed      (3) GEÇTİ (startMedia=632ms)
+16:23:58.525  Audio: AUDIO_OWNER=REDMI  reason=iphone_disconnected   (4) 0.3 sn sonra geri
+16:24:01.511  Call: media started (gate=324ms)
+16:24:01.911  Audio: AUDIO_OWNER=IPHONE reason=iphone_confirmed      (5) GEÇTİ (startMedia=486ms)
+16:24:04.315  Audio: AUDIO_OWNER=REDMI  reason=iphone_disconnected   (6) 2.4 sn sonra geri
+16:24:05.383  GatewayWSServer: Repeated the preparing state (1)
+16:24:06.386  (2)   16:24:07.395  (3)      <- AUDIO-STATE-REPEAT çalışıyor
+16:24:07.264  Call: Executing HANGUP / DISCONNECT     <- kullanıcı beklemekten vazgeçti
+```
+Son denemede kapı **hiç açılmadı**: `GATE_WAIT reason=rateLow wait=2416ms frames=86 rate=35/s`
+— iPhone'un çerçeveleri 38/s eşiğinin altında kaldı, kapı haklı olarak devretmedi.
+
+### Kök neden: soket 32 saniyede 9 kez açıldı, hepsi sessizce öldü
+```
+16:24:04.213  WebSocket closed code=1006 remote=true  sessionMs=3332  sinceLastMessageMs=3215 verdict=closed_quiet
+16:24:18.406  WebSocket closed code=1006 remote=false sessionMs=14174 sinceLastMessageMs=11020 verdict=closed_quiet reason=Connection reset by peer
+16:24:18.530  WebSocket closed code=1006 remote=true  sessionMs=56    sinceLastMessageMs=16    verdict=dropped_while_active
+```
+`code=1006` = el sıkışmasız ani ölüm. Ve **`sinceLastMessageMs ≈ sessionMs`**: soket açıldıktan
+sonra neredeyse **hiç mesaj gelmedi**, sonra öldü. Android tarafında **keepalive/idle timeout yok**
+(kodda yalnızca yorum var) → kapanışları Redmi kapatmıyor. Redmi'nin her `iphone_disconnected`
+gerekçesi bu ölümlerdir ve her ölüm ses oturumunu kapatıp sesi Redmi'ye döndürür.
+
+### Ve istek, iPhone'un kendi kapatmaya çalıştığı bağlantıdan gidiyor
+```swift
+// GatewayConnection.swift — iOS
+private func finishCatchUp() {
+    if closeAfterCatchUp, applicationState == .background, currentCall == nil {
+        closeSocket()                     // <<< arka planda çağrı yoksa bağlantı KAPATILIYOR
+    }
+}
+private func enterBackground() {
+    guard currentCall == nil, !CallKitManager.shared.hasCalls else { return }
+    ... log("Network link held for \(Int(Self.backgroundGrace)) s after leaving the screen")   // 25 sn
+}
+```
+Aktar isteği **aynı soketten** gidiyor:
+```swift
+private func handleAudioState(_ audio: AudioStateMessage) {
+    if audio.detail == "request_iphone_audio" { CallKitManager.shared.takeCallOnIPhone(); return }
+```
+Ve Android tarafında bu mesajın **Bluetooth yedeği yok** — `audio_state` yalnızca
+`GatewayWebSocketServer` üzerinden yayınlanıyor (`answer`/`reject`/`hangup` komutlarının aksine,
+onları Bluetooth da taşıyor).
+
+**Yani:** Çağrı henüz Redmi'de olduğu için iPhone'da `currentCall == nil`; iPhone arka planda
+olduğu için bağlantıyı **bilerek** kapatıyor; aktar isteği ise **tam o bağlantıdan** gönderiliyor.
+Kodun kendi yorumu bu senaryoyu zaten tarif ediyor ("a person who puts the iPhone down to press
+'iPhone'a aktar' on the Redmi still finds a connected iPhone") — ama bu yalnızca 25 saniyelik
+grace boyunca ve ilk `catchUp` kapanışına kadar geçerli. Sonuç sert bir kilit değil,
+**kararsız bir döngü**: aktarım kısa süre başarıyor, sonra bağlantı ölünce ses geri düşüyor.
+
+### Neyin suçlusu DEĞİL (kanıtla)
+- **Devir teslim kapısı:** iki kez açıldı, hızlı (632 ms ve 486 ms). Düzeltme çalışıyor.
+- **HAL:** tek kesintisiz stream, `pcm_prepare` = 0.
+- **AUDIO-STATE-REPEAT:** çalıştı — "Repeated the preparing state (1)(2)(3)" ile isteği her saniye
+  yeniden duyurdu; ama bağlantı yokken duyurunun gideceği yer yok.
+
+### AÇIK KALAN (tek)
+İki başarılı devir teslimden **0.3 sn ve 2.4 sn sonra** soketin neden yine öldüğü Android
+tarafından görülmüyor: iPhone o an çağrıyı almış olduğu için `currentCall != nil` olmalı ve bu
+durumda kapanış kuralları devre dışı. Bu, **iOS tarafının logu** ya da çağrı sırasında ekranı açık
+bir iPhone ile yeniden üretim gerektiriyor.
+
+### Aday düzeltmeler (hiçbiri kurulmadı — kural 0.4/6.1)
+| Yön | Değişiklik | Bedel |
+|---|---|---|
+| iOS | "Redmi sesi iPhone'a istiyor" durumunu **çağrı yerine koy**: `preparing_iphone`/`request_iphone_audio` geldiğinde `currentCall == nil` olsa da soketi ve arka plan görevini tut | iOS değişikliği + CI (şu an runner yok) |
+| iOS | Aktar isteğini **Bluetooth** ile de ilet (kontrol komutlarında bu yol zaten var) | protokol işi, ama soketten bağımsız |
+| Android | Bağlantı ölünce sesi hemen Redmi'ye döndürmek yerine kısa bir hoşgörü tanımak | sessizlik riski — 6.1 gereği çağrıyla doğrulanmadan kurulmaz |
+
+### Kurulum disiplini
+Kurulum **27 → 27**. Bu bölümün tamamı salt okuma ile toplandı. **Not:** ölçüm sırasında cihaz
+USB'den ayrıldı (`adb devices` boş), bu yüzden "iPhone'a ping atılamıyor" gibi ek kontroller
+**yapılamadı** — ve yapılamayan kontrol **kanıt sayılmadı** (kural 3.1).

@@ -513,6 +513,39 @@ ekstra jitter'da kuru kalıyor (`queued=0`).
 3. Böyle bir değişiklik **ses yoludur** (6.1): gerçek çağrıyla doğrulanmadan kurulmaz ve bedeli
    (gecikme 240 → 320-480 ms) **kullanıcıya söylenir**. "Sessizce iyileştirme" yok.
 
+### 6.9 Kontrol mesajı, karşı tarafın "kapatmaya karar verdiği" kanaldan gidiyorsa salınım olur
+
+**Bulgu (16.10.2026 16:23, "iPhone'a aktar"):** Kullanıcı Redmi'den arama yaptı ve aktar dedi.
+21 saniyelik çağrıda **ses sahipliği 6 kez el değiştirdi**: iki kez iPhone'a geçti (632 ms ve
+486 ms), 0.3 sn ve 2.4 sn sonra geri düştü, son denemede kapı hiç açılmadı
+(`GATE_WAIT reason=rateLow ... rate=35/s`) ve **kullanıcı beklemekten vazgeçip kapattı.**
+
+Log: soket **32 saniyede 9 kez** açıldı; her kapanış `code=1006` (el sıkışmasız ölüm) ve
+**`sinceLastMessageMs ≈ sessionMs`** — yani soket açıldıktan sonra neredeyse hiç mesaj gelmedi,
+sonra öldü. Android tarafında keepalive/idle timeout **yok**; her ölüm
+`AUDIO_OWNER=REDMI reason=iphone_disconnected` üretip ses oturumunu kapatıyor.
+
+Kök neden koddan okundu:
+```swift
+// iOS: arka planda çağrı yoksa bağlantı BİLEREK kapatılıyor (25 sn grace sonra / catchUp sonrası)
+if closeAfterCatchUp, applicationState == .background, currentCall == nil { closeSocket() }
+```
+Ama aktar isteği **aynı soketten** gidiyor (`audio_state` → `request_iphone_audio`), ve bu mesajın
+**Bluetooth yedeği yok** (oysa `answer`/`reject`/`hangup` komutlarını Bluetooth da taşıyor).
+Çağrı henüz Redmi'de olduğu için iPhone'da `currentCall == nil` → iPhone bağlantıyı kapatıyor →
+istek teslim edilemiyor → ses Redmi'de kalıyor → tekrar deneniyor. **Kararsız döngü.**
+
+**KURAL:**
+1. **Gönderim koşulu ile kapanma koşulu çakışmasın.** Bir kontrol mesajı, karşı tarafın
+   *"şu durumda kapatırım"* dediği kanaldan gidiyorsa ve mesajın amacı **tam o durumu değiştirmekse**,
+   kilitlenme/kararsızlık kaçınılmazdır. (Burada: "çağrım yok → kapat" ↔ "çağrıyı devral".)
+2. **Kritik komut tek kanala bağlanmaz.** Yedek kanal varsa (burada Bluetooth) kritik mesaj
+   oradan da gider. Yedek yoksa, o mesaj için **bir yedek yazmak** işin parçasıdır.
+3. **"Gitti geldi / takıldı" belirtisi = sahiplik salınımıdır.** Teşhis sırası:
+   `AUDIO_OWNER` geçişlerini **say** → kanal kapanışlarını **oku** (`code=1006` +
+   `sinceLastMessageMs ≈ sessionMs` = peer susuyor, ağ ya da askıya alınma) → **uygulama mantığını
+   en son** suçla. Bu vakada kapı, HAL ve ses yolu temizdi; suçlu bağlantı politikasıydı.
+
 ---
 
 ## 7. OTOMASYON VE BAYAT YOLLAR — SESSİZ GERİ ALMA
