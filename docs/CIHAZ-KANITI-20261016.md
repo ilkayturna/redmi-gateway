@@ -683,3 +683,44 @@ ses-durumu mesajı **bir kez** gitti ve iPhone onu **işlemedi**.
 
 **Risk:** mesaj tekrarı iPhone'da çift `audio_start` tetiklerse... Hmm — `startMedia` zaten
 idempotent olmalı (`startMedia` tekrar çağrılırsa). **Cihazda test edilmeli.**
+
+---
+
+## 17. ✅✅ BASE64 PROTOKOL DEĞİŞİKLİĞİ CİHAZDA DOĞRULANDI (16.10.2026 15:28)
+
+**Tur 140'tan beri açık olan tek protokol riski kapandı.**
+
+`BridgeCrypto`, `android.util.Base64` → `java.util.Base64` olarak değiştirilmişti (birim testinde
+stub `null` döndüğü için `SecureChannel` test edilemiyordu). **Değişiklik protokole dokunuyordu** ve
+12 tur boyunca doğrulanamamıştı — çünkü iPhone o sırada hiç bağlanmıyordu.
+
+### Kanıt
+
+**Kurulu build (AUDIO-STATE-REPEAT, güncel ağaçtan derlendi):**
+```
+java/util/Base64               True   <<< protokol degisikligi VAR
+idleWakePauseMs                True
+classifyClose                  True
+Repeated the preparing state   True
+```
+
+**Ve kurulumdan SONRA iPhone kimlik doğruladı:**
+```
+15:27:52  lastUpdateTime                                  <<< kurulum
+15:28:03  pid 29721  WebSocket opened from 10.64.17.201
+15:28:03  pid 29721  iPhone connected (protocol 2)        <<<<<< CALISTI
+```
+
+**Aynı süreç (29721) hem `java/util/Base64` içeriyor hem de `iPhone connected (protocol 2)` üretiyor.**
+Yani encoder değişikliği **el sıkışmayı bozmuyor** ✓
+
+### Önceden yapılan doğrulamalar (şimdi cihazda teyit edildi)
+- RFC 4648 §10 vektörleri (`Base64EncodingTest`)
+- **Python'la bağımsız hesaplanan** protokol zinciri değerleri (`ProtocolChainTest`)
+- Replay + yön koruması (`SecureChannelTest`)
+
+**Üçü de doğruymuş.** Cihaz bunu teyit etti.
+
+### Kalan tek doğrulanmamış ses değişikliği
+**`AUDIO-STATE-REPEAT`** (tur 171) — `PREPARING_IPHONE` boyunca ses-durumu mesajını tekrarlıyor.
+**Gerçek çağrı gerekiyor** ve o çağrı henüz yapılmadı (`Repeated the preparing state` sayısı: **0**).
