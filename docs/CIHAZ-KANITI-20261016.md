@@ -113,3 +113,62 @@ kararsız" şikayetini **teşhis edilemez** kılar.
 |---|---|---|
 | **Root yok** | Emülatör (eşleme anahtarları), vendor düzeltmesini yeniden uygulama | Kullanıcı Magisk'i geri yükler **veya** uygulamaya root'suz lab yolu eklenir |
 | **Cihaz kilitli** | UI ekran görüntüsü (madde 1) | Kullanıcı kilidi açar |
+
+---
+
+## 7. ✅ TEŞHİS BOŞLUĞU KAPATILDI — ve ilk kapanış satırı hemen işe yaradı
+
+**Düzeltme:** `onClose` artık `code`, `reason`, `remote` + üç yeni alanı logluyor
+(`connectedAt`, `lastMessageAt`, `authenticatedAt`) + **`verdict`** sınıflandırması.
+Commit `c8d771d` · 94 → **102 test** · mutasyonla doğrulandı (dal zayıflatılınca 3 test kırılıyor).
+
+**Kuruldu ve ilk kapanış satırı:**
+
+```
+13:42:35.302  WebSocket server started on port 8787
+13:42:35.636  WebSocket opened from 10.64.17.201
+13:42:35.851  CallManager: iPhone connected (protocol 2)
+13:42:45.575  WebSocket closed code=1006 remote=false authenticated=true protocol=2
+              sessionMs=9939 sinceLastMessageMs=9693 verdict=closed_quiet
+              reason=Connection reset by peer
+```
+
+### Bu satırın söyledikleri
+
+| Alan | Değer | Anlam |
+|---|---|---|
+| `sessionMs` | **9939** | Oturum **~10 saniye** yaşadı |
+| `sinceLastMessageMs` | **9693** | Kapanmadan önce **9.7 sn uygulama trafiği yok** |
+| `code` | **1006** | Anormal kapanış — close frame yok |
+| `remote` | **false** | **Sunucu kapatmadı** — bağlantı öldü |
+| `reason` | **Connection reset by peer** | **Karşı taraf TCP RST gönderdi** |
+
+### 🔍 Kök neden adayı: ping aralığı oturum ömründen UZUN
+
+**iOS tarafı `GatewayConnection.swift:476`:**
+```swift
+try? await Task.sleep(nanoseconds: 15_000_000_000)   // 15 saniye
+task.sendPing { ... }
+```
+**Android tarafında ise HİÇ keepalive/ping YOK** (grep: 0 sonuç).
+
+**Yani:** iPhone **15 saniyede bir** ping atıyor, ama bağlantı **~10 saniyede** ölüyor →
+**ilk ping hiç gönderilemiyor.** Bağlantı, canlı olduğunu kanıtlayacak hiçbir trafik üretmeden ölüyor.
+
+**Ayrıca:** WebSocket PING çerçevesi `onMessage`'ı tetiklemez → bizim `lastMessageAt` ölçümümüz
+ping'leri **saymaz**. Yani "9.7 sn sessiz" = "uygulama mesajı yok", "bağlantı ölü" değil.
+
+### ⚠️ DÜRÜSTLÜK SINIRI
+
+Bu **tek bir olay.** Kurulum sonrası iPhone bir kez bağlandı, öldü ve **150 saniye boyunca
+bir daha bağlanmadı.** Tek olaydan "ping aralığı suçlu" sonucu **çıkarılamaz** — sadece
+**en güçlü aday** olarak yazılıyor.
+
+**Doğrulamak için gereken:** iPhone birkaç kez daha bağlanıp kopmalı. O zaman
+`sessionMs` dağılımı ve `reason` alanları deseni gösterir.
+
+### Sıradaki aday düzeltmeler (kanıt birikince)
+1. **Android'e keepalive ekle** (~5 sn ping) → NAT deliğini canlı tutar, ölü soketi ~5 sn'de fark eder
+2. **iOS ping aralığını 15 sn → 5 sn** indir → oturum ömründen kısa olsun
+3. `verdict`'e `peer_reset` sınıfı ekle (`code=1006` + reset nedeni ayrı bir sinyal)
+
