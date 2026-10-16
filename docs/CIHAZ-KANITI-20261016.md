@@ -892,3 +892,39 @@ ROM güncellenmemiş ✓ Bu **çıkarım**, içerik doğrulaması değil.
 ### 4. Bekleyen
 - **Cevaplanan çağrı** → madde 3 ve 4
 - **Ekran kilidi** (`mDreamingLockscreen=true`) → madde 1
+
+---
+
+## 22. MADDE 1 DENETİMİ — EKRAN GÖRÜNTÜSÜ ALINAMADAN (16.10.2026, SALT OKUMA)
+
+**Ekran kilitli olduğu için görüntü alınamıyor. Bunun yerine `CallActivity.kt` standart bir
+dialer'ın ögelerine karşı denetlendi.**
+
+| Standart öge | Durum |
+|---|---|
+| Yakınlık sensörü (konuşurken ekran kapanır) | ✅ VAR |
+| Çağrı süresi sayacı | ✅ VAR |
+| Hoparlör butonu | ✅ VAR |
+| Sustur butonu | ✅ VAR |
+| Tuş takımı (DTMF) | ✅ VAR |
+| Kilit üstü tam ekran | ✅ VAR |
+| Kişi adı çözümü | ✅ VAR |
+| Cevap / çağrıyı bitir | ✅ VAR |
+| **Bluetooth ses yolu butonu** | ❌ **YOK** |
+
+### Değerlendirme
+
+**Tek eksik Bluetooth butonu.** Google Dialer ve iOS CallKit'te bu buton standarttır; kullanıcı
+sesi kablosuz kulaklığa yönlendirebilir.
+
+**Ama bunun bu projede kasıtlı olma olasılığı yüksek:** ses yolu zaten **iPhone'a** gidiyor
+(`AUDIO_OWNER=IPHONE`), bir kulaklığa değil. Yani "Bluetooth'a yönlendir" kavramı bu mimaride
+karşılıksız olabilir.
+
+**Bu yüzden bunu "eksiklik" olarak değil, AÇIK SORU olarak kaydediyorum.** Kullanıcıya sorulacak:
+*"Redmi'de konuşurken sesi bir Bluetooth kulaklığa yönlendirmek ister misiniz, yoksa ses zaten
+iPhone'da olduğu için gereksiz mi?"*
+
+### Kalan işler (kurulum gerektirir — kural 0.4: kullanıcı onayı olmadan kurulmaz)
+1. **Bluetooth butonu** — yalnızca kullanıcı isterse
+2. Ses geçişi (`startMedia=2023ms` → `<1 sn`) — motor ayrımı, **çağrı doğrulaması şart** (6.1)
