@@ -255,4 +255,60 @@ değişikliği** sesi geri getirmezdi ve saatler yanlış yerde harcanırdı.
 
 **Genel ders:** "Derlendi + testler yeşil" ile "cihazda çalışıyor" arasında **ortam** vardır.
 Ve bir özellik "tamamen ölü" ise, sebep genellikle **ikili** bir şeydir (var/yok), ince bir
-zamanlama değil. İkili şeyleri **önce** ele.**
+zamanlama değil. İkili şeyleri **önce** ele.
+
+---
+
+## 7. OTOMASYON VE BAYAT YOLLAR — SESSİZ GERİ ALMA
+
+> Bu bölüm 16.10.2026'da, **mevcut tüm düzeltmeleri sessizce geri alabilecek** bir betiğin
+> bulunmasıyla doğdu. Cihaz kullanıcıdaydı; o an bağlı olsaydı kurulum **başarılı olurdu**.
+
+### 7.1 Bayat yol = sessizce ESKİ sürümü kurar
+**Hata (16.10.2026):** `watch_and_configure.py` ve `autonomous_deployer.py` tüm yolları
+`C:\Users\ilkay.turna\Documents\antigravity\elegant-borg\` govdesine işaret ediyordu —
+**başka bir checkout**. O dizin **hâlâ duruyor** ve içinde **26.09.2026 tarihli** `app-debug.apk` var.
+
+`watch_and_configure.py` **sonsuz döngüde** çalışıp gateway'i göremediğinde o APK'yi kuruyordu:
+```python
+while not (gateway_configured and magisk_configured):     # SONSUZ
+    ...
+    run([ADB, "install", "-r", r"...\elegant-borg\...\app-debug.apk"])   # 3 HAFTA ESKİ
+```
+**Sonuç olsaydı:** uyanma push'u, kapı loglaması, 86 test — **hepsi giderdi** ve belirti
+*"uyanma çalışmıyor"* gibi görünürdü → **yanlış katmana geri dönüş.**
+
+**KURAL:**
+1. Bir betik **kuruyorsa/yazıyorsa**, hedef yolu **çalışma zamanında bu depodan** çözsün
+   (`os.path.dirname(__file__)` temelli), sabit mutlak yol **yazmasın**.
+2. Kurmadan **önce ne kurduğunu ve kaç günlük olduğunu yazsın**.
+3. `> 7 gün` ise **uyarsın**; yol eski bir checkout'a işaret ediyorsa **REDDETSİN**.
+4. **Sonsuz `while` yok** — adım bütçesi olsun, reddedilen yolu tekrar denemesin.
+
+### 7.2 `if __name__ == "__main__"` koruması olmayan modül IMPORT EDİLEMEZ
+**Hata (aynı gün, kendi hatam):** `watch_and_configure.py`'nin **tüm gövdesi en üst seviyede**ydi,
+main guard'ı yoktu. Guard'ı test etmek için modülü **import ettim** → **sonsuz döngü başladı ve
+APK kurmaya başladı.** (Cihaz bağlı olmadığı için kurulum başarısız oldu; zarar yok.)
+
+**KURAL:**
+1. Yan etki üreten her betiğin gövdesi **`def main():`** içinde olsun ve
+   **`if __name__ == "__main__": main()`** ile çağrılsın. **İstisnasız.**
+2. Bir betiği import ederek test edeceksen, **önce** import'un yan etkisiz olduğunu
+   **zaman aşımıyla** doğrula:
+   ```powershell
+   $job = Start-Job { python -c "import modul; print('IMPORT-OK')" }
+   if (-not (Wait-Job $job -Timeout 30)) { Stop-Job $job; "*** IMPORT YAN ETKI URETIYOR ***" }
+   ```
+3. Cihaza yazan bir betiği çalıştırmadan önce **çalışmadığından emin ol** ve **ne yazacağını**
+   önce oku.
+
+### 7.3 Aynı sınıf: cihazda çalışan izleyiciler
+`device_watcher_daemon.py` ve `nightly_autonomous_worker.py` **sonsuz döngülü** izleyicilerdir
+(ikincisi `fastboot devices` + **okuma amaçlı** `getvar unlocked` — kilit açmıyor, flash etmiyor).
+Kullanıcı yokken bunların **çalışmadığı** doğrulanmalı:
+```powershell
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match "betik_adi" }
+schtasks /query /fo LIST | Select-String "ilgili"
+```
+**KURAL:** Cihaza dokunabilecek bir otomasyon bırakılıyorsa, bırakıldığı anda **çalışmadığı**
+kanıtlanır (süreç + zamanlanmış görev + başlangıç klasörü).

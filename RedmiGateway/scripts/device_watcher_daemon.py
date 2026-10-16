@@ -1,10 +1,10 @@
-﻿import subprocess
+import subprocess
 import time
 import os
 
 ADB = r"C:\Users\ilkay.turna\AppData\Local\NucumBuildTools\android-sdk\platform-tools\adb.exe"
 FASTBOOT = r"C:\Users\ilkay.turna\AppData\Local\NucumBuildTools\android-sdk\platform-tools\fastboot.exe"
-LOG_FILE = r"C:\Users\ilkay.turna\Documents\antigravity\elegant-borg\RedmiGateway\docs\nightly_log.txt"
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "nightly_log.txt")
 
 def log(msg):
     t = time.strftime("%Y-%m-%d %H:%M:%S")
