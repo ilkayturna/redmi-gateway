@@ -51,6 +51,9 @@
         <string>voip</string>
         <string>audio</string>
         <string>bluetooth-central</string>
+        <!-- Without this, iOS delivers a content-available push but does not wake the
+             suspended app, so the silent wake from an outgoing Redmi call does nothing. -->
+        <string>remote-notification</string>
     </array>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
