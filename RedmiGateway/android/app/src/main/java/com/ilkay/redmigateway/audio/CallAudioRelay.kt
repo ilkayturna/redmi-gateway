@@ -120,8 +120,6 @@ object CallAudioRelay : CallManager.CallListener {
     // it holds this much speech. The threshold above and the freshness rule are unchanged.
     private const val ARRIVAL_WINDOW_MIN_MS = 240L
     private const val ARRIVAL_WINDOW_MIN_FRAMES = 12
-    /** Rate sampling interval for the gate: at least one monitor tick, so every tick measures. */
-    private const val GATE_SAMPLE_MS = 140L
     /** Shortest gap between two event driven gate evaluations. */
     private const val GATE_KICK_MS = 60L
     /** How long a "take the audio" press stays valid while the iPhone has no control link. */
@@ -195,10 +193,6 @@ object CallAudioRelay : CallManager.CallListener {
     @Volatile private var lastCutoverReadAt = 0L
     /** True once the one-shot decision is queued for the moment both spans are long enough. */
     @Volatile private var verificationScheduled = false
-    // Gate sampling state, owned by the worker thread: the handover gate measures the rate over
-    // these intervals instead of the average since the iPhone's first frame.
-    private var gateSampleFrames = 0
-    private var gateSampleAt = 0L
     /** Rate the gate accepted, for the start line in the diagnostics log. */
     @Volatile private var lastGateRate = 0
     /** Wait, frames and rate as they were the instant the gate opened, not at the cutover. */
@@ -380,8 +374,6 @@ object CallAudioRelay : CallManager.CallListener {
             armedAt = SystemClock.elapsedRealtime()
             firstPcmAt = 0L
             pcmSinceArm.set(0)
-            gateSampleAt = 0L
-            gateSampleFrames = 0
             scheduleMonitor()
         }
         CallManager.log("Call audio session armed")
@@ -551,19 +543,20 @@ object CallAudioRelay : CallManager.CallListener {
                     return
                 }
                 if (!mediaRunning) {
-                    // The gate reads the *recent* rate, not the average since the first frame: the
-                    // iPhone ramps up (a measured call started at 14 frames per second and reached
-                    // 50), and an average kept the handover waiting 1431 ms while the last second
-                    // already ran at 53. This sampling state belongs to the worker thread.
+                    // The gate reads the average rate since the iPhone's first frame in this arm.
+                    //
+                    // A windowed rate was tried here and it took the audio away completely. The
+                    // sampling origin started at zero and the elapsed time was forced to zero
+                    // while the origin was zero, so the branch that would have set the origin was
+                    // never reached: the elapsed time stayed zero, the rate stayed zero, and the
+                    // gate never opened on any call. Every call ended eight seconds later with
+                    // iphone_audio_not_ready, and the log said nothing about why. The average has
+                    // no such state to get stuck in, and it is what the last working handover ran
+                    // on, at 10:33 on the sixteenth with the iPhone ramping from 14 frames a
+                    // second to 52.
                     val framesNow = pcmSinceArm.get()
-                    val sampleMs = if (gateSampleAt == 0L) 0L else now - gateSampleAt
-                    val recentRate = if (sampleMs >= GATE_SAMPLE_MS)
-                        ((framesNow - gateSampleFrames) * 1000L / sampleMs).toInt() else 0
-                    if (sampleMs >= GATE_SAMPLE_MS) {
-                        gateSampleFrames = framesNow
-                        gateSampleAt = now
-                    }
                     val streamMs = if (firstPcmAt == 0L) 0L else now - firstPcmAt
+                    val recentRate = if (streamMs > 0L) (framesNow * 1000L / streamMs).toInt() else 0
                     val blocker = CutoverDecision.startMediaBlocker(
                         live = live,
                         iphoneFresh = iphoneFresh,
