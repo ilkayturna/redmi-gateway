@@ -1,4 +1,4 @@
-﻿package com.ilkay.redmigateway.sms
+package com.ilkay.redmigateway.sms
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -24,11 +24,7 @@ class SmsReceiver : BroadcastReceiver() {
             val sender = messages[0].displayOriginatingAddress ?: "Unknown"
             val timestamp = messages[0].timestampMillis
 
-            val bodyBuilder = StringBuilder()
-            for (msg in messages) {
-                bodyBuilder.append(msg.displayMessageBody)
-            }
-            val fullMessage = bodyBuilder.toString()
+            val fullMessage = reassembleSmsParts(messages.map { it.displayMessageBody.orEmpty() })
 
             Log.i(TAG, "SMS received (${fullMessage.length} characters)")
             CallManager.log("SMS received (${fullMessage.length} characters)")
@@ -51,3 +47,17 @@ class SmsReceiver : BroadcastReceiver() {
         }
     }
 }
+
+/**
+ * Joins the parts of a text message back into one string.
+ *
+ * A message longer than one hundred and sixty characters arrives as several parts, and this is
+ * where they are put back together. Two things about it matter and both would be silent. The
+ * parts must stay in the order they arrived, and nothing may be inserted between them: a space or
+ * a newline added here would corrupt every long message, and the result goes both into the
+ * journal and out to the iPhone.
+ *
+ * A part may legitimately be empty, so an empty list and a list of empty strings are both handled
+ * without special casing.
+ */
+internal fun reassembleSmsParts(parts: List<String>): String = parts.joinToString("")
