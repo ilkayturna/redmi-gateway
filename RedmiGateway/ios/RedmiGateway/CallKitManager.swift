@@ -73,7 +73,13 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         if let template = UIImage(named: "CallKitIcon") {
             config.iconTemplateImageData = template.pngData()
         } else {
-            GatewayConnection.shared.log("CallKit icon asset missing; the call screen will use the default")
+            // GatewayConnection is @MainActor, and this init is reached before super.init().
+            // The hop through Task { @MainActor in } is the pattern already used for onLog a
+            // few lines below, and it is correct whether or not this override inherits the
+            // class's main actor isolation; it cannot be checked here because CI is down.
+            Task { @MainActor in
+                GatewayConnection.shared.log("CallKit icon asset missing; the call screen will use the default")
+            }
         }
         provider = CXProvider(configuration: config)
         super.init()
