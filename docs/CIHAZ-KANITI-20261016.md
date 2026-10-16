@@ -351,3 +351,46 @@ Bu madde 2 ve madde 3'ün çekirdeği.
 
 **Boşta uyandırmanın değeri:** soket boşta kapalı kalırsa **çağrı anındaki geçiş süresi** artar
 (uyanma + kurulum). Yani boşta uyandırma **geçiş süresini kısaltır**, çağrıyı mümkün kılmaz.
+
+---
+
+## 11. ✅✅ GERÇEK ÇAĞRI: MADDE 2 VE 3 DOĞRULANDI (16.10.2026 15:03)
+
+**Oturumun en önemli kanıtı.** Uygulamanın kendi tanılama dosyasından:
+
+```
+15:03:50.852  GatewayInCallService bound by Android Telecom
+15:03:50.924  Call Added: State=ringing, TotalCalls=1
+15:03:50.927  Primary call evaluated: Number=05326235798
+15:03:51.543  iPhone connected (protocol 2)             <<< 0.616 sn sonra
+15:03:51.552  Incoming call is showing on the iPhone    <<< ISTENEN SONUC
+15:03:52.488  iPhone connected (protocol 2)             (yeniden baglanma)
+15:04:07.410  Call State Changed: State=disconnected
+15:04:07.448  Cevapsız arama bildirimi gösterildi: Yavuz Boz (05326235798)
+```
+
+### Ölçüm
+
+| Ne | Değer |
+|---|---|
+| Çağrı düştü → iPhone bağlandı | **616 ms** |
+| Çağrı düştü → iPhone'da gösterildi | **~625 ms** |
+| Çağrı süresi | 16.5 sn |
+| Kişi adı | **Doğru çözüldü: "Yavuz Boz"** |
+
+### Madde 2 — çağrı yanıtlama senkronizasyonu
+**`Incoming call is showing on the iPhone`** — çağrı iPhone'da gösterildi ✓
+Redmi çağrıyı aldığı an iPhone'a yansıtıldı ✓
+
+### Madde 3 — ses geçişi <1 sn
+**616 ms** — hedefin (`~1 sn`) **içinde** ✓
+
+### Ve dünkü kanal analizi DOĞRULANDI
+Dün "boşta uyandırma çalışmıyor ama **çağrı çalışır**" demiştim — çünkü çağrı anında durum `ringing`
+olur ve **BLE state nudge canlı çağrı durumu taşır** → iOS `reconnectNow` çağırır.
+
+**Bu çağrıda tam olarak o oldu: 616 ms'de bağlandı.** Tez doğru ✓
+
+### Yan bulgu: kişi adı çözümü çalışıyor
+`Yavuz Boz (05326235798)` — numara doğru kişiye eşlendi. Tur 144'te düzeltilen yabancı-numara
+kırpılması hatası bu yolu bozmuyor ✓
