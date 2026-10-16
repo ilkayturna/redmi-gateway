@@ -425,7 +425,8 @@ final class CallKitManager: NSObject, CXProviderDelegate {
                 // iOS refuses to start a call from the background; without this line the failure
                 // was silent and the Redmi waited eight seconds for audio that never came.
                 let place = UIApplication.shared.applicationState == .background ? "background" : "foreground"
-                GatewayConnection.shared.log("CallKit refused the pickup in the \(place): \((error as NSError).code)")
+                let code = error.map { ($0 as NSError).code } ?? -1
+                GatewayConnection.shared.log("CallKit refused the pickup in the \(place): \(code)")
             }
         }
     }
