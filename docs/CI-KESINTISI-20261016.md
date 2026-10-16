@@ -45,9 +45,17 @@ Koşumlar **5 saniyede** bitiyor, **0 adım** çalışıyor, **runner atanmıyor
 | GitHub genel kesintisi | `githubstatus.com` | ✅ "All Systems Operational" |
 | Repo arşivlenmiş/kapatılmış | API | `archived=False disabled=False` |
 | Actions kapalı | `actions/permissions` | `enabled=true allowed_actions=all` |
-| İş akışı YAML hatası | Android de aynı şekilde çöküyor | ❌ elendi |
+| İş akışı YAML hatası | PyYAML ile ayrıştırıldı + Android de çöküyor | ❌ elendi |
 | Benim son değişikliğim | Ana dal da çöküyor | ❌ elendi |
 | macOS runner sorunu | Aşağıdaki sağlık kontrolü | ❌ elendi |
+
+**YAML kanıtı (16.10.2026):** üç iş akışı da **PyYAML `safe_load`** ile ayrıştırıldı ve **BOM'suz**:
+```
+[OK] .github\workflows\build-android.yml
+[OK] .github\workflows\build-ios.yml
+[OK] .github\workflows\ci-health.yml
+```
+YAML bozukluğu veya gizli BOM **yok** → iş akışı tanımları sağlam.
 
 ## ✅ KESİN KANIT: Sağlık kontrolü (`ci-health.yml`)
 
