@@ -387,6 +387,33 @@ object CallAudioRelay : CallManager.CallListener {
         handler.post { releaseAll(reason) }
     }
 
+    /**
+     * The control socket died. That is **not** the same thing as the iPhone going away: the call
+     * audio runs on its own UDP socket and keeps arriving while the iOS app reconnects.
+     *
+     * Measured on 16.10.2026 23:21, a 25 second call: six control-socket deaths, and every one of
+     * them pulled the audio back to the Redmi and re-armed it 0.4-2 s later. The user heard the
+     * call "go to the iPhone, come back, go again" while the media never actually stopped.
+     *
+     * So the session is kept while the iPhone's frames are still arriving. Nothing is lost by
+     * waiting: the monitor already takes the call back the moment the media itself stops
+     * ([silenceLimitMs] without a frame, or a stalled path over two windows), which is the honest
+     * signal that the iPhone is really gone.
+     */
+    fun onControlLinkLost(reason: String) {
+        handler.post {
+            val now = SystemClock.elapsedRealtime()
+            val iphoneStillSending = mediaRunning && owner == Owner.IPHONE &&
+                lastIPhonePcmAt != 0L && now - lastIPhonePcmAt < silenceLimitMs
+            if (!iphoneStillSending) {
+                releaseAll(reason)
+                return@post
+            }
+            Log.i(TAG, "Control link lost ($reason) but the iPhone audio is still flowing; keeping the call on the iPhone")
+            CallManager.log("Control link lost; iPhone audio still flowing, keeping it")
+        }
+    }
+
     /** The user chose to continue on the Redmi. The call itself is untouched. */
     fun transferAudioToRedmi() {
         handler.post { releaseAll("manual_redmi") }

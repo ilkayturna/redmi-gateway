@@ -145,7 +145,9 @@ class GatewayWebSocketServer(
         }
         if (audioOwner === conn) {
             audioOwner = null
-            CallAudioRelay.disarm("iphone_disconnected")
+            // The iPhone's control socket blips constantly while its call audio is fine on its own
+            // UDP path; releasing here pulled a working call back to the Redmi every time.
+            CallAudioRelay.onControlLinkLost("iphone_disconnected")
         }
         if (peer?.authenticated == true) serverListener?.onClientCountChanged(authenticatedCount())
     }
