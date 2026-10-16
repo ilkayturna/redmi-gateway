@@ -55,14 +55,6 @@ final class AudioEngine {
     private var loggedPlaybackDrops = 0
     /// True once voice processing has been configured early, so warm-up never pays for it twice.
     private var voiceProcessingWarmed = false
-    /// Stamps that split the Redmi's firstPcm; see start().
-    private var engineStartRequestedAt = Date()
-    private var firstCaptureLogged = false
-    private var firstSendLogged = false
-    /// The generation of the local engine waiting for its network half, and whether it has one.
-    private var localGeneration: UInt64 = 0
-    private var attached = false
-    private var earlyStartToken = 0
     /// Repeat every uplink frame in the next packet; see setUplinkRedundancy.
     private var uplinkRedundancy = false
     private var lastSentPcm: Data?
@@ -87,8 +79,6 @@ final class AudioEngine {
     private var lastRecoveryRequest = Date.distantPast
     private(set) var isSessionPrepared = false
     var isRunning: Bool { running }
-    /// True once the socket half is running. A local engine built by `startLocal` still needs it.
-    var isAttached: Bool { attached }
 
     private init() {
         engine.attach(player)
@@ -212,35 +202,18 @@ final class AudioEngine {
 
     /// Called after CallKit activated the audio session and the Redmi answered audio_start.
     func start(host: String, port: UInt16, session: UInt32, key: Data) {
-        guard startLocal(early: false) else { return }
-        attachNetwork(host: host, port: port, session: session, key: key)
-    }
-
-    /// Builds and starts the audio graph with no network at all.
-    ///
-    /// A transfer calls this before `audio_start`, so the Redmi's clock starts when the graph is
-    /// already running instead of while it is being built: the engine build used to sit between the
-    /// arm and the first frame, overlapping with nothing at all. Until `attachNetwork` runs the
-    /// timers do not exist and `sendPcm` has no sealer, so an early engine stays completely silent.
-    /// `early` also starts a bounded wait, so an engine that is never attached lets go of the
-    /// microphone instead of holding it open.
-    @discardableResult
-    func startLocal(early: Bool = true) -> Bool {
         stop(preservingControls: true)
         guard microphoneAllowed else {
             log("Microphone permission missing")
-            return false
+            return
         }
-        // The Redmi measures firstPcm from the moment it arms the relay, so these stamps add up to
-        // that number and say where the time went.
-        let startRequestedAt = Date()
-        engineStartRequestedAt = startRequestedAt
-        firstCaptureLogged = false
-        firstSendLogged = false
+        guard !host.isEmpty, session != 0, key.count == BridgeCrypto.keyBytes,
+              let endpointPort = NWEndpoint.Port(rawValue: port) else {
+            log("Invalid audio endpoint")
+            return
+        }
         captureLock.lock()
         let generation = capturePacer.generation
-        // The Redmi is waiting for frames right now; do not hold the first one back for a reserve.
-        capturePacer.beginImmediately()
         captureLock.unlock()
         do {
             let input = engine.inputNode
@@ -256,7 +229,7 @@ final class AudioEngine {
                                                  channels: 1, interleaved: false),
                   let converter = AVAudioConverter(from: inputFormat, to: monoFormat) else {
                 log("Audio format unavailable")
-                return false
+                return
             }
             if inputFormat.channelCount > 1 { converter.channelMap = [0 as NSNumber] }
             engine.connect(player, to: engine.mainMixerNode, format: monoFormat)
@@ -300,58 +273,21 @@ final class AudioEngine {
                 }
                 self.enqueueCapture(frames, capturedAt: capturedAt - Double(pending.count) / self.sampleRate,
                                     generation: generation, captureMute: captureMute)
-                if !frames.isEmpty, !self.firstCaptureLogged {
-                    self.firstCaptureLogged = true
-                    let ms = Int(Date().timeIntervalSince(startRequestedAt) * 1000)
-                    self.log("Audio path: firstCapture=\(ms) ms after start request")
-                }
             }
             tapInstalled = true
             engine.prepare()
             let startBegan = Date()
             try engine.start()
             let startMs = Int(Date().timeIntervalSince(startBegan) * 1000)
+            player.play()
             running = true
-            let localMs = Int(Date().timeIntervalSince(startRequestedAt) * 1000)
-            log("Audio engine: vp=\(vpMs) ms start=\(startMs) ms localReady=\(localMs) ms")
+            log("Audio engine: vp=\(vpMs) ms start=\(startMs) ms")
             if isSpeakerEnabled { try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker) }
         } catch {
             log("Audio engine start failed: \(error.localizedDescription)")
             stop()
-            return false
-        }
-        localGeneration = generation
-        attached = false
-        if early {
-            earlyStartToken &+= 1
-            let token = earlyStartToken
-            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-                guard let self, self.earlyStartToken == token, !self.attached else { return }
-                self.log("Early audio start was never attached; engine stopped")
-                self.stop()
-            }
-        }
-        return true
-    }
-
-    /// The network half: sealer, socket, timers, and the downlink.
-    func attachNetwork(host: String, port: UInt16, session: UInt32, key: Data) {
-        guard running, !attached else { return }
-        guard !host.isEmpty, session != 0, key.count == BridgeCrypto.keyBytes,
-              let endpointPort = NWEndpoint.Port(rawValue: port) else {
-            log("Invalid audio endpoint")
             return
         }
-        attached = true
-        let generation = localGeneration
-        // Speech captured before the switch belongs to the Redmi's side of the call, so it is not
-        // replayed into the new stream; the first frame after the switch still leaves at once.
-        captureLock.lock()
-        capturePacer.discardPending()
-        capturePacer.beginImmediately()
-        captureLock.unlock()
-        // The downlink starts with the link, never before it.
-        player.play()
 
         networkQueue.async { [weak self] in
             guard let self else { return }
@@ -456,9 +392,6 @@ final class AudioEngine {
             try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.none)
         }
         isInterrupted = false
-        // A local engine that was started early and never attached is torn down here too.
-        attached = false
-        earlyStartToken &+= 1
         if tapInstalled {
             engine.inputNode.removeTap(onBus: 0)
             tapInstalled = false
@@ -523,10 +456,6 @@ final class AudioEngine {
         if !firstPcmLogged, let startedAt = engineStartedAt {
             firstPcmLogged = true
             log("Audio path: firstPcmOut=\(Int(Date().timeIntervalSince(startedAt) * 1000)) ms after start")
-        }
-        if !firstSendLogged {
-            firstSendLogged = true
-            log("Audio path: firstSend=\(Int(Date().timeIntervalSince(engineStartRequestedAt) * 1000)) ms after start request")
         }
         var pcm = Data(capacity: samples.count * 2)
         let muted = isMuted

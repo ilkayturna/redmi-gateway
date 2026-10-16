@@ -15,7 +15,6 @@ struct CallAudioTimingTests {
         schedulerStallDoesNotCatchUp()
         microphoneReprimesAfterStarvation()
         transientEmptyQueueKeepsPacing()
-        immediateStartSkipsTheReserve()
         pacedSpeechHasNoSendGaps()
         reloadedReserveCannotBypassPacing()
         timerCadenceSurvivesHandlerCostAndWakeJitter()
@@ -29,23 +28,7 @@ struct CallAudioTimingTests {
         oldPlaybackCompletionCannotDrainNewStream()
         playbackCapacityStaysBounded()
         if failures != 0 { print("\(failures) audio timing regression(s)"); exit(1) }
-        print("PASS: 17 call audio timing regressions")
-    }
-
-    // Break caught: the first frame of a transfer waits for the three-frame reserve, so the Redmi
-    // sees its firstPcm about 60 ms later than it had to.
-    static func immediateStartSkipsTheReserve() {
-        var pacer = CallAudioPacer<Int>()
-        pacer.beginImmediately()
-        pacer.enqueue([1], capturedAt: 0.02, now: 0.02, generation: pacer.generation)
-        expect(pacer.next(now: 0.02) == 1, "the first frame of a transfer leaves at once")
-        expect(pacer.next(now: 0.02) == nil, "the paced interval still applies after it")
-        pacer.enqueue([2], capturedAt: 0.04, now: 0.04, generation: pacer.generation)
-        expect(pacer.next(now: 0.04) == 2, "the stream keeps its 50 frames per second")
-        // An ordinary stream start still builds the reserve.
-        var plain = CallAudioPacer<Int>()
-        plain.enqueue([9], capturedAt: 0.02, now: 0.02, generation: plain.generation)
-        expect(plain.next(now: 0.02) == nil, "without the transfer hint the reserve is built first")
+        print("PASS: 16 call audio timing regressions")
     }
 
     // Break caught: emitting every frame from one tap callback at the same instant.
