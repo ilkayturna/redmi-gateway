@@ -394,3 +394,62 @@ olur ve **BLE state nudge canlı çağrı durumu taşır** → iOS `reconnectNow
 ### Yan bulgu: kişi adı çözümü çalışıyor
 `Yavuz Boz (05326235798)` — numara doğru kişiye eşlendi. Tur 144'te düzeltilen yabancı-numara
 kırpılması hatası bu yolu bozmuyor ✓
+
+---
+
+## 12. 🔴🔴 SES HİÇ iPHONE'A GEÇMİYOR — her çağrıda (16.10.2026)
+
+**Uygulamanın kendi `AUDIO_OWNER` kayıtları:**
+
+```
+10:56:55  AUDIO_OWNER=PREPARING_IPHONE  reason=waiting_for_iphone_audio
+10:56:56  AUDIO_OWNER=REDMI             reason=iphone_disconnected
+10:56:56  AUDIO_OWNER=PREPARING_IPHONE  reason=waiting_for_iphone_audio
+10:57:04  AUDIO_OWNER=REDMI             reason=iphone_audio_not_ready     <<< 8 sn sonra
+10:57:13  AUDIO_OWNER=REDMI             reason=call_ended
+
+11:48:22  AUDIO_OWNER=PREPARING_IPHONE  reason=waiting_for_iphone_audio
+11:48:31  AUDIO_OWNER=REDMI             reason=iphone_audio_not_ready     <<< 8 sn sonra
+11:48:47  AUDIO_OWNER=REDMI             reason=call_ended
+
+11:52:30  AUDIO_OWNER=PREPARING_IPHONE  reason=waiting_for_iphone_audio
+11:52:38  AUDIO_OWNER=REDMI             reason=iphone_audio_not_ready     <<< 8 sn sonra
+11:54:00  AUDIO_OWNER=REDMI             reason=no_call_audio_timeout
+```
+
+### Desen her çağrıda aynı
+
+1. Redmi sesi iPhone'a devretmek istiyor → **`PREPARING_IPHONE`**
+2. iPhone **8 saniye boyunca ses göndermiyor** → **`iphone_audio_not_ready`**
+3. Ses **Redmi'ye geri düşüyor** → kullanıcı **Redmi'nin kendi sesini** duyuyor
+
+### Sonuçlar
+
+| Madde | Durum |
+|---|---|
+| **3 — ses geçişi <1 sn** | ❌ **BAŞARISIZ** — ses hiç geçmiyor |
+| **4 — cızırtı** | ⚠️ Kullanıcının duyduğu ses **Redmi hoparlöründen**, iPhone'dan değil |
+
+**Bu, kullanıcının *"iPhone'a hiç akmamaya başladı"* şikayetinin DEVAM ETTİĞİNİ gösteriyor.**
+
+### ⚠️ Dürüst sınır — bu henüz "bug" demek değil
+
+**Çağrılar cevaplanmamış olabilir.** `iphone_audio_not_ready`, **çağrı cevaplanmadıysa beklenen
+davranıştır** — cevaplanmayan çağrıda ses akmaz.
+
+15:03'teki çağrı **cevapsızdı** (16.5 sn sonra `Cevapsız arama bildirimi`) ✓
+10:56 / 11:48 / 11:52'deki çağrılar için **cevaplanıp cevaplanmadığı log'da yok** ✗
+
+### Doğrulamak için gereken
+
+**CEVAPLANAN bir çağrı.** Log'da şu sıra görülmeli:
+```
+AUDIO_OWNER=PREPARING_IPHONE reason=waiting_for_iphone_audio
+AUDIO_OWNER=IPHONE                          <<< ses iPhone'a GECTI
+```
+`IPHONE` sahibi **hiç görünmüyor** — bu oturumda ses **bir kez bile** iPhone'a geçmedi ✗
+
+### Not: ses yolu kutsal (AGENTS.md 6.1)
+Bu bulgu **cihaz kanıtı** olarak kaydedildi. **Kod değişikliği YAPILMADI** — çünkü:
+- Cevaplanmış çağrı kanıtı yok
+- Ses yolu 6.1 kapsamında: cihazda gerçek çağrı testi olmadan dokunulmaz
