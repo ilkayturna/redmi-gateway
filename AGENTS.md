@@ -66,6 +66,23 @@ let code = error.map { ($0 as NSError).code } ?? -1   // ✅
 **Boş ID doğrula:** `Select-String -Pattern "\b1024\b"` → 0 sonuç vermeli.
 **Kural:** `swiftc` ile tek dosya derlemesi geçse bile **Xcode derlemesi ayrı doğrulanır.**
 
+### 2.3 Sessiz push (content-available) için `remote-notification` ŞART
+**Hata (16.10.2026):** Uyanma özelliği için `ApnsSender.sendBackground` (Redmi) + `didReceiveRemoteNotification` (iOS) yazıldı, **84+ test geçti, build yeşil oldu** — ama `Info.plist`'teki `UIBackgroundModes` yalnızca `voip`, `audio`, `bluetooth-central` içeriyordu. **`remote-notification` yoktu.**
+Sonuç: iOS push'u **teslim eder ama askıdaki uygulamayı uyandırmaz** → handler hiç çalışmaz → özellik **sessizce ölü**. Ne derleme ne test bunu yakalar.
+
+**KURAL — iOS'ta "push ile uyandırma" özelliği yazdığında ŞU ZİNCİRİN TAMAMINI doğrula:**
+```
+1. Entitlements:      aps-environment = production (TestFlight) | development (debug)
+2. Info.plist:        UIBackgroundModes içinde remote-notification  ← EN SIK ATLANAN
+3. Kod:               application.registerForRemoteNotifications()
+4. Kod:               didRegisterForRemoteNotificationsWithDeviceToken → token'ı karşı tarafa gönder
+5. Kod:               didReceiveRemoteNotification:fetchCompletionHandler:
+6. Gönderen:          apns-push-type: background + apns-priority: 5 + content-available: 1
+7. Token tipi:        sessiz push NORMAL APNs token'ına gider; VoIP token'ında Apple yalnızca
+                      `.voip` topic kabul eder → sessiz push oraya GÖNDERİLEMEZ
+```
+**Genel ders:** Bir özellik "kodda tamam" olabilir ama **platform beyanı** (plist/entitlement/manifest) eksikse ölüdür. Derleme ve test bunu **görmez**. Yeni bir platform yeteneği kullanıyorsan (push, arka plan modu, izin, servis) **beyan dosyalarını ayrıca aç ve oku** — "derlendi" kanıt değildir.
+
 ---
 
 ## 3. DOĞRULAMA DİSİPLİNİ
@@ -103,6 +120,26 @@ Yerel commit yine atılır (kayıt için), ama uzak güncelleme API ile yapılı
 ### 4.2 İki repo senkron
 `redmi-gateway` (ana) + `redmi-gateway-archive` (arşiv/loglar).
 **KURAL:** Her push **ikisine** de yapılır.
+
+### 4.3 `workflow_dispatch` parametrelerini OKUMADAN tetikleme
+**Hata (16.10.2026):** iOS workflow'u `ref` ile tetiklendi, "build 88 çalışıyor" denildi ve kullanıcıdan TestFlight'ta görünmesi beklendi. Ama `build-ios.yml`'de:
+```yaml
+testflight:
+  if: github.event_name == 'workflow_dispatch' && inputs.release == true
+```
+`release=true` verilmediği için **yalnızca `compile` job'u çalıştı**, TestFlight'a **hiçbir şey yüklenmedi**. Ortada "build 88" diye bir şey hiç var olmadı; boşuna beklendi.
+
+**KURAL:** `workflow_dispatch` ile tetiklemeden **önce** workflow dosyasını aç ve `inputs.*` koşullarını oku. Zorunlu girdileri (`required: true`) **eksiksiz** gönder:
+```powershell
+$body = @{ ref = "<branch>"; inputs = @{ release = "true"; promote_build = "" } } | ConvertTo-Json -Depth 4 -Compress
+```
+**TestFlight'a build düşmüyorsa sırayla kontrol et:**
+1. `release=true` gönderildi mi? → `testflight` job'u çalıştı mı (`Sign and upload` = success)
+2. Build numarası ne? → `CFBundleVersion = $GITHUB_RUN_NUMBER` (run numarası, sabit değil)
+3. Sürüm ne? → `CFBundleShortVersionString` (TestFlight'ta **bu sürümün altında** aranır)
+4. Gruba eklendi mi? → `promote_build=<N>` ile `promote_existing` job'unu tetikle
+5. `ITSAppUsesNonExemptEncryption` var mı? → yoksa Apple build'i "Missing Compliance"da tutar
+6. `UIBackgroundModes` / entitlement beyanları → **madde 2.3**
 
 ---
 
