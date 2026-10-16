@@ -84,5 +84,23 @@ Son güncelleme: 15.10.2026
 | 3 | iPhone aynı ağa geçer | Bağlantı kurulur |
 | 4 | Bu sırada çağrı gelir | Kesintisiz taşınır |
 | 5 | Redmi ağdan çıkar (dışarı) | Hotspot yeniden açılır, iPhone bağlı kalır |
-| 6 | iPhone bağlıyken tanıdık ağ görülür | Hotspot kapanmaz (istemci bağlı) |
+| 6 | iPhone bağlıyken tanıdık ağ görülür | Tanıdık ağ menzildeyse hotspot **KAPANIR** — Kural 2 (kota) Kural 3'ten önceliklidir, kullanıcı 15.10.2026'da böyle onayladı. **İstisna:** `wifi_on=0` ise hotspot **KORUNUR** (istasyon ayağa kalkamaz) |
 | 7 | Çağrı sürerken ağ değişimi | Çağrı düşmez |
+
+> **NOT (16.10.2026):** 6. satır eskiden "Hotspot kapanmaz (istemci bağlı)" diyordu; bu,
+> Kural 3 onaylanmadan önceki sürümden kalmıştı ve **Kural 3'ün güncel metniyle çelişiyordu**
+> (bkz. satır 38-41). Kod her zaman doğru davrandı — çelişki yalnızca bu tablodaydı.
+
+---
+
+## BİLİNEN AÇIK (henüz kapatılmadı)
+
+**Yarış penceresi (DÜŞÜK):** `SmartHotspot.tryKnownNetwork` içinde çağrı kontrolü (`if (inCall) return`)
+ile `stopHotspot()` çağrısı arasında milisaniyelik bir pencere var. O pencerede bir çağrı başlarsa
+hotspot, çağrı sürerken kapanabilir. İhlal olasılığı çok düşük (pencere dar) ama **atomik bir
+"çağrı canlı mı" kontrolü** ile sertleştirilebilir. Cihazda test edilmeden değiştirilmemeli —
+ses/çağrı yoluna komşu olduğu için AGENTS.md bölüm 6 kapsamındadır.
+
+**Pil (ÖLÇÜLMEDİ):** Beacon artık çağrı boyunca yanıyor (Kural: `WAKE_MAX_MS = 10 dk`).
+Veri tüketimi **sıfır** (BLE reklamı), ama pil etkisi ölçülmedi. Ölçüm:
+`dumpsys batterystats` UID payı, aynı uzunlukta iki çağrıda (beacon açık / soket açık).
