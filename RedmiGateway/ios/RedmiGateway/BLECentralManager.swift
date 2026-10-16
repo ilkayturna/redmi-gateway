@@ -51,6 +51,8 @@ final class BLECentralManager: NSObject, ObservableObject {
     private var lastStateTime: Int64 = 0
     private var lastStateSeq: Int64 = -1
     private var lastStateReadAt: Date?
+    /// Rebuilds a state frame the Redmi had to split into notification sized chunks.
+    private var stateFrames = BLEFrameAssembler()
 
     private let kGatewayId = "ble_paired_device_id"
     private let kPeripheral = "ble_peripheral_uuid"
@@ -252,6 +254,7 @@ extension BLECentralManager: CBCentralManagerDelegate {
                 self.stateChar = nil
                 self.deviceInfoChar = nil
                 self.controlChar = nil
+                self.stateFrames.reset()
             }
         }
     }
@@ -288,6 +291,8 @@ extension BLECentralManager: CBCentralManagerDelegate {
             self.stateChar = nil
             self.deviceInfoChar = nil
             self.controlChar = nil
+            // Half a frame cannot survive the link it was arriving on.
+            self.stateFrames.reset()
             GatewayConnection.shared.log("Bluetooth disconnected: \((error as NSError?)?.code ?? 0)")
             // A pending connection completes whenever the Redmi is back in range, even suspended.
             if self.gatewayId != nil { central.connect(peripheral, options: nil) } else { self.peripheral = nil }
@@ -341,7 +346,29 @@ extension BLECentralManager: CBPeripheralDelegate {
                     break
                 }
             }
+            // The state characteristic is readable and the control characteristic is writable now,
+            // so tell the Redmi how much room a notification has: it can then send the state whole
+            // instead of in chunks when the link allows it.
+            self.reportNotificationRoom()
         }
+    }
+
+    /// How many bytes fit in one notification on this link (the same `MTU - 3` a write without
+    /// response gets), sent over the sealed control characteristic. An older Redmi does not know
+    /// the `mtu` action and answers `executed=false`; this side ignores that reply, so nothing
+    /// breaks and the Redmi simply keeps fragmenting.
+    private func reportNotificationRoom() {
+        let room = peripheral?.maximumWriteValueLength(for: .withoutResponse) ?? 0
+        guard room > 0, let peripheral, let controlChar,
+              let key = GatewayConnection.shared.pairing?.bleKey else { return }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let seq = max(now, lastControlSeq + 1)
+        let payload: [String: Any] = ["a": "mtu", "v": room, "id": "", "q": seq, "t": now]
+        guard let json = try? JSONSerialization.data(withJSONObject: payload),
+              let sealed = BridgeCrypto.seal(key, json, aad: Self.controlAAD) else { return }
+        lastControlSeq = seq
+        peripheral.writeValue(Data([Self.sealedVersion]) + sealed, for: controlChar, type: .withResponse)
+        GatewayConnection.shared.log("Bluetooth notification room reported: \(room) bytes")
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic,
@@ -363,7 +390,9 @@ extension BLECentralManager: CBPeripheralDelegate {
             self.lastSeenDate = Date()
             switch uuid {
             case RedmiGatewayBLEConstants.charDeviceInfoUUID: self.handleDeviceInfo(data)
-            case RedmiGatewayBLEConstants.charStateUUID: self.handleState(data)
+            case RedmiGatewayBLEConstants.charStateUUID:
+                // The Redmi may send the sealed frame whole or in chunks; the assembler knows which.
+                if let frame = self.stateFrames.push(data) { self.handleState(frame) }
             case RedmiGatewayBLEConstants.charCallControlUUID: self.handleControlReply(data)
             default: break
             }

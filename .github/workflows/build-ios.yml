@@ -35,6 +35,19 @@ jobs:
             RedmiGateway/ios/Tests/CallAudioTimingTests.swift \
             -o "$RUNNER_TEMP/call-audio-timing-tests"
           "$RUNNER_TEMP/call-audio-timing-tests"
+      # The sealed BLE frame is 29 bytes before any payload, so it can never fit the
+      # 20 bytes a default ATT_MTU allows. The Redmi therefore splits it and the
+      # iPhone puts it back together; these tests pin that reassembly, including the
+      # timeout, a missing chunk, an orphan chunk and the single-chunk path a large
+      # MTU uses.
+      - name: Test BLE reassembly
+        shell: bash
+        run: |
+          set -euo pipefail
+          swiftc RedmiGateway/ios/RedmiGateway/BLEReassembly.swift \
+            RedmiGateway/ios/Tests/BLEReassemblyTests.swift \
+            -o "$RUNNER_TEMP/ble-reassembly-tests"
+          "$RUNNER_TEMP/ble-reassembly-tests"
       - name: Build for iOS Simulator
         run: |
           xcodebuild \

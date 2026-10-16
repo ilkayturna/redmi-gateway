@@ -41,6 +41,8 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     private var endpoint: (session: UInt32, port: UInt16, key: Data)?
     private var runningEndpoint: (host: String, session: UInt32, port: UInt16)?
     private var linkLostTask: Task<Void, Never>?
+    /// Background time held while a transfer starts off screen; see beginTransferTask.
+    private var transferTask: UIBackgroundTaskIdentifier = .invalid
     /// Where the audio path for the current call started: the answer tap, or the pickup start.
     /// Every "Audio path:" line is stamped from here, so the iPhone's own numbers can be read
     /// against the Redmi's firstPcm (measured from the moment audio_start arms the relay).
@@ -291,6 +293,8 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         if AudioEngine.shared.isRunning {
             runningEndpoint = (host: host, session: endpoint.session, port: endpoint.port)
             audioPathLog("engine.start() returned (running=true)")
+            // CallKit keeps the app alive while the engine runs; the transfer no longer needs it.
+            endTransferTask()
         } else {
             runningEndpoint = nil
             audioPathLog("engine.start() returned (running=false)")
@@ -305,6 +309,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         audioRequested = false
         audioCallUuid = nil
         audioPathStartedAt = nil
+        endTransferTask()
     }
 
     /// The Redmi took the conversation back (its decision, or the person's on either phone).
@@ -313,6 +318,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         runningEndpoint = nil
         endpoint = nil
         audioRequested = false
+        endTransferTask()
         guard let uuid = audioCallUuid, states[uuid] == "active" else { return }
         if reason == "manual_redmi" {
             // The person took the call on the Redmi; "iPhone'a al" brings it back.
@@ -369,6 +375,14 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         }
         audioPathStartedAt = Date()
         audioPathLog("take on iPhone requested")
+        // The request can arrive more than once (the Redmi repeats it, and the app's own button
+        // sends the same one). A second audio_start re-arms the Redmi's relay and restarts its
+        // readiness window, which the log showed as two "Call audio session armed" 196 ms apart
+        // followed by a failed cutover, so sending it is idempotent here.
+        if audioRequested {
+            audioPathLog("audio already requested; duplicate request ignored")
+            return
+        }
         // One place for the warm-up stamps, so both branches read the same way in the log.
         func warmTheGraph() {
             audioPathLog("warmUp called")
@@ -378,6 +392,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         if let uuid = currentCallUuid {
             audioCallUuid = uuid
             audioRequested = true
+            beginTransferTask()
             connection.sendAudioStart()
             audioPathLog("audio_start sent")
             // After audio_start, never before: the Redmi's arm clock starts with that frame and no
@@ -390,6 +405,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         // warm-up runs while that happens and the Redmi's clock starts only later.
         warmTheGraph()
         AudioEngine.shared.prepareSession()
+        beginTransferTask()
         let uuid = UUID()
         uuidByCallId[call.rawCallId] = uuid
         callIdByUuid[uuid] = call.rawCallId
@@ -402,10 +418,32 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         callController.request(CXTransaction(action: action)) { error in
             guard error != nil else { return }
             Task { @MainActor in
-                CallKitManager.shared.cleanup(uuid)
+                let manager = CallKitManager.shared
+                manager.cleanup(uuid)
+                manager.endTransferTask()
                 GatewayConnection.shared.lastCallError = "Görüşme iPhone'a alınamadı."
+                // iOS refuses to start a call from the background; without this line the failure
+                // was silent and the Redmi waited eight seconds for audio that never came.
+                let place = UIApplication.shared.applicationState == .background ? "background" : "foreground"
+                GatewayConnection.shared.log("CallKit refused the pickup in the \(place): \((error as NSError).code)")
             }
         }
+    }
+
+    /// Background time for a transfer that starts while the app is off screen: CallKit activation
+    /// and the engine start take a few hundred milliseconds that iOS must not cut short.
+    private func beginTransferTask() {
+        guard UIApplication.shared.applicationState != .active, transferTask == .invalid else { return }
+        transferTask = UIApplication.shared.beginBackgroundTask(withName: "take-audio") { [weak self] in
+            Task { @MainActor in self?.endTransferTask() }
+        }
+        GatewayConnection.shared.log("Holding background time for the transfer")
+    }
+
+    private func endTransferTask() {
+        guard transferTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(transferTask)
+        transferTask = .invalid
     }
 
     /// "Redmi'ye aktar": the conversation continues on the Redmi; the iPhone lets go of it.
