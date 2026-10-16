@@ -289,7 +289,14 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         // The engine builds and starts synchronously here; its duration is the biggest single part
         // of the iPhone's firstPcm, so it is measured from the answer tap on both sides.
         audioPathLog("engine start called")
-        AudioEngine.shared.start(host: host, port: endpoint.port, session: endpoint.session, key: endpoint.key)
+        if AudioEngine.shared.isRunning, !AudioEngine.shared.isAttached {
+            // A transfer already built the local graph before audio_start; attaching to it keeps
+            // that build out of the critical path instead of throwing it away and rebuilding.
+            AudioEngine.shared.attachNetwork(host: host, port: endpoint.port,
+                                             session: endpoint.session, key: endpoint.key)
+        } else {
+            AudioEngine.shared.start(host: host, port: endpoint.port, session: endpoint.session, key: endpoint.key)
+        }
         if AudioEngine.shared.isRunning {
             runningEndpoint = (host: host, session: endpoint.session, port: endpoint.port)
             audioPathLog("engine.start() returned (running=true)")
@@ -393,12 +400,19 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             audioCallUuid = uuid
             audioRequested = true
             beginTransferTask()
+            // Build the graph before the Redmi's clock starts. The engine build is the largest part
+            // of firstPcm and it used to run strictly after the arm, overlapping with nothing, so
+            // moving it here shortens what the person actually waits for. The local engine stays
+            // silent until audio_ready arrives (no sealer, no timers, no downlink) and stops itself
+            // if that never comes.
+            warmTheGraph()
+            if audioActivated {
+                audioPathLog("startLocal called")
+                AudioEngine.shared.startLocal()
+                audioPathLog("startLocal returned")
+            }
             connection.sendAudioStart()
             audioPathLog("audio_start sent")
-            // After audio_start, never before: the Redmi's arm clock starts with that frame and no
-            // ring warmed this path, so the cost is real and must land inside firstPcm instead of
-            // being hidden from the measurement by delaying the arm.
-            warmTheGraph()
             return
         }
         // No CallKit call yet: CallKit has to be asked for one and activate it either way, so this
