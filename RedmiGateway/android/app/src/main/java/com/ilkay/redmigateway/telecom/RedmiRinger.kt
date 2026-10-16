@@ -35,9 +35,9 @@ import com.ilkay.redmigateway.service.IPhoneReachability
 object RedmiRinger {
     private const val TAG = "RedmiRinger"
     /** The iPhone is linked, or may be woken by the call beacon: it shows a call within ~1-3 s. */
-    private const val WAIT_NEARBY_MS = 3_000L
+    internal const val WAIT_NEARBY_MS = 3_000L
     /** Only Apple push reaches the iPhone: the push leaves after 1.5 s and takes a moment. */
-    private const val WAIT_PUSH_MS = 5_000L
+    internal const val WAIT_PUSH_MS = 5_000L
 
     private val handler = Handler(Looper.getMainLooper())
     private var callId: String? = null
@@ -62,11 +62,7 @@ object RedmiRinger {
             Log.i(TAG, "Call already shows on the iPhone; Redmi stays quiet")
             return@post
         }
-        val wait = if (!IncomingCallPresenter.quietWhenIPhoneRings) 0L else when (IPhoneReachability.current().level) {
-            IPhoneReachability.Level.UNPAIRED -> 0L
-            IPhoneReachability.Level.PUSH -> WAIT_PUSH_MS
-            else -> WAIT_NEARBY_MS
-        }
+        val wait = ringWaitMs(IncomingCallPresenter.quietWhenIPhoneRings, IPhoneReachability.current().level)
         if (wait == 0L) {
             start(if (!IncomingCallPresenter.quietWhenIPhoneRings) "normal immediate ringing" else "no iPhone to ring")
         } else {
@@ -190,4 +186,31 @@ object RedmiRinger {
             ToneGenerator(AudioManager.STREAM_VOICE_CALL, 80).apply { startTone(ToneGenerator.TONE_SUP_CALL_WAITING) }
         }.getOrNull()
     }
+}
+
+/**
+ * How long the Redmi waits for the iPhone to show an incoming call before ringing here.
+ *
+ * This is the behaviour behind "when one of them answers, the other goes quiet at once", read from
+ * the other end: the Redmi holds its own ringer back so the two phones do not ring over each
+ * other, but it must never hold back so long that a call goes unanswered because the iPhone did
+ * not wake in time.
+ *
+ * The waiting is bounded by how the iPhone can actually be reached. With no pairing there is
+ * nothing to wait for, so it rings at once. With a link the iPhone is there and answers quickly.
+ * With only Apple push it has further to travel, so the wait is longer, and that is the number
+ * that matters when the iPhone is away from home.
+ *
+ * Extracted so it can be asserted on, because the two failure directions are both silent: wait
+ * too long and the call is missed, wait too little and both phones ring at the person.
+ *
+ * @param quietWhenIPhoneRings the user's switch for holding the Redmi's ringer back
+ * @param level how the iPhone can be reached right now
+ * @return milliseconds to wait, zero meaning ring immediately
+ */
+internal fun ringWaitMs(quietWhenIPhoneRings: Boolean, level: IPhoneReachability.Level): Long = when {
+    !quietWhenIPhoneRings -> 0L
+    level == IPhoneReachability.Level.UNPAIRED -> 0L
+    level == IPhoneReachability.Level.PUSH -> RedmiRinger.WAIT_PUSH_MS
+    else -> RedmiRinger.WAIT_NEARBY_MS
 }
