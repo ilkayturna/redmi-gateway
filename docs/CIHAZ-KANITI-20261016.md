@@ -848,3 +848,47 @@ karar `null → TRY_KNOWN_NETWORK` **değiştiği** için yazıldı; sonraki tek
 **Bir log satırı eklerken "bu kaç kez çalışır?" sorusu sorulmalı.** Değerlendirme döngüsü içindeki
 her kayıt, döngü frekansında yazar. Kullanıcının gördüğü yan etki sınıfı (kural 0.2) log için de
 geçerli: **dosya dolup faydalı geçmiş kaybolur.**
+
+---
+
+## 21. ORTAM ÖN KOŞULU + KURULUM SAYACI (16.10.2026 15:55, SALT OKUMA)
+
+**Kural 0.4 uygulandı: bu turda cihaza HİÇBİR ŞEY kurulmadı.**
+
+### 1. Kurulum sayacı — kendi izim
+
+```
+Kurulum sayisi: 26   (dun de 26 idi -> taahhut tutuldu, yeni kurulum YOK)
+```
+
+**Bu sayı bir teşhis aracıdır** (kural 0.4). Bugün 8 kurulum yapılmıştı; ses 00:31-10:33 arası
+6 kez çalıştı, 10:39'daki kurulumdan sonra çalışmadı. **Korelasyon güçlü, mekanizma kanıtlanmadı.**
+
+### 2. Ortam ön koşulu (kural 6.5 adım 1)
+
+| Kontrol | Sonuç |
+|---|---|
+| **ROM tarihi** | `Sat Sep 19 18:31:47 UTC 2026` |
+| **Vendor düzeltmesi uygulanma tarihi** | **27.09.2026** (tur 134'te doğrulandı) |
+| **Sonuç** | Düzeltme **ROM'dan SONRA** uygulanmış → **ROM güncellemesi onu silmemiş** ✓ |
+| `/vendor` içeriği | ❌ **Root yok → okunamıyor.** İçerik doğrulaması **tekrarlanamadı** |
+
+**Dürüst sınır:** Vendor düzeltmesinin hâlâ yerinde olduğunu **bu turda kanıtlayamadım.**
+Tek dayanak: ROM tarihi (19.09), düzeltme tarihinden (27.09) **eski** — yani düzeltmeden sonra
+ROM güncellenmemiş ✓ Bu **çıkarım**, içerik doğrulaması değil.
+
+### 3. Uygulama sağlığı
+
+```
+15:35:47  iPhone connected (protocol 2)
+15:40:47  iPhone connected (protocol 2)
+15:45:47  iPhone connected (protocol 2)
+15:51:59  iPhone connected (protocol 2)
+```
+**iPhone 1-6 dakikada bir bağlanıyor** → uygulama ayakta, ağ yolu çalışıyor ✓
+
+`AUDIO_OWNER` son kaydı **12:02** → **12:02'den beri hiç çağrı gelmemiş** ✗
+
+### 4. Bekleyen
+- **Cevaplanan çağrı** → madde 3 ve 4
+- **Ekran kilidi** (`mDreamingLockscreen=true`) → madde 1
