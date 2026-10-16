@@ -966,9 +966,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         // (the Bluetooth stack keeps it); the iPhone then still listens on the same handle,
         // while this new server instance has no record of its subscription.
         val toAll = characteristic.uuid == BleConstants.CHAR_STATE_UUID || characteristic.uuid == BleConstants.CHAR_DEVICE_INFO_UUID
-        if (characteristic.uuid == BleConstants.CHAR_STATE_UUID) {
-            Log.i(TAG, "BLE call state notified to ${connectedDevices.size} device(s), ${bytes.size} bytes")
-        }
+        var delivered = 0
         for (device in connectedDevices) {
             val subs = subscribedDevices[device]
             if (toAll || subs?.contains(characteristic.uuid) == true) {
@@ -986,12 +984,19 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
                     }
                     continue
                 }
-                try {
-                    gattServer?.notifyCharacteristicChanged(device, characteristic, false)
+                val sent = try {
+                    gattServer?.notifyCharacteristicChanged(device, characteristic, false) == true
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to notify characteristic to ${device.address}: ${e.message}")
+                    false
                 }
+                if (sent) delivered++
             }
+        }
+        // Only a real delivery counts: this line used to be printed before the size check, so a
+        // skipped call-state frame looked like a delivered one in the log.
+        if (characteristic.uuid == BleConstants.CHAR_STATE_UUID) {
+            Log.i(TAG, "BLE call state delivered to $delivered of ${connectedDevices.size} device(s), ${bytes.size} bytes")
         }
     }
 

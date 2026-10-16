@@ -17,6 +17,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.ilkay.redmigateway.audio.CallAudioRelay
 import com.ilkay.redmigateway.ble.BleServerManager
 import com.ilkay.redmigateway.discovery.NsdDiscoveryManager
 import com.ilkay.redmigateway.server.GatewayWebSocketServer
@@ -241,6 +242,8 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
 
     override fun onClientCountChanged(authenticatedCount: Int) {
         IPhoneReachability.changed()
+        // A press the user made while the iPhone was asleep is replayed the moment it is back.
+        if (authenticatedCount > 0) CallAudioRelay.onControlClientAvailable()
     }
 
     /** The ongoing notification: call audio on the iPhone, otherwise how the iPhone is reached. */

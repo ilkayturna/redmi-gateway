@@ -115,13 +115,15 @@ object CallAudioRelay : CallManager.CallListener {
     private const val MONITOR_INTERVAL_MS = 150L
     private const val IPHONE_SILENCE_LIMIT_MS = 1800L
     private const val MIN_FRAMES_PER_SECOND = 38
-    // How much iPhone speech has to arrive before the Redmi's own microphone and earpiece are
-    // muted for it: twelve frames is 240 ms of continuous audio at the rate above, plus the
-    // iPhone's own "I hear the Redmi" flag and the freshness rule. A link that delivered a short
-    // burst and died is still caught after the cutover, where both directions must keep the rate
-    // for a full window and the fallback returns the call to the Redmi.
+    // The iPhone streams within a second of answering. Waiting for a full one second window to
+    // close delayed the cutover by up to 500 ms, so a partial window is read as a rate as soon as
+    // it holds this much speech. The threshold above and the freshness rule are unchanged.
     private const val ARRIVAL_WINDOW_MIN_MS = 240L
     private const val ARRIVAL_WINDOW_MIN_FRAMES = 12
+    /** Rate sampling interval for the gate: at least one monitor tick, so every tick measures. */
+    private const val GATE_SAMPLE_MS = 140L
+    /** How long a "take the audio" press stays valid while the iPhone has no control link. */
+    private const val AUDIO_REQUEST_GRACE_MS = 10_000L
 
     private val lastValidPcm = ByteArray(FRAME_BYTES)
     private val plcBuf = ByteArray(FRAME_BYTES)
@@ -191,6 +193,14 @@ object CallAudioRelay : CallManager.CallListener {
     @Volatile private var lastCutoverReadAt = 0L
     /** True once the one-shot decision is queued for the moment both spans are long enough. */
     @Volatile private var verificationScheduled = false
+    // Gate sampling state, owned by the worker thread: the handover gate measures the rate over
+    // these intervals instead of the average since the iPhone's first frame.
+    private var gateSampleFrames = 0
+    private var gateSampleAt = 0L
+    /** Rate the gate accepted, for the start line in the diagnostics log. */
+    @Volatile private var lastGateRate = 0
+    /** A "take the audio" press that landed while no client was authenticated. */
+    @Volatile private var pendingAudioRequestAt = 0L
     // Sealed sessions only: last time the iPhone reported that it is receiving downlink.
     @Volatile private var lastIPhoneHearingAt = 0L
     private const val FLAG_IPHONE_HEARING = 0x01
@@ -241,6 +251,8 @@ object CallAudioRelay : CallManager.CallListener {
     private val cutoverReads = AtomicInteger()
     private var lastHealthLogAt = 0L
     @Volatile private var maxWriteMs = 0L
+    /** Same measure over one health interval: tells a one-off cutover spike from real blocking. */
+    @Volatile private var windowMaxWriteMs = 0L
     private var windowIPhone = 0
     private var windowWrites = 0
     private var windowPcmWrites = 0
@@ -296,6 +308,9 @@ object CallAudioRelay : CallManager.CallListener {
             "jitterTargetFrames" to queue.targetFrames,
             "jitterTargetMs" to queue.targetFrames * FRAME_MS.toInt(),
             "redundancy" to redundancyCapability(),
+            "pendingAudioRequestMs" to (if (pendingAudioRequestAt == 0L) -1L
+                else SystemClock.elapsedRealtime() - pendingAudioRequestAt),
+            "gateRate" to lastGateRate,
             "firstPcmMs" to (if (firstPcmAt == 0L) -1L else firstPcmAt - armedAt),
             "startMediaMs" to (if (cutoverStartedAt == 0L) -1L else cutoverStartedAt - armedAt),
             "maxWriteMs" to maxWriteMs
@@ -352,6 +367,8 @@ object CallAudioRelay : CallManager.CallListener {
             armedAt = SystemClock.elapsedRealtime()
             firstPcmAt = 0L
             pcmSinceArm.set(0)
+            gateSampleAt = 0L
+            gateSampleFrames = 0
             scheduleMonitor()
         }
         CallManager.log("Call audio session armed")
@@ -371,15 +388,37 @@ object CallAudioRelay : CallManager.CallListener {
     /**
      * Asks the iPhone to take the call audio; it answers with audio_start. The request travels the
      * existing way: every listener (the control socket is one) gets the state with this reason.
+     *
+     * A backgrounded iPhone closes its socket on purpose, so the press usually lands while no
+     * client is authenticated - the user then saw nothing happen at all. The request is kept for
+     * [AUDIO_REQUEST_GRACE_MS] and replayed as soon as a client authenticates again.
      */
     fun requestIPhoneAudio() {
         handler.post {
             if (isLiveCallState(CallManager.currentCallState) && owner == Owner.REDMI) {
                 if (GatewayService.authenticatedClientCount() == 0) {
-                    Log.w(TAG, "No iPhone on the control link; the audio request cannot reach it")
+                    pendingAudioRequestAt = SystemClock.elapsedRealtime()
+                    Log.w(TAG, "No iPhone on the control link; keeping the audio request for $AUDIO_REQUEST_GRACE_MS ms")
                 }
                 for (l in listeners) runCatching { l.onAudioOwnerChanged(Owner.REDMI, "request_iphone_audio") }
             }
+        }
+    }
+
+    /**
+     * A client just authenticated: replay a recent "take the audio" press, so the press the user
+     * made while the iPhone was asleep still moves the call once it comes back.
+     */
+    fun onControlClientAvailable() {
+        handler.post {
+            val askedAt = pendingAudioRequestAt
+            if (askedAt == 0L) return@post
+            pendingAudioRequestAt = 0L
+            if (SystemClock.elapsedRealtime() - askedAt > AUDIO_REQUEST_GRACE_MS) return@post
+            if (!isLiveCallState(CallManager.currentCallState) || owner != Owner.REDMI) return@post
+            Log.i(TAG, "iPhone is back on the control link; sending the kept audio request")
+            CallManager.log("iPhone reconnected; sending the kept audio request")
+            for (l in listeners) runCatching { l.onAudioOwnerChanged(Owner.REDMI, "request_iphone_audio") }
         }
     }
 
@@ -463,11 +502,17 @@ object CallAudioRelay : CallManager.CallListener {
         if (mediaRunning && now - lastHealthLogAt >= 5000L) {
             lastHealthLogAt = now
             val queue = uplinkQueue.snapshot()
+            // The session maximum never recovers from one spike, so the window maximum is what
+            // tells a one-off cutover hiccup (the HAL re-routes when the Redmi is muted) from a
+            // writer that is genuinely blocking.
+            val windowWriteMs = windowMaxWriteMs
+            windowMaxWriteMs = 0
             val health = "RELAY_HEALTH owner=$owner iphone=$windowIPhone/s uplink=$windowWrites/s " +
                 "pcm=$windowPcmWrites/s silence=$windowSilenceWrites/s partial=$windowPartialWrites/s " +
                 "downlink=$windowReads/s queued=${queue.queued} targetFrames=${queue.targetFrames} " +
                 "dropped=${queue.dropped} " +
                 "expired=${queue.expired} underruns=${queue.underruns} maxWriteMs=$maxWriteMs " +
+                "windowMaxWriteMs=$windowWriteMs " +
                 "maxAuthenticatedArrivalGapMs=${queue.maxAuthenticatedArrivalGapMs} " +
                 "maxAuthenticatedArrivalBurstFrames=${queue.maxAuthenticatedArrivalBurstFrames}"
             Log.i(TAG, health)
@@ -490,15 +535,31 @@ object CallAudioRelay : CallManager.CallListener {
                     return
                 }
                 if (!mediaRunning) {
-                    // Timed from the first frame the iPhone sent, never from the one second window
-                    // roll: the roll mixed the silence before the stream started into the rate and
-                    // held the handover back by up to a full window (measured 554 ms).
+                    // The gate reads the *recent* rate, not the average since the first frame: the
+                    // iPhone ramps up (a measured call started at 14 frames per second and reached
+                    // 50), and an average kept the handover waiting 1431 ms while the last second
+                    // already ran at 53. This sampling state belongs to the worker thread.
+                    val framesNow = pcmSinceArm.get()
+                    val sampleMs = if (gateSampleAt == 0L) 0L else now - gateSampleAt
+                    val recentRate = if (sampleMs >= GATE_SAMPLE_MS)
+                        ((framesNow - gateSampleFrames) * 1000L / sampleMs).toInt() else 0
+                    if (sampleMs >= GATE_SAMPLE_MS) {
+                        gateSampleFrames = framesNow
+                        gateSampleAt = now
+                    }
                     val streamMs = if (firstPcmAt == 0L) 0L else now - firstPcmAt
-                    val streamFrames = pcmSinceArm.get()
-                    val streamReady = streamMs >= ARRIVAL_WINDOW_MIN_MS &&
-                        streamFrames >= ARRIVAL_WINDOW_MIN_FRAMES
-                    val streamRate = if (streamMs > 0) (streamFrames * 1000L / streamMs).toInt() else 0
-                    if (live && iphoneFresh && streamReady && streamRate >= MIN_FRAMES_PER_SECOND) {
+                    val ready = CutoverDecision.canStartMedia(
+                        live = live,
+                        iphoneFresh = iphoneFresh,
+                        streamMs = streamMs,
+                        streamFrames = framesNow,
+                        recentRate = recentRate,
+                        minStreamMs = ARRIVAL_WINDOW_MIN_MS,
+                        minFrames = ARRIVAL_WINDOW_MIN_FRAMES,
+                        minFramesPerSecond = MIN_FRAMES_PER_SECOND
+                    )
+                    if (ready) {
+                        lastGateRate = recentRate
                         startMedia()
                     } else if (now - preparingSince > PREPARE_TIMEOUT_MS && live) {
                         releaseMediaAndKeepSession("iphone_audio_not_ready")
@@ -813,7 +874,9 @@ object CallAudioRelay : CallManager.CallListener {
             priority = Thread.MAX_PRIORITY
             start()
         }
-        CallManager.log("Call audio media started; verifying before handing over")
+        CallManager.log("Call audio media started; verifying before handing over " +
+            "(gate=${if (firstPcmAt == 0L) -1 else cutoverStartedAt - firstPcmAt}ms " +
+            "frames=${pcmSinceArm.get()} rate=$lastGateRate/s)")
     }
 
     private fun writeLoop(track: AudioTrack) {
@@ -924,6 +987,7 @@ object CallAudioRelay : CallManager.CallListener {
                 continue
             }
             if (ms > maxWriteMs) maxWriteMs = ms
+            if (ms > windowMaxWriteMs) windowMaxWriteMs = ms
             if (written == bytes) {
                 // Ownership still measures a working sink, while diagnostics distinguish real
                 // received PCM (including naturally silent samples) from substituted silence.

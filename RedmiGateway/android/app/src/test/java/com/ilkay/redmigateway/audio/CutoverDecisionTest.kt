@@ -65,4 +65,50 @@ class CutoverDecisionTest {
         assertFalse(decide(iphoneFresh = false))
         assertFalse(decide(iphoneHearing = false))
     }
+
+    // Catches the average keeping the iPhone's slow start in the denominator: a measured call began
+    // at 14 frames per second, and the handover then waited 1431 ms even though the recent rate had
+    // been 53 frames per second for a while.
+    @Test fun aRampedUpStreamOpensTheAudioPath() {
+        assertTrue(start(streamMs = 1_431, streamFrames = 76, recentRate = 53))
+        assertTrue(start(streamMs = 600, streamFrames = 30, recentRate = 50))
+    }
+
+    // Catches the opposite: a stream that is slow right now must not open the audio path.
+    @Test fun aSlowStreamDoesNotOpenTheAudioPath() {
+        assertFalse(start(recentRate = 14))
+        assertFalse(start(recentRate = 37))
+    }
+
+    // Catches opening the audio path before there is any real evidence.
+    @Test fun tooLittleAudioDoesNotOpenTheAudioPath() {
+        assertFalse(start(streamMs = 200))
+        assertFalse(start(streamFrames = 11))
+        assertFalse(start(live = false))
+        assertFalse(start(iphoneFresh = false))
+    }
+
+    // The start boundary is exactly the configured evidence: 240 ms, 12 frames, 38 frames a second.
+    @Test fun theStartBoundaryIsExactlyTheConfiguredEvidence() {
+        assertTrue(start(streamMs = 240, streamFrames = 12, recentRate = 38))
+        assertFalse(start(streamMs = 239, streamFrames = 12, recentRate = 38))
+        assertFalse(start(streamMs = 240, streamFrames = 11, recentRate = 38))
+    }
+
+    private fun start(
+        live: Boolean = true,
+        iphoneFresh: Boolean = true,
+        streamMs: Long = 600,
+        streamFrames: Int = 30,
+        recentRate: Int = 50
+    ) = CutoverDecision.canStartMedia(
+        live = live,
+        iphoneFresh = iphoneFresh,
+        streamMs = streamMs,
+        streamFrames = streamFrames,
+        recentRate = recentRate,
+        minStreamMs = 240,
+        minFrames = 12,
+        minFramesPerSecond = 38
+    )
 }
