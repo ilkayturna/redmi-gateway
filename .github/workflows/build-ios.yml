@@ -58,8 +58,11 @@ jobs:
         run: |
           set -euo pipefail
           SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+          # The -simulator suffix matters: the simulator SDK ships arm64-apple-ios-simulator
+          # libraries, so a bare arm64-apple-ios15.0 target fails with "unable to load standard
+          # library" before it ever looks at the sources.
           find RedmiGateway/ios/RedmiGateway -name '*.swift' -print0 \
-            | xargs -0 swiftc -typecheck -sdk "$SDK" -target arm64-apple-ios15.0
+            | xargs -0 swiftc -typecheck -sdk "$SDK" -target arm64-apple-ios15.0-simulator
       - name: Build for iOS Simulator
         run: |
           xcodebuild \

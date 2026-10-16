@@ -49,14 +49,6 @@ struct CallAudioPacer<Frame> {
         emptySince = nil
     }
 
-    /// A call transfer must not wait for the reserve: the first frame of that stream leaves as soon
-    /// as one exists, and the paced interval picks up from there. A real starvation still rebuilds
-    /// the reserve, and `reset()` still asks for one on an ordinary stream start.
-    mutating func beginImmediately() {
-        primed = true
-        emptySince = nil
-    }
-
     func nextWakeUp(now: TimeInterval) -> TimeInterval {
         // Empty queues or socket backpressure must not spin on a past deadline.
         if let nextSendAt, nextSendAt > now { return nextSendAt }
