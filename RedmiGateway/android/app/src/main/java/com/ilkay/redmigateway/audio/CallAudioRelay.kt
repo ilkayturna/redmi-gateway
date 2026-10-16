@@ -107,11 +107,13 @@ object CallAudioRelay : CallManager.CallListener {
     private const val MONITOR_INTERVAL_MS = 150L
     private const val IPHONE_SILENCE_LIMIT_MS = 1800L
     private const val MIN_FRAMES_PER_SECOND = 38
-    // The iPhone streams within a second of answering. Waiting for a full one second window to
-    // close delayed the cutover by up to 500 ms, so a partial window is read as a rate as soon as
-    // it holds this much speech. The threshold above and the freshness rule are unchanged.
-    private const val ARRIVAL_WINDOW_MIN_MS = 400L
-    private const val ARRIVAL_WINDOW_MIN_FRAMES = 18
+    // How much iPhone speech has to arrive before the Redmi's own microphone and earpiece are
+    // muted for it: twelve frames is 240 ms of continuous audio at the rate above, plus the
+    // iPhone's own "I hear the Redmi" flag and the freshness rule. A link that delivered a short
+    // burst and died is still caught after the cutover, where both directions must keep the rate
+    // for a full window and the fallback returns the call to the Redmi.
+    private const val ARRIVAL_WINDOW_MIN_MS = 240L
+    private const val ARRIVAL_WINDOW_MIN_FRAMES = 12
 
     private val lastValidPcm = ByteArray(FRAME_BYTES)
     private val plcBuf = ByteArray(FRAME_BYTES)
