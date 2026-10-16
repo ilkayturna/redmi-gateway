@@ -62,6 +62,16 @@ object CallWakePush {
         pendingCallId = null
     }
 
+    /**
+     * The silent push body. Only what the app needs to react: no number, no name.
+     *
+     * Extracted so it can be asserted on. The claim that this carries no personal data is part
+     * of the data-protection promise to the user, and while the body was built inline nothing
+     * stopped someone adding the caller's number to it and no test would have noticed.
+     */
+    internal fun wakePayload(callId: String): JSONObject =
+        JSONObject().put("a", "wake").put("callId", callId.take(64))
+
     private fun sendIfDue() {
         val callId = pendingCallId ?: return
         if (GatewayService.authenticatedClientCount() > 0) {
@@ -69,8 +79,7 @@ object CallWakePush {
             return
         }
         if (!throttle.onTick(callId, SystemClock.elapsedRealtime())) return
-        // Only what the app needs to react: no number, no name.
-        val payload = JSONObject().put("a", "wake").put("callId", callId.take(64))
+        val payload = wakePayload(callId)
         val started = ApnsSender.sendBackground(payload) { problem ->
             if (problem != null) Log.w(TAG, "Silent wake push: $problem")
         }
