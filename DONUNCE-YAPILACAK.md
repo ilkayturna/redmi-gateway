@@ -1,6 +1,48 @@
 # DÖNÜNCE NE YAPILACAK — tek sayfa
 
-**Hazırlanma tarihi:** 16.10.2026 · **Uzak HEAD:** `ccb7839` (ana) / `d11c30b` (arşiv)
+**Hazırlanma tarihi:** 16.10.2026 · **Ana dal:** `ea009ed` · **v2 dalı:** `f235071`
+
+---
+
+## 0. 🚨 İLK BAKILACAK: VENDOR SES DÜZELTMESİ
+
+**Ses hiç akmıyorsa, sebebi bu olabilir — koddan ÖNCE bunu kontrol et.**
+
+Redmi'nin `/vendor` ses yapılandırması, **SIM slot 2** için `USECASE_INCALL_MUSIC_UPLINK2`'yi
+eşlemiyor; her yazma `pcm_prepare` hatası veriyor ve HAL stream'i **saniyede ~14 kez** yeniden
+başlatıyor → eski **"helikopter" sesi** (= kullanıcının "cızırtı" dediği şey) ve
+**bu düzeltme olmadan iPhone sesi HİÇ çalışmaz.**
+
+**ROM güncellemesi `/vendor`'u değiştirirse düzeltme kaybolur.**
+
+### Kontrol (iki yol, biri yeter)
+
+**A) Redmi ekranından:** Ayarlar (sağ üstteki dişli) → **"iPhone ses kanalı (SIM 2)"**
+| Gösterge | Anlamı |
+|---|---|
+| **"Hazır"** | ✅ Düzeltme yerinde |
+| **"Düzeltme yok — iPhone sesi çalışmaz"** | ❌ **Sesin akmamasının sebebi bu** |
+
+**B) Komutla:**
+```
+cd C:\Users\ilkay.turna\source\repos\redmi-gateway\RedmiGateway
+python scripts\device\vendor_audio_fix.py status
+```
+Beklenen: `mixer path fixed: True; platform mapping fixed: True`
+
+**Düzeltme yoksa:**
+```
+python scripts\device\vendor_audio_fix.py apply
+```
+(adb root ister; `/vendor` bu ROM'da yazılabilir. Orijinaller `/vendor/etc/phonebridge-backup/`
+altında saklanır, `revert` ile geri alınır.)
+
+> **Neden bu madde 1. sırada:** Kodda aradığımız sessizlik yolları (motor ayrımı, geç attach)
+> *belirti* olabilir; ama vendor düzeltmesi yoksa **hiçbir kod değişikliği sesi getirmez.**
+> Bu tek kontrol, saatlerce yanlış teşhisi önler.
+>
+> **Kanıt:** `RedmiGateway/docs/AUDIO_ARCHITECTURE.md:30,75` — ölçülmüş kök neden
+> (`pcm_prepare -1` → bozuk, periyodik uplink sesi).
 
 ---
 
@@ -16,6 +58,9 @@
 Sonra **uygulamayı bir kez aç** → alert token kaydı (sessiz push'un ön koşulu).
 Token kaydolmazsa log şunu der:
 `Silent wake push not sent: the iPhone has registered no alert token yet`
+
+Tanılamada üç anahtar: `push.key` (APNs anahtarı), `push.iphoneRegistered` (cihaz token'ı),
+`push.alertsRegistered` (**alert token** — sessiz push'un şartı).
 
 ### Redmi
 İki APK hazır — **önce ASIL olanı kur**:
@@ -33,13 +78,25 @@ adb -s 17df6357 install -r "C:\Users\ilkay.turna\Documents\GitHub\RedmiGateway-A
 
 ## 2. İLK TEST: ses çalışıyor mu?
 
-Bir çağrı yap. **Beklenen:** ses iPhone'a akıyor.
+**Önce madde 0** (vendor düzeltmesi "Hazır" mı). Sonra bir çağrı yap. **Beklenen:** ses iPhone'a akıyor.
 
-**Çalışmazsa** (yedek APK'yı kurmadan önce) şu log satırlarına bak — hangisi varsa kök neden odur:
+**Çalışmazsa sırayla:**
+
+**a) Vendor düzeltmesi yerinde mi?** (madde 0) — "Düzeltme yok" ise `apply` et, başka hiçbir şeye bakma.
+
+**b) Log'da hangi sessizlik yolu var?**
 - `Early audio start was never attached; engine stopped`
 - `engine.start() returned (running=false)`
 - `Invalid audio endpoint`
 - `Audio path: firstSend=` satırının **YOKLUĞU**
+
+Bunlar **motor ayrımı kaynaklı** yollardır (geri alındı, ama teyit için).
+
+**c) Redmi tarafı:** `GATE_WAIT reason=...` satırı hangi koşulun beklediğini söyler
+(`notLive` / `stale` / `tooShort` / `tooFewFrames` / `rateLow`).
+
+**d) Ses geliyor ama cızırtılı/kesikse:** `RELAY_HEALTH` oku — `silence`, `gap`, `dropped`,
+`maxWriteMs`. Cızırtı + `pcm_prepare` hatası = **vendor düzeltmesi** (madde 0), kod değil.
 
 Bunlar **motor ayrımı kaynaklı** sessizlik yollarıdır (geri alındı, ama teyit için).
 
