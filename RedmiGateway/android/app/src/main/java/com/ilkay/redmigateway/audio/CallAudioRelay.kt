@@ -396,6 +396,9 @@ object CallAudioRelay : CallManager.CallListener {
     fun requestIPhoneAudio() {
         handler.post {
             if (isLiveCallState(CallManager.currentCallState) && owner == Owner.REDMI) {
+                // A sleeping iPhone may refuse the pickup with its screen off, and the region beacon
+                // is what brings the app forward; ask for it while this request is in flight.
+                com.ilkay.redmigateway.ble.BleServerManager.wakeForAudioTransfer()
                 if (GatewayService.authenticatedClientCount() == 0) {
                     pendingAudioRequestAt = SystemClock.elapsedRealtime()
                     Log.w(TAG, "No iPhone on the control link; keeping the audio request for $AUDIO_REQUEST_GRACE_MS ms")

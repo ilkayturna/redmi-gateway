@@ -30,6 +30,7 @@
 		1021 /* VoipPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2022 /* VoipPush.swift */; };
 		1022 /* CallAudioTiming.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2023 /* CallAudioTiming.swift */; };
 		1023 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 2024 /* PrivacyInfo.xcprivacy */; };
+		1024 /* BLEReassembly.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2025 /* BLEReassembly.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -58,6 +59,7 @@
 		2022 /* VoipPush.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoipPush.swift; sourceTree = "<group>"; };
 		2023 /* CallAudioTiming.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallAudioTiming.swift; sourceTree = "<group>"; };
 		2024 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		2025 /* BLEReassembly.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEReassembly.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -105,6 +107,7 @@
 				2021 /* Notifier.swift */,
 				2022 /* VoipPush.swift */,
 				2023 /* CallAudioTiming.swift */,
+				2025 /* BLEReassembly.swift */,
 				2024 /* PrivacyInfo.xcprivacy */,
 				2009 /* Info.plist */,
 			);
@@ -217,6 +220,7 @@
 				1020 /* Notifier.swift in Sources */,
 				1021 /* VoipPush.swift in Sources */,
 				1022 /* CallAudioTiming.swift in Sources */,
+				1024 /* BLEReassembly.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

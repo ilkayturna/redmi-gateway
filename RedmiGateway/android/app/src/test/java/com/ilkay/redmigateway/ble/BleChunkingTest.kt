@@ -7,6 +7,34 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class BleChunkingTest {
+    // Catches a mid sized room producing chunks the receiver reads as whole frames: it tells the
+    // two apart by length alone (a sealed frame is at least 29 bytes), so a chunk must never exceed
+    // the receiver's chunk ceiling even when the link would allow more. Without this the state
+    // frame would silently never reassemble - and the log would still claim it was chunked.
+    @Test fun aMidSizedRoomStillProducesReceiverSizedChunks() {
+        val original = frame(110)
+        val chunks = BleChunking.split(original, room = 50)!!
+        assertTrue(chunks.all { it.size <= BleChunking.MAX_CHUNK_BYTES })
+        assertEquals(7, chunks.size)
+        val rebuilt = ByteArray(110)
+        var offset = 0
+        for (chunk in chunks) {
+            val payload = chunk.size - BleChunking.HEADER_BYTES
+            System.arraycopy(chunk, BleChunking.HEADER_BYTES, rebuilt, offset, payload)
+            offset += payload
+        }
+        assertArrayEquals(original, rebuilt)
+        assertEquals(110, offset)
+    }
+
+    // The chunk ceiling holds for every room, including one that would have held the whole frame:
+    // the caller sends that case whole, and the rule stays unconditional.
+    @Test fun theChunkCeilingHoldsForEveryRoom() {
+        assertTrue(BleChunking.split(frame(110), room = 182)!!.all { it.size <= BleChunking.MAX_CHUNK_BYTES })
+        assertTrue(BleChunking.split(frame(400), room = 512)!!.all { it.size <= BleChunking.MAX_CHUNK_BYTES })
+        assertTrue(BleChunking.split(frame(110), room = 21)!!.all { it.size <= BleChunking.MAX_CHUNK_BYTES })
+    }
+
     private fun frame(size: Int) = ByteArray(size) { (it and 0xFF).toByte() }
 
     // Catches a chunk larger than the notification: the receiver would drop the whole frame.
@@ -47,7 +75,8 @@ class BleChunkingTest {
         val chunks = BleChunking.split(frame(40), room = 20)!!
         chunks.dropLast(1).forEach { assertEquals(0, it[1].toInt() and BleChunking.FINAL_FLAG) }
         assertEquals(BleChunking.FINAL_FLAG, chunks.last()[1].toInt() and 0xFF)
-        assertEquals(0, chunks.last()[0].toInt() and 0xFF)
+        // Three chunks for forty bytes, so the last one carries sequence number two.
+        assertEquals(2, chunks.last()[0].toInt() and 0xFF)
     }
 
     // Catches a sequence number that does not start at zero or does not advance per chunk.
