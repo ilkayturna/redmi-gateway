@@ -91,16 +91,22 @@ Tanılamada üç anahtar: `push.key` (APNs anahtarı), `push.iphoneRegistered` (
 `push.alertsRegistered` (**alert token** — sessiz push'un şartı).
 
 ### Redmi
-İki APK hazır — **önce ASIL olanı kur**:
+Üç APK hazır — **önce yıldızlı olanı kur**:
 
 | Dosya | Test | Ne var | Ne zaman |
 |---|---|---|---|
-| **`apk\app-debug-LINT-FIXES.apk`** | 86 test | Uyanma + kapı tanılaması + 2 API çökme düzeltmesi | **⭐ Önce bunu kur** |
+| **`apk\app-debug-LINT-FIXES.apk`** | 86 test | Uyanma + kapı tanılaması + **2 API çökme düzeltmesi** | **⭐ Önce bunu kur** |
+| `apk\app-debug-GATE-LOGGING.apk` | 86 test | Uyanma + kapı tanılaması | Lint düzeltmeleri istenmiyorsa |
 | `apk\app-debug-GATE-REVERTED.apk` | 84 test | Uyanma, kapı değişikliği YOK | Ses yine çalışmazsa yedek |
 
+**Üçünde de uyanma özelliği var.** Android 16'da **üçü de aynı davranır** — lint düzeltmeleri
+yalnızca API 26-28'de tetiklenen çökmeleri kapatır, yani **LINT-FIXES'ın dezavantajı yok.**
+
 ```
-adb -s 17df6357 install -r "C:\Users\ilkay.turna\Documents\GitHub\RedmiGateway-Archive\apk\app-debug-GATE-LOGGING.apk"
+adb -s 17df6357 install -r "C:\Users\ilkay.turna\Documents\GitHub\RedmiGateway-Archive\apk\app-debug-LINT-FIXES.apk"
 ```
+
+Detaylı karşılaştırma ve hash'ler: `artifacts\README.md` (repoda `docs\APK-ARSIVI.md`).
 
 ---
 
