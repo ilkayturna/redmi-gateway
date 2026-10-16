@@ -95,7 +95,7 @@ Tanılamada üç anahtar: `push.key` (APNs anahtarı), `push.iphoneRegistered` (
 
 | Dosya | Test | Ne var | Ne zaman |
 |---|---|---|---|
-| `apk\app-debug-GATE-LOGGING.apk` | 86 test | Uyanma + `GATE_WAIT` tanılaması | **Önce bunu kur** |
+| **`apk\app-debug-LINT-FIXES.apk`** | 86 test | Uyanma + kapı tanılaması + 2 API çökme düzeltmesi | **⭐ Önce bunu kur** |
 | `apk\app-debug-GATE-REVERTED.apk` | 84 test | Uyanma, kapı değişikliği YOK | Ses yine çalışmazsa yedek |
 
 ```
