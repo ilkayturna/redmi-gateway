@@ -69,6 +69,14 @@ class GatewayWebSocketServer(
         @Volatile var channel: SecureChannel? = null
         @Volatile var mediaKey: ByteArray? = null
         @Volatile var lastDialAt = 0L
+        // Recorded so a disconnect can be explained rather than merely noticed. On 16.10.2026 the
+        // real iPhone reconnected five times in forty six seconds and the log said only that it
+        // had connected each time, so the cause could not be told apart: a network change, a
+        // keepalive timeout, the iPhone going to the background and the server dropping it all
+        // look identical without these two numbers.
+        val connectedAt = SystemClock.elapsedRealtime()
+        @Volatile var lastMessageAt = connectedAt
+        @Volatile var authenticatedAt = 0L
     }
 
     private data class Failures(var count: Int, var lockedUntil: Long)
@@ -98,6 +106,7 @@ class GatewayWebSocketServer(
     override fun onOpen(conn: WebSocket, handshake: ClientHandshake?) {
         val peer = Peer(conn)
         peers[conn] = peer
+        Log.i(TAG, "WebSocket opened from ${conn.remoteSocketAddress?.address?.hostAddress ?: "unknown"}")
         val hello = JSONObject()
             .put("type", "hello")
             .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
@@ -114,6 +123,24 @@ class GatewayWebSocketServer(
 
     override fun onClose(conn: WebSocket, code: Int, reason: String?, remote: Boolean) {
         val peer = peers.remove(conn)
+        // Everything needed to tell the five-reconnects-in-forty-six-seconds case apart. `remote`
+        // says whether the iPhone closed the socket or this side did, the code says why, the
+        // session length separates a real drop from a reconnect on purpose, and the gap since the
+        // last message says whether the link went quiet first or died mid-conversation.
+        if (peer != null) {
+            val sessionMs = SystemClock.elapsedRealtime() - peer.connectedAt
+            val sinceLastMessageMs = SystemClock.elapsedRealtime() - peer.lastMessageAt
+            Log.i(
+                TAG,
+                "WebSocket closed code=$code remote=$remote authenticated=${peer.authenticated} " +
+                    "protocol=${peer.protocol} sessionMs=$sessionMs " +
+                    "sinceLastMessageMs=$sinceLastMessageMs " +
+                    "verdict=${classifyClose(peer.authenticated, code, remote, sinceLastMessageMs)} " +
+                    "reason=${reason?.take(120) ?: "none"}"
+            )
+        } else {
+            Log.i(TAG, "WebSocket closed code=$code remote=$remote peer=unknown")
+        }
         if (audioOwner === conn) {
             audioOwner = null
             CallAudioRelay.disarm("iphone_disconnected")
@@ -128,6 +155,7 @@ class GatewayWebSocketServer(
 
     override fun onMessage(conn: WebSocket, message: String) {
         val peer = peers[conn] ?: return
+        peer.lastMessageAt = SystemClock.elapsedRealtime()
         if (message.length > 16_384) return
         val json = try {
             JSONObject(message)
@@ -280,6 +308,7 @@ class GatewayWebSocketServer(
     }
 
     private fun onAuthenticated(peer: Peer) {
+        peer.authenticatedAt = SystemClock.elapsedRealtime()
         CallManager.log("iPhone connected (protocol ${peer.protocol})")
         serverListener?.onClientCountChanged(authenticatedCount())
         val state = CallManager.currentCallState
@@ -593,4 +622,37 @@ class GatewayWebSocketServer(
             Log.e(TAG, "Error stopping server", e)
         }
     }
+}
+
+/**
+ * A one word reading of a closed connection, so the log says something useful at the moment
+ * someone is looking at a phone that claims the iPhone is not connected.
+ *
+ * This exists because on 16.10.2026 the real iPhone reconnected five times in forty six seconds
+ * and every one of those was logged only as a fresh connection. A network change, a keepalive
+ * timeout, the iPhone going to the background and this side dropping the socket all produce the
+ * same silence, so none of them could be ruled out afterwards.
+ *
+ * Kept at file scope, away from the Android dependencies, so it can be asserted on directly.
+ *
+ * @param authenticated whether the peer got through authentication at all
+ * @param code the WebSocket close code
+ * @param remote true when the other side closed the socket rather than this one
+ * @param sinceLastMessageMs how long before the close the last message arrived
+ */
+internal fun classifyClose(
+    authenticated: Boolean,
+    code: Int,
+    remote: Boolean,
+    sinceLastMessageMs: Long,
+): String = when {
+    // Never got past the handshake: look at the pairing and the auth path, not the network.
+    !authenticated -> "auth_never_completed"
+    // The other side said goodbye properly, which is a deliberate reconnect rather than a drop.
+    remote && code == 1000 -> "remote_clean"
+    // Vanished mid-conversation: the link died rather than being closed.
+    sinceLastMessageMs < 3_000 -> "dropped_while_active"
+    // Sat silent for a long time first: suspect a keepalive or an idle timeout.
+    sinceLastMessageMs > 30_000 -> "idle_then_closed"
+    else -> "closed_quiet"
 }
