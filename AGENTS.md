@@ -151,3 +151,51 @@ $body = @{ ref = "<branch>"; inputs = @{ release = "true"; promote_build = "" } 
 4. **Bozmama kanıtı:** değişiklikten sonra korunması gereken metrikleri (silence, dropped, maxWriteMs) tekrar oku.
 5. **Paralel uzman + bağımsız denetçi:** yazma alanları ayrık; denetçi üretim koduna dokunmaz.
 6. **Hata yaptıysan önce buraya yaz**, sonra düzelt — böylece bir daha olmaz.
+
+---
+
+## 6. SÜRÜM DİSİPLİNİ — SES YOLU KUTSALDIR
+
+> Bu bölüm 16.10.2026'da **sesi tamamen kesen** bir regresyondan doğdu. Kullanıcı
+> telefonlarını yanına alıp gitmek zorunda kaldı. Bu, ödenebilecek en pahalı bedel.
+
+### 6.1 Ses yoluna dokunan değişiklik, cihazda GERÇEK ÇAĞRI testi olmadan gönderilmez
+**Hata (16.10.2026):** `firstPcm` gecikmesini düzeltmek için motor ayrımı
+(`startLocal` / `attachNetwork`) yapıldı. 84+ test geçti, CI yeşil oldu, TestFlight'a gitti
+— **ve ses tamamen kesildi** (*"iPhone'a hiç akmamaya başladı"*).
+Bağımsız denetçi diff'ten **4 sessizlik yolu** buldu. En güçlüsü:
+`startLocal` içindeki **4 saniyelik zamanlayıcı** motoru durduruyor → sonra gelen
+`attachNetwork`, **sessiz** bir `guard running, !attached else { return }` içinde düşüyor →
+`audio_start` **arm başına bir kez** geldiği için bir daha denenmiyor → **ses yok**.
+Aktarım 4 sn'yi aşıyor (uyanma 1-3 sn + kurulum + arm gecikmesi), yani yol **deterministik**.
+
+**KURAL — şu dosyalara dokunan her değişiklik:**
+`AudioEngine.swift`, `CallKitManager.swift`, `CallAudioTiming.swift`,
+`CallAudioRelay.kt`, `UplinkJitterBuffer.kt`, `CallGatewayInCallService.kt`
+1. **Derleme + test YETMEZ.** Cihazda **gerçek çağrı** ile denenir.
+2. **Sessiz çıkış yolu bırakma:** `guard ... else { return }` **log basmalı**. Sessiz düşen
+   bir guard, "ses yok"un tek açıklaması olur ve teşhis edilemez.
+3. **Kendini durduran zamanlayıcı yasak:** bir kaynağı zamanlayıcıyla kapatıp, sonra gelen
+   isteği sessizce reddetmek = kalıcı sessizlik. Kapatma **idempotent ve tekrar denenebilir** olmalı.
+
+### 6.2 Tek build'de tek risk — yoksa regresyon diğerini gizler
+**Hata (aynı gün):** Uyanma düzeltmesi (`remote-notification`) ile ses optimizasyonu
+**aynı build'de** gitti. Ses kesilince *"uyanma çalışıyor mu?"* sorusu **cevapsız kaldı**.
+**KURAL:** Bir build'de **tek davranış değişikliği**. Ses + ağ + UI + uyanma ayrı build'lerde gider.
+
+### 6.3 Geri alma (revert), düzeltmeye çalışmaktan ÖNCE gelir
+**KURAL:** Kullanıcı "çalışmıyor" dediğinde **önce bilinen-çalışan sürüme dön**, sonra teşhis et.
+Kullanıcının cihazı üzerinde hata ayıklanmaz.
+Geri alma **birebir** olmalı ve **bağımsız denetçiyle** doğrulanmalı:
+```
+git diff <bilinen-iyi-commit> <revert-commit> -- <dosyalar>   →  0 satır olmalı
+```
+Ayrıca kaldırılan sembollerin repo genelinde **hiç kalmadığını** grep'le doğrula
+(`startLocal`, `attachNetwork`, `earlyStartToken`, …).
+
+### 6.4 Ölçüm tanımı değişirse "iyileşti" denemez
+**Hata (aynı gün):** `firstPcm` metriği `arm()` anından ölçülüyordu; ayrım `arm()`'ı kurulumun
+**sonrasına** taşıdı → sayı 592 → 40-70 ms "düştü" ama bunun bir kısmı **tanım kayması**.
+**KURAL:** Bir metriğin **ölçüm başlangıcı/noktası** değiştiyse, önce/sonra sayıları
+karşılaştırılamaz. **Kullanıcının hissettiği** uçtan uca metriği (`take on iPhone requested →
+firstSend`) esas al ve **iki metriği birlikte** raporla.
