@@ -43,6 +43,26 @@ jobs:
           chmod +x gradlew
           ./gradlew :app:assembleDebug --console=plain
 
+      # Android lint had never run on this project, and its first run on 16.10.2026 found two
+      # real crashes: setShowWhenLocked called at minSdk 26, and an unguarded RoleManager
+      # reference at API 29. Both are fixed and the backlog is in app/lint-baseline.xml, so
+      # this step fails on anything new rather than on what was already there. Why the baseline
+      # entries are accepted is written down in RedmiGateway/docs/LINT-NOTLARI.md.
+      - name: Android lint
+        working-directory: RedmiGateway/android
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew :app:lintDebug --console=plain
+
+      - name: Upload the lint report when something fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-lint-report
+          path: RedmiGateway/android/app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
+
       - name: Upload the debug APK
         uses: actions/upload-artifact@v4
         with:

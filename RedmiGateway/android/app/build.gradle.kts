@@ -43,6 +43,19 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
+    // Android lint never ran on this project until 16.10.2026, and its first run found two real
+    // crashes: setShowWhenLocked at minSdk 26, and an unguarded RoleManager reference at API 29.
+    // Both are fixed. The baseline records what remains, so the check can run in CI from now on
+    // and fail on anything new rather than on the backlog.
+    //
+    // Most of what the baseline holds is deliberate and documented in docs/LINT-NOTLARI.md:
+    // BleServerManager calls Bluetooth APIs behind a helper lint cannot see through, the three
+    // StaticFieldLeak warnings are intentional singletons, and the wakelock releases are all
+    // guarded by isHeld.
+    lint {
+        baseline = file("lint-baseline.xml")
+        abortOnError = true
+    }
 }
 
 dependencies {
