@@ -92,3 +92,36 @@ Kullanılmayan renk/drawable. Silinebilir; davranışı etkilemez.
    ama `minSdk 26` beyanı durdukça **teorik borç** olarak kalır.
 4. `MissingPermission` altındaki **guard-dalı** sorunu gerçek; cihaz testi geldiğinde
    `BleServerManager` ile birlikte ele alınmalı.
+
+---
+
+## KOTLIN DERLEYICI UYARILARI (16.10.2026 temiz derleme: 32)
+
+Lint'ten ayrı bir katman. Temiz derlemede **32 uyarı**; hepsi incelendi:
+
+| Uyarı | Adet | Karar |
+|---|---|---|
+| **`Condition is always 'true'`** — `BleServerManager.kt:378` | 1 | ✅ **DÜZELTİLDİ** (aşağıda) |
+| `'val state: Int' is deprecated` — `CallManager.kt` | 26 | Bilinçli — aşağıda |
+| `characteristic.value` / `notifyCharacteristicChanged` deprecated | 2 | Bilinçli — API 33 öncesini desteklemek için |
+| `FLAG_SHOW_WHEN_LOCKED` / `FLAG_TURN_SCREEN_ON` deprecated — `CallActivity.kt` | 2 | **Bilinçli** — API 26 yedeği (tur 130'daki çökme düzeltmesi) |
+| `Bundle.get` deprecated — `CallManager.kt:814` | 1 | Bilinçli |
+
+### ✅ Düzeltilen: ölü null kontrolü
+```kotlin
+var responseBytes: ByteArray? = null
+responseBytes = handleCallControlWrite(device, combined)
+if (responseBytes != null) { notifyCharacteristicToSubscribers(...) }   // her zaman true
+```
+`handleCallControlWrite` **her yolda** `controlReply(...)` döndürüyor (reddedilen komutlar dahil) →
+kontrol **ölü kod**, `responseBytes` başka yerde de okunmuyor. Sadeleştirildi.
+**Davranış değişmedi** (koşul zaten hep doğruydu), uyarı kalktı, niyet netleşti.
+
+### Bilinçli: `Call.state` deprecation (26 kullanım)
+`Call.state` API 31'de `Call.Details.state` lehine **deprecated** edildi, **kaldırılmadı**.
+Alternatif (`details?.state`) **API 31+** ister ve sürüm kontrolü ya da `try/catch` gerektirir.
+`minSdk 26` ile 26 çağrı noktasını sarmalamak **çağrı durum makinesini** yeniden yazmak olur;
+bu makine **madde 2'nin (cevaplama senkronu)** kalbi ve AGENTS.md 6.1 ruhu gereği **cihaz
+testi olmadan dokunulmaz.**
+
+**Sonuç:** 26 uyarı **kabul edilmiş teknik borç**; `minSdk` yükseltilirse kendiliğinden kapanır.
