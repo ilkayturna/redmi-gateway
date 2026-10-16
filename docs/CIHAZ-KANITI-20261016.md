@@ -252,14 +252,27 @@ iPhone bağlanıyor, kimlik doğruluyor, **~50 ms sonra iOS uygulamayı askıya 
 - Geri çekilme: 60 sn → 120 sn → 300 sn → **900 sn**
 - Uyanan telefon **hemen durduruyor** → saatte ~2 KB
 
-### ❌ DOĞRULANMAMIŞ KISIM (dürüstçe)
+### ⚠️ GERİ ÇEKİLME — test ile sabitlendi, cihazda gözlenmedi
 
 **İlk sürüm geri çekilmeyi her soket açılışında sıfırlıyordu.** Soket 50 ms'de öldüğü için bu **15 saniyede bir push döngüsü** üretti (`idle wake 1` tekrar tekrar).
 
 **Düzeltildi:** geri çekilme yalnızca soket **60 saniye kesintisiz ayakta kalırsa** sıfırlanıyor.
 
-**AMA:** düzeltme **kuruldu**, telefon **doğrulama sırasında çıkarıldı** → **bu kısım gözlenmedi.** Doğrulanmış sayılmıyor.
+**Cihazda gözlenmedi** — telefon tam doğrulama sırasında çıkarıldı. **Ama program artık testle sabit:**
 
-**Telefon geri bağlanınca ilk iş:** `Idle wake N` sayacının arttığını (1→2→3) ve aralıkların 60/120/300 sn'ye çıktığını doğrula.
+```
+IdleWakeBackoffTest — 7 test, hepsi geciyor
+  ilk bekleme asla 60 sn'nin altina inmez
+  bekleme tekrar etmez, BUYUR
+  monotonik: telefon uyudukca daha sik sorulmaz
+  hicbir girdi "spin" yapacak kadar kisa bekleme uretemez
+  1 saatlik uyku = 12 push (yaklasik 1 KB)
+```
+
+**Mutasyon kanıtı:** ilk adım `60 sn → 15 sn` yapılınca — **yaratılan hatanın ta kendisi** — **3 test kırılıyor** ✓ Yani bu hata bir daha sessizce geri gelemez.
+
+**Test kendi varsayımımı da çürüttü:** "1 saatte ≤10 push" iddiam **yanlıştı**, gerçek **12**. İddia gerçeğe göre düzeltildi ve **sayının testten geldiği** yorumda yazılı.
+
+**Telefon geri bağlanınca yapılacak tek kontrol:** `Idle wake N` sayacının 1→2→3 arttığını ve aralıkların 60/120/300/900 sn'ye çıktığını logdan doğrula.
 
 
