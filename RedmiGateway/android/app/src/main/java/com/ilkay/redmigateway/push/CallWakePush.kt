@@ -60,6 +60,67 @@ object CallWakePush {
     fun onControlLinkUp() {
         handler.removeCallbacks(retry)
         pendingCallId = null
+        // Deliberately does NOT reset the idle backoff. Measured on the device: the iPhone opens
+        // the socket, authenticates, and iOS suspends it again about fifty milliseconds later, so
+        // resetting here turned the idle wake into a push every fifteen seconds. The backoff is
+        // only cleared once a socket has actually stayed up, which noteSocketHealthy does.
+    }
+
+    /**
+     * Called once a control socket has stayed up long enough to count as recovered, so the idle
+     * backoff can start from scratch again.
+     */
+    fun noteSocketHealthy() {
+        if (socketWakeCount > 0) Log.i(TAG, "Socket stayed up after $socketWakeCount idle wake(s)")
+        socketWakeCount = 0
+        socketWakeNotBefore = 0L
+    }
+
+    // ---- Waking a phone that has a Bluetooth link but no socket ----
+    //
+    // Measured on the device on 16.10.2026: the iPhone held its Bluetooth link for minutes while
+    // its control socket was gone, and nothing brought it back. A Bluetooth call-state nudge does
+    // not work either, because iOS only opens the socket for a live call state, so an idle nudge
+    // is read and discarded. The silent push does work: its handler calls wakeFromBeacon()
+    // whatever the call state is, and then waits up to twelve seconds for authentication.
+    //
+    // This does change the data promise at the top of the file, so it is deliberately narrow.
+    // It only runs when the socket is genuinely missing, it only runs when the phone is reachable
+    // over Bluetooth (so this is a sleeping phone rather than one that is away), the body is the
+    // same ninety odd bytes with no number and no name, and the wait grows each time: a minute,
+    // then two, then five, then fifteen. A phone that stays asleep costs a couple of kilobytes an
+    // hour, and a phone that wakes stops it immediately.
+    private var socketWakeCount = 0
+    private var socketWakeNotBefore = 0L
+
+    /**
+     * Ask a Bluetooth-reachable but socket-less iPhone to open its control socket.
+     *
+     * @return true when a push actually went out, so the caller can log what happened rather than
+     *         assume it did.
+     */
+    fun wakeMissingSocket(): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (GatewayService.authenticatedClientCount() > 0) return false
+        if (now < socketWakeNotBefore) return false
+        socketWakeCount++
+        val payload = wakePayload("socket-$socketWakeCount")
+        val started = ApnsSender.sendBackground(payload) { problem ->
+            if (problem != null) Log.w(TAG, "Idle wake push: $problem")
+        }
+        val pause = when {
+            socketWakeCount < 3 -> 60_000L
+            socketWakeCount < 6 -> 120_000L
+            socketWakeCount < 10 -> 300_000L
+            else -> 900_000L
+        }
+        socketWakeNotBefore = now + pause
+        if (started) {
+            Log.i(TAG, "Idle wake push sent (idle wake $socketWakeCount, next in ${pause / 1000}s)")
+        } else {
+            Log.w(TAG, "Idle wake push not sent: the iPhone has registered no alert token yet")
+        }
+        return started
     }
 
     /**

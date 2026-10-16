@@ -59,6 +59,13 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         private const val SWIPED_AWAY_GRACE_MS = 3_000L
         private const val BEACON_MAJORS = 4
         private const val PULSE_MS = 10_000L
+    /** How long to wait before asking a Bluetooth-linked but socket-less iPhone to reconnect. */
+    private const val SOCKET_NUDGE_FIRST_MS = 8_000L
+    /**
+     * How long a socket must stay up before the idle wake backoff is cleared. Below this the
+     * sockets are the fifty millisecond kind that iOS suspends, not a real recovery.
+     */
+    private const val SOCKET_HEALTHY_MS = 60_000L
         /** How long a manual "take the audio" press asks the iPhone to wake. */
         private const val TRANSFER_WAKE_MS = 8_000L
         private val BLE_STATE_AAD = "phonebridge-ble-state".toByteArray(Charsets.UTF_8)
@@ -169,6 +176,24 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
     // itself up. Such a link reaches nobody. A link kept across a restart of this app has no
     // record either way and still counts, because the iPhone keeps listening on the same handle.
     private val stoppedListening = ConcurrentHashMap.newKeySet<BluetoothDevice>()
+
+    // ---- Socket nudge ----
+    //
+    // Measured on the device on 16.10.2026: the iPhone held its Bluetooth link for minutes while
+    // its WebSocket was gone, and the Redmi did nothing about it. iPhoneLinked() counted the
+    // Bluetooth link as "linked", so no reconnect pulse was ever scheduled, and the call state
+    // is only pushed over Bluetooth when it changes, so nothing was sent either. The user sees
+    // "the iPhone is not connected" and has to open the app by hand, which is the exact complaint
+    // this is meant to answer.
+    //
+    // The iOS side already reacts to a Bluetooth call-state notification by calling
+    // reconnectNow(reason: "Bluetooth call state"), so a state frame is all it takes to ask for
+    // the socket back. This resends that frame while the socket is missing.
+    private var socketNudgeScheduled = false
+    private var socketNudges = 0
+    /** When the socket first looked healthy in the current run, or null while it does not. */
+    private var socketHealthySince: Long? = null
+    private val socketNudge = Runnable { socketNudgeScheduled = false; nudgeMissingSocket() }
 
     private fun listeningCentrals() = connectedDevices.count { it !in stoppedListening }
     private val clientLastSeq = ConcurrentHashMap<String, Long>()
@@ -464,6 +489,9 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         restartBleServer()
         com.ilkay.redmigateway.service.IPhoneReachability.addListener(reachabilityListener)
         linkChanged()
+        // A restart is a common way to end up with a Bluetooth link and no socket, so ask early
+        // rather than waiting for the first periodic check.
+        scheduleSocketNudge(SOCKET_NUDGE_FIRST_MS)
     }
 
     fun updatePort(port: Int) {
@@ -497,6 +525,9 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         mainHandler.removeCallbacks(reconnectPulse)
         pulseScheduled = false
         pulseUntil = 0L
+        mainHandler.removeCallbacks(socketNudge)
+        socketNudgeScheduled = false
+        socketNudges = 0
         stopCallBeacon()
         tearDownGattServerAndAdvertiser()
         Log.i(TAG, "BleServerManager stopped")
@@ -801,6 +832,12 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
                 // A short grace first: Bluetooth restarts and range blips reconnect by themselves.
                 schedulePulse(RECONNECT_GRACE_MS)
             }
+            // The Bluetooth link can be healthy while the socket is gone, in which case neither
+            // the beacon nor the pulse above ever fires because iPhoneLinked() says linked. Ask
+            // over Bluetooth instead, and let the check decide whether there is anything to ask.
+            if (!linked || com.ilkay.redmigateway.service.GatewayService.authenticatedClientCount() == 0) {
+                scheduleSocketNudge(SOCKET_NUDGE_FIRST_MS)
+            }
             syncIdleAdvertising()
         }
     }
@@ -816,6 +853,63 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         val pause = if (reconnectPulses < 10) 3 * 60_000L else 10 * 60_000L
         schedulePulse(PULSE_MS + pause)
         mainHandler.postDelayed({ updateCallBeacon() }, PULSE_MS + 100)
+    }
+
+    private fun scheduleSocketNudge(delayMs: Long) {
+        if (socketNudgeScheduled) return
+        socketNudgeScheduled = true
+        mainHandler.postDelayed(socketNudge, delayMs)
+    }
+
+    /**
+     * The iPhone holds its Bluetooth link but has no socket, so it is reachable and simply asleep
+     * on the wrong half. Push the call state again: iOS treats a Bluetooth call-state notification
+     * as a reason to reconnect, so this is the ask, not a guess.
+     *
+     * Only the socket-missing half is nudged. A phone with no Bluetooth link at all is the beacon's
+     * job, and doing both would wake a phone that is already awake.
+     */
+    private fun nudgeMissingSocket() {
+        if (!shouldBeRunning || PairingStore.pairedClient() == null) return
+        if (listeningCentrals() == 0) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (com.ilkay.redmigateway.service.GatewayService.authenticatedClientCount() > 0) {
+            // A socket is up. Do not treat that as recovery straight away: measured on the device,
+            // the iPhone opens the socket, authenticates, and iOS suspends it about fifty
+            // milliseconds later, so clearing the backoff here produced an idle wake every fifteen
+            // seconds. Only a socket that has stayed up for a minute counts.
+            val since = socketHealthySince ?: now.also { socketHealthySince = it }
+            if (now - since >= SOCKET_HEALTHY_MS) {
+                if (socketNudges > 0) Log.i(TAG, "Socket healthy for ${(now - since) / 1000}s; idle wakes stopping")
+                socketNudges = 0
+                com.ilkay.redmigateway.push.CallWakePush.noteSocketHealthy()
+            }
+            return
+        }
+        socketHealthySince = null
+        val characteristic = charState
+        if (characteristic == null) {
+            Log.i(TAG, "Socket missing but the state characteristic is not ready; not nudging")
+            return
+        }
+        socketNudges++
+        // Never silent: this line is how anyone can tell the nudge is happening at all.
+        Log.i(TAG, "iPhone holds a Bluetooth link but no socket; nudge $socketNudges")
+        notifyCharacteristicToSubscribers(characteristic, buildStateBytes())
+        // The Bluetooth state frame alone does not bring the socket back: iOS only reconnects for a
+        // live call state, so an idle one is read and ignored. The silent push is the channel that
+        // does work, because its handler wakes the link whatever the call state is. Sending both
+        // costs almost nothing extra and covers the case where the Bluetooth path is the one that
+        // is broken.
+        com.ilkay.redmigateway.push.CallWakePush.wakeMissingSocket()
+        // Back off as the count grows so a phone that will not wake is not hammered: every 15
+        // seconds for the first few, then every minute, then every five.
+        val pause = when {
+            socketNudges < 4 -> 15_000L
+            socketNudges < 10 -> 60_000L
+            else -> 5 * 60_000L
+        }
+        scheduleSocketNudge(pause)
     }
 
     private fun startCallBeacon() {
