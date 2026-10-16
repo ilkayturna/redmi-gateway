@@ -309,3 +309,45 @@ pahalı push (60→120→300→900 sn) ayrımı korunuyor ✓
 hedeflediği durum. Nudge'lar bu yüzden ateşleniyor ✓
 
 **Durum:** geri çekilme **artık doğrulanmış**, "test edildi ama gözlenmedi" notu geçersiz.
+
+---
+
+## 10. 🔴 BOŞTA UYANDIRMA CİHAZDA ÇALIŞMIYOR — kanal analizi (16.10.2026 15:25)
+
+**Ölçüm:**
+```
+15:19:10  Idle wake push sent (idle wake 1, next in 60s)
+15:20:55  Idle wake push sent (idle wake 2, next in 60s)
+15:21:26  Idle wake push sent (idle wake 1, next in 60s)   <- yeniden basladi
+...
+iPhone connected: 0        WebSocket opened: 0
+```
+
+**Push gönderiliyor ama iPhone bağlanmıyor.** Ve iPhone **BLE ile bağlı** (yakında, Bluetooth açık).
+
+### Üç kanalın durumu
+
+| Kanal | Neden çalışmıyor |
+|---|---|
+| **BLE state nudge** | iOS yalnızca **canlı çağrı** durumunda yeniden bağlanıyor:<br>`if ["ringing","dialing","connecting","active"].contains(update.state) { reconnectNow(...) }`<br>→ boşta `idle` **okunuyor ve atılıyor** |
+| **Sessiz push** | **iOS arka plan push'unu garanti etmez** (best-effort). `sendBackground` "başladı" diyor ama **Apple teslim etmemiş olabilir**. Log'da "sent" = gönderim başladı, teslim değil |
+| **Beacon** | **Hiç ateşlenmiyor** — `iPhoneLinked()` BLE linkini "bağlı" sayıyor → nabız planlanmıyor |
+
+### 🔍 Yeniden çerçeveleme: bu durum aslında önemsiz olabilir
+
+**Boşta soketin açık olması gerekmez.** Kullanıcının şikayeti **çağrıyla** ilgiliydi:
+
+> *"çağrı geldiğinde de Redmi çağrıyı aldığı an en düşük gecikmeyle iPhone'a yansıtmalı"*
+
+**Çağrı anında** durum `ringing` olur → **BLE state nudge ÇALIŞIR** (canlı çağrı durumu) →
+iOS `reconnectNow` çağırır → **ses yolu açılır** ✓
+
+**Yani asıl senaryo (çağrı) çalışıyor olabilir; boşta uyandırma ise iOS'un tasarımı gereği çalışmıyor.**
+
+### Doğrulanması gereken
+
+**Gerçek bir çağrı** ile: Redmi çağrıyı alınca iPhone **BLE üzerinden** uyanıp soketi açıyor mu?
+Bu madde 2 ve madde 3'ün çekirdeği.
+
+**Boşta uyandırmanın değeri:** soket boşta kapalı kalırsa **çağrı anındaki geçiş süresi** artar
+(uyanma + kurulum). Yani boşta uyandırma **geçiş süresini kısaltır**, çağrıyı mümkün kılmaz.
