@@ -65,6 +65,16 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         config.maximumCallGroups = 2
         config.supportedHandleTypes = [.phoneNumber, .generic]
         config.includesCallsInRecents = true
+        // CallKit draws its own artwork on the incoming call screen unless it is given a
+        // template. Without this the screen shows a generic icon and the call does not look
+        // like it belongs to this app. CallKit masks the image's alpha channel, so the asset
+        // is a white silhouette on a transparent background, not the app icon: the app icon
+        // is fully opaque and would render as a solid square.
+        if let template = UIImage(named: "CallKitIcon") {
+            config.iconTemplateImageData = template.pngData()
+        } else {
+            GatewayConnection.shared.log("CallKit icon asset missing; the call screen will use the default")
+        }
         provider = CXProvider(configuration: config)
         super.init()
         provider.setDelegate(self, queue: DispatchQueue.main)
