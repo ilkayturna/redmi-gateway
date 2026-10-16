@@ -81,18 +81,47 @@ Betik logcat'i yakalar, çağrı sonrası özetler.
 
 ---
 
-## 5. SES GEÇİŞİ TEKRAR DENENİRSE — denetçinin 6 ŞARTI
+## 5. SES GEÇİŞİ v2 — HAZIR, CİHAZ TESTİ BEKLİYOR
 
-Optimizasyon (motor ayrımı) **bu şartlar sağlanmadan gönderilmeyecek**:
+Optimizasyonun düzeltilmiş hâli **izole dalda hazır**: `codex/engine-split-v2` (`f235071` / uzak `369b945b`).
+**Ana dal (`codex/audio-jitter-fix` = build 96) dokunulmadı** — TestFlight sadece oradan gidiyor.
 
-1. **Zamanlayıcıyla kendini durdurma olmasın** — attach **idempotent + tekrar denenebilir**
-2. `player.play()` **attach'e bağlı olmasın** (aşağı yön attach'tan bağımsız başlasın)
-3. Endpoint doğrulaması **grafik kurulmadan ÖNCE**
-4. Erken motoru başlatan kapı ile attach kapısı **aynı** olsun
-5. Karşılaştırılabilir bir `firstPcm` tanımı (tanım kayması olmasın)
-6. **Cihazda gerçek çağrı testi** yapılmadan kullanıcıya gönderilmesin
+### Durum
+| Kontrol | Sonuç |
+|---|---|
+| CI tip denetimi (#100) | ✅ **success** — `Typecheck` ✓ `Build for iOS Simulator` ✓ simülatör açılışı ✓ |
+| v1'i öldüren **M1** | ✅ **KAPANDI** — kendini durduran zamanlayıcı yok; **geç attach grafiği yeniden kuruyor** |
+| M2 (`player.play()`) | ✅ grafikle başlıyor, attach'e bağlı değil |
+| M3 (mikrofon açık kalması) | ✅ **KAPANDI** — 8 sn'lik **log'lu/idempotent bekçi**, kalıcı sessizlik üretmiyor |
+| M4 (kapı uyuşmazlığı) | ✅ tek kapı `engineGateOpen(for:)` |
+| Bağımsız denetim | ✅ **"M3 gerçekten kapandı; yeni sessizlik yolu bulunamadı"** (denetçi kendi Python portunu yazdı: v2 3/3 PASS, v1 mutantı FAIL) |
+| Regresyon | ✅ Android relay/jitter, pacer, DTMF, ack bekçisi, FEC dormant **değişmedi** |
 
-Ayrıca: sessiz `guard ... else { return }` **yasak** — her guard log basmalı.
+### Cihaz testi (bu yapılmadan ana dala ALINMAZ — AGENTS.md 6.1)
+```
+git checkout codex/engine-split-v2
+# TestFlight'a göndermek için release=true ile dispatch et
+```
+**Senaryolar:**
+1. Redmi'den giden çağrı, iPhone **uykuda** → uyanma + ses akışı
+2. iPhone'dan "sesi aktar" → **geçiş süresi ölçümü**
+3. Çağrı sırasında ağ değişimi → ses kopmuyor
+4. **Aktarım 4 sn'yi aşsın** (M1 senaryosu) → ses **yine de akmali**; log'da bekçi satırı görünebilir
+5. Pickup senaryosu → ses akıyor
+6. Bekçi hiç ateşlenmesin (normal akış) → log'da bekçi satırı **olmamalı**
+
+### Ölçülecek üçlü (üçü birlikte gelmezse kazanç kanıtlanmamış sayılır)
+| Metrik | Eski | Hedef |
+|---|---|---|
+| `take on iPhone requested → firstSend` (**asıl**) | ~1000 ms | **≤500 ms** |
+| `localReady` (kritik yolda olduğunun kanıtı) | — | 400-500 ms |
+| `firstPcm` (kısmen tanım kayması — raporla) | 592 ms | 40-80 ms |
+| Toplam geçiş | 2504 ms | **<1000 ms** |
+
+**Korunması gerekenler:** `silence` 0-1/s · `gap` 52 ms · `dropped` 0 · `maxWriteMs` ≤5 · DTMF · ack bekçisi · **FEC dormant**
+
+### Bilinçli sınır (dürüst)
+Pacer dokunuşu (`beginImmediately`, ~60 ms) v2'den **çıkarıldı** — motor ayrımından bağımsız bir değişiklik olduğu için (AGENTS.md 6.2: tek build'de tek risk). Bütçe onsuz da yetiyor: ~140 + 240 + 454 = **~834 ms < 1000**.
 
 ---
 
@@ -107,6 +136,15 @@ Ayrıca: sessiz `guard ... else { return }` **yasak** — her guard log basmalı
 | `afd8ad6` | **GERİ ALMA** — ses bilinen-iyi hâline döndü |
 | `914d090` | CI tip denetimi (tüm kaynakları derler; iki build kırılmasını yakalardı) |
 | `b337126` | AGENTS.md bölüm 6 — sürüm disiplini |
+| `3ee40c2` | `IMMUTABLE_RULES.md` çelişkisi düzeltildi (senaryo 6 ↔ Kural 3) |
+| `3acdd6b` | Değişmez kurallar doğrulaması — **7/7 korunuyor** |
+| `2fa4597` | v2 spec: 4 sessizlik yolu + 6 şart (**v2 dalı**) |
+| `fe565a8` | v2 motor ayrımı (**v2 dalı**) |
+| `5607e3f` | v2 derleme düzeltmesi — pacer dokunuşu kapsam dışı (**v2 dalı**) |
+| `f235071` | v2 mikrofon bekçisi — M3 kapandı (**v2 dalı**) |
+
+> **Dal ayrımı:** `afd8ad6`…`3acdd6b` = **ana dal** (`codex/audio-jitter-fix`, TestFlight).
+> `2fa4597`…`f235071` = **v2 dalı** (`codex/engine-split-v2`, izole, TestFlight'a gitmez).
 
 ---
 
@@ -114,6 +152,8 @@ Ayrıca: sessiz `guard ... else { return }` **yasak** — her guard log basmalı
 
 - `TUR-106-108-SES-REGRESYONU.md` — regresyon + kök neden + denetim
 - `TUR-105-DURUM.md` — uyanma çözümü + bütçe analizi
+- `docs\TUR-109-KURALLAR-DOGRULAMA.md` — 7/7 değişmez kural doğrulaması
+- `docs\ENGINE-SPLIT-V2-SPEC.md` — v2 spec + 6 şart + kabul kriterleri
 - `scripts\run-wake-test.ps1` — ölçüm betiği
 - `scripts\push-both-repos.ps1` — iki repoya push
 - `AI-DERSLERI.md` — kalıcı dersler (AGENTS.md kopyası)
