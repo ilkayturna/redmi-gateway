@@ -990,3 +990,66 @@ startMedia 2023 ms  OLCULEN DEGER
 **Ayırt etmek için:** `AUDIO_STATE_REPEAT` düzeltmesi çağrıda denendiğinde, tekrar **hemen**
 başlıyorsa (1 sn aralıklarla) ve `firstPcm` **düşüyorsa**, ikinci bileşen baskındı — yani
 Redmi tarafında yapılabilecek bir şey var. **Düşmüyorsa** sorun iOS'ta ve **CI şart.**
+
+---
+
+## 24. 🎯🎯 MADDE 3'ÜN DÜZELTMESİ ANDROID TARAFINDA — iOS BUILD GEREKMİYOR (16.10.2026)
+
+**iOS kodu okundu: `GatewayConnection.swift:888-912`**
+
+```swift
+private func handleAudioState(_ audio: AudioStateMessage) {
+    if audio.detail == "request_iphone_audio" {
+        CallKitManager.shared.takeCallOnIPhone()      // <<< MOTOR BURADA BASLIYOR
+        return
+    }
+    switch audio.owner ?? (audio.running ? "iphone" : "redmi") {
+    case "iphone":            audioLocation = .iphone
+    case "preparing_iphone":  audioLocation = .movingToIPhone   // <<< SADECE ARAYUZ BAYRAGI
+    default:                  ...
+    }
+}
+```
+
+### Bulgu
+
+**Redmi `preparing_iphone` gönderdiğinde iPhone HİÇBİR ŞEY başlatmıyor** — yalnızca
+`audioLocation` adlı **arayüz bayrağını** güncelliyor. Ses motoru **yalnızca
+`request_iphone_audio`** detayı gelince çalışıyor (`takeCallOnIPhone()`).
+
+### Akış ve maliyet
+
+| # | Redmi | iPhone |
+|---|---|---|
+| 1 | `preparing_iphone` gönderir | **sadece bayrak** — motor yok |
+| 2 | iPhone'un sesini bekler | — |
+| 3 | `request_iphone_audio` gönderir | **motor ŞİMDİ başlar** |
+| 4 | kapıda bekler (14/s → 52/s) | motor yükseliyor |
+
+**`firstPcm = 592 ms` = iPhone'un motor başlatma süresi** — ve bu süre **istek ne zaman
+gönderilirse o zaman** başlıyor.
+
+### ✅ Düzeltme: `request_iphone_audio`'yu DAHA ERKEN gönder
+
+**Çağrı çalarken (cevaplanmadan önce)** istek gönderilirse, iPhone motoru **cevap anında
+ısınmış** olur → `firstPcm` düşer → `startMedia` düşer → **`<1 sn` hedefi tutulabilir.**
+
+**Bu değişiklik:**
+- **Android tarafında** ✓ — Redmi mesajı ne zaman göndereceğini değiştiriyor
+- **iOS build gerektirmiyor** ✓ — protokol aynı, iPhone eski mesajı aynı şekilde okuyor
+  (yorumda yazılı: *"no new type, no new command and no protocol bump is needed"*)
+- **Ses yoluna dokunuyor** → **AGENTS.md 6.1: cihazda gerçek çağrı doğrulaması ŞART** ✗
+- **Kural 0.4: kullanıcı onayı olmadan cihaza KURULMAZ** ✗
+
+### Neden kapı gevşetmek değil
+Kapıyı gevşetmek (`MIN_FRAMES_PER_SECOND` düşürmek) iPhone **ses vermeden** devir teslim
+demektir → **sessizlik**. Bu, 6.1'in doğduğu hatanın şekli. **Erken istek** ise motoru
+**gerçekten** çalıştırır — ses hazır olur.
+
+### Riskler (kurulumdan önce düşünülecek)
+1. **Çağrı cevaplanmazsa** iPhone motoru gereksiz çalışır → **pil + veri** (0.2)
+2. iPhone'un **mikrofonu** erken açılırsa → **gizlilik**: kullanıcı cevaplamadan dinleme olur mu?
+   → **Bu ciddi bir soru; cevaplanmadan gönderilmemeli.**
+3. İki `request_iphone_audio` → `takeCallOnIPhone()` iki kez → idempotent mi?
+
+**Sonuç: düzeltme net ve Android'de, ama riski 2 (gizlilik) yüzünden tasarım kararı gerekiyor.**
