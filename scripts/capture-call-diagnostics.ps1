@@ -1,4 +1,4 @@
-﻿# Çağrı teşhis kaydı — gerçek çağrı sırasında ölçüm toplar.
+﻿# Çağrı teşhis kaydı - gerçek çağrı sırasında ölçüm toplar.
 # Kullanım: powershell -ExecutionPolicy Bypass -File capture-call-diagnostics.ps1 -Seconds 180
 param(
     [int]$Seconds = 180,
@@ -11,7 +11,7 @@ $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $dir = "$env:USERPROFILE\Documents\GitHub\RedmiGateway-Archive\logs\$Label-$stamp"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Write-Host "Kayit klasoru: $dir"
-Write-Host "Sure: $Seconds sn — SIMDI TEST CAGRISI YAPIN"
+Write-Host "Sure: $Seconds sn - SIMDI TEST CAGRISI YAPIN"
 
 # Wi-Fi / ag baseline
 & $adb -s $Serial shell "cmd wifi status" 2>&1 | Out-File "$dir\wifi-before.txt" -Encoding UTF8

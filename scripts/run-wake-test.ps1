@@ -1,4 +1,4 @@
-# RedmiGateway - TEK KOMUT: on kontrol + cagri olcumu + karar
+﻿# RedmiGateway - TEK KOMUT: on kontrol + cagri olcumu + karar
 #
 # Kullanim:
 #   powershell -ExecutionPolicy Bypass -File run-wake-test.ps1
@@ -190,4 +190,4 @@ Check "Ses akiyor" $(if ($movedHit) { $true } else { $false }) $(if ($movedHit) 
 
 Write-Host ""
 Say "HAM LOG: $raw" DarkGray
-Say "Korunanlar: silence 0-1/s · gap 52 ms · dropped 0 · maxWriteMs <=5 · DTMF · FEC dormant" DarkGray
+Say "Korunanlar: silence 0-1/s | gap 52 ms | dropped 0 | maxWriteMs <=5 | DTMF | FEC dormant" DarkGray
