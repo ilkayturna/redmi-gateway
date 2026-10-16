@@ -110,6 +110,24 @@ adb shell "grep -c 'MY_PACKAGE_REPLACED' <tanilama dosyasi>"
 **Bu sayı bir teşhis aracıdır.** Yüksekse, cihazdaki durum **benim kurulumlarımın** ürünüdür —
 ve "uygulama bozuk" demek yerine **önce kendi izimi** okumam gerekir.
 
+## Ve: kurulum sayısı bir **BERAAT** aracıdır
+
+Kullanıcı *"bozdun mu?"* diye sorduğunda **tartışma değil kanıt** gerekir. Sıra:
+1. **Kendi izini göster:** kurulum sayısı + **son kurulumun saati** (olaydan ne kadar önce).
+2. **Platformun kendi gerekçesini oku:** olayın nedeni çoğu zaman sistem logunda **açıkça** yazılıdır.
+3. Ancak ikisinden sonra uygulamaya bak.
+
+**Örnek (16.10.2026 21:14):** Kullanıcı *"telefon çaldı, sadece cevapsız çağrı bildirimi geldi —
+naptın bozdun mu?"* dedi. Kanıt: kurulum **27**, son kurulum **16:04:40** (olaydan **5 saat 10 dakika
+önce**) ve neden sistemde yazılıydı:
+```
+ImsReasonInfo :: {510 : CODE_USER_TERMINATED_BY_REMOTE, 0, user ends call}
+DisconnectCause [ Code: (MISSED) ... Reason: (INCOMING_MISSED) ]
+```
+Yani **arayan taraf çağrıyı 112 ms'de kapatmıştı**; uygulama doğru davrandı (cevapsız bildirimini de
+o yazdı). **Ders:** "Bozdun mu?" sorusunun cevabı savunma değil, **iki okuma**dır: kendi izin +
+platformun gerekçesi.
+
 ## Genel ders
 **Not almak = düzeltmek değildir.** Kural, **kullanılmadıkça** hiçbir şeyi engellemez.
 Bu yüzden bu bölüm dosyanın **en başında**, kural 0'ın içinde duruyor: her oturumda,

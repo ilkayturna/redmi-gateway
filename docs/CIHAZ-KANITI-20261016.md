@@ -1411,3 +1411,62 @@ bir iPhone ile yeniden üretim gerektiriyor.
 Kurulum **27 → 27**. Bu bölümün tamamı salt okuma ile toplandı. **Not:** ölçüm sırasında cihaz
 USB'den ayrıldı (`adb devices` boş), bu yüzden "iPhone'a ping atılamıyor" gibi ek kontroller
 **yapılamadı** — ve yapılamayan kontrol **kanıt sayılmadı** (kural 3.1).
+
+---
+
+## 35. "Bozdun mu?" — 21:14'teki cevapsız çağrı (16.10.2026, salt okuma)
+
+Kullanıcı: *"telefon çaldı sadece cevapsız çağrı bildirimi geldi, naptın bozdun mu?"*
+
+### 1. Kendi izim (beraatt)
+```
+grep -c 'MY_PACKAGE_REPLACED' call-diagnostics.log   ->  27
+son kurulumlar:  15:32:12  ·  15:33:52  ·  16:04:40
+olay: 21:14:46      -> son kurulumdan 5 saat 10 dakika SONRA
+```
+Bu oturumda cihaza **yazılmadı**: kurulum yok, `am start` yok, ayar değişikliği yok. Yalnızca
+okuma + `screencap` (o geçici dosya da silindi).
+
+### 2. Olayın kendi kaydı — çağrı 112 ms yaşadı
+```
+21:14:46.003  Telecom: Adding new incoming call ... TelephonyConnectionService
+21:14:46.235  Call: Call Added: State=ringing, Number=05355907888     <- uygulama gordu, caliyordu
+21:14:46.347  CallsManager: markCallAsDisconnected: state=RINGING
+              disconnectCause=DisconnectCause [ Code: (MISSED) Reason: (INCOMING_MISSED)
+              ImsReasonInfo :: {510 : CODE_USER_TERMINATED_BY_REMOTE, 0, user ends call} ]
+21:14:46.375  Call: State=disconnected
+21:14:46.403  Call: Cevapsız arama bildirimi gösterildi: 05355907888
+21:14:46.409  CallLogManager: logged callId=TC@81        (call_log: type=3 CEVAPSIZ, duration=0)
+```
+
+**Neden: arayan taraf çağrıyı kendisi kapatmış** (`IMS 510 CODE_USER_TERMINATED_BY_REMOTE`).
+Yani çalma ile kapanma arasında **112 ms** var; uygulamanın yapabileceği hiçbir şey yoktu — ve
+yapması gerekeni yaptı: çağrıyı gördü, çaldı, kapanınca **cevapsız bildirimini** gösterdi.
+
+`handleConnectionServiceDeath` (46.383) kapanıştan **sonra** düşen normal bir unbind kaydıdır;
+sebep değil, sonuçtur. Ayrıntılı arama: `logcat -b events` ve `-b crash` tamponlarında
+**hiç** `am_crash` / `am_proc_died` / FATAL yok.
+
+### 3. Uygulama çalışıyor (aynı dakikalarda)
+```
+21:16:10.081  Initiating outgoing GSM call for: 053***88
+21:16:17.290  Call State Changed: State=active
+21:16:43.613  State=disconnected
+call_log: type=2 (giden), duration=26
+```
+Yani olaydan **1.5 dakika sonra** aynı numaraya giden çağrı kuruldu ve 26 saniye sürdü.
+
+### 4. Ama gerçek bir sorun var: bağlantı hâlâ salınıyor
+```
+dosya 1775 satır · 'iPhone connected (protocol 2)' = 300 satır  (~%17)
+19:08-21:29 arası: dakikada ~1-2 bağlantı, kesintisiz
+```
+Bu **6.9'daki salınımın devamı** ve iki zararı var:
+1. **Aktar/gelen çağrı** anında iPhone bağlı olmayabilir (21:14:47.727'de bağlandı, yani çağrıdan
+   **sonra**; o an çağrı yalnızca 112 ms yaşadığı için sonucu değiştirmezdi).
+2. **Tanılama dosyası bu satırlarla doluyor** — 8.1'deki hatanın aynısı: döngü hızında yazan bir
+   kayıt, gerçek geçmişi itiyor. `iPhone connected` **her bağlanmada** yazılıyor, oysa yazılması
+   gereken şey **geçiş** (bağlıydı → koptu → bağlandı), her yeniden bağlanma değil.
+
+### Kurulum disiplini
+Kurulum **27 → 27**. Bu bölümün tamamı salt okuma.
