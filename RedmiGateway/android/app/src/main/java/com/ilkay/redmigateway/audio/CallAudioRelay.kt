@@ -82,6 +82,14 @@ object CallAudioRelay : CallManager.CallListener {
     private val DOWNLINK_TAG = "DNLK".toByteArray(Charsets.US_ASCII)
     private const val PAYLOAD_KEEPALIVE: Byte = 0
     private const val PAYLOAD_PCM16: Byte = 1
+    /**
+     * A PCM packet that also repeats the previous frame: payload is [previous 640][current 640].
+     * The iPhone only sends it when [redundancyCapability] advertises it, and the copy is dropped
+     * unless the packet it belongs to was actually lost.
+     */
+    private const val PAYLOAD_PCM16_REDUNDANT: Byte = 2
+    /** Frames of reserve the copy needs while redundancy is on: it must arrive before playback. */
+    private const val REDUNDANCY_MIN_DEPTH_FRAMES = 3
     private const val UPLINK_RATE = 48000
     private const val UPLINK_FRAME_BYTES = FRAME_SAMPLES * 3 * 2 * 2 // 48 kHz stereo 16-bit
     private const val UPLINK_BUFFER_FRAMES = 6 // ~120 ms AudioTrack buffer (6 * 20 ms frames)
@@ -121,6 +129,7 @@ object CallAudioRelay : CallManager.CallListener {
     // 12 byte nonce, 640 byte payload, 16 byte tag.
     private val rxHeader = ByteArray(SEALED_HEADER_BYTES)
     private val rxSealedPcm = ByteArray(BridgeCrypto.NONCE_BYTES + FRAME_BYTES + BridgeCrypto.TAG_BYTES)
+    private val rxSealedPcmRedundant = ByteArray(BridgeCrypto.NONCE_BYTES + 2 * FRAME_BYTES + BridgeCrypto.TAG_BYTES)
     private val rxSealedKeepalive = ByteArray(BridgeCrypto.NONCE_BYTES + BridgeCrypto.TAG_BYTES)
     private val txHeader = ByteArray(SEALED_HEADER_BYTES)
     private val txNonce = ByteArray(BridgeCrypto.NONCE_BYTES)
@@ -140,6 +149,8 @@ object CallAudioRelay : CallManager.CallListener {
     @Volatile private var session = 0
     @Volatile private var mediaKey: ByteArray? = null
     @Volatile private var lastRxCounter = 0L
+    /** Counter of the last packet that carried PCM, so a redundant copy is only used when new. */
+    @Volatile private var lastPcmCounter = 0L
     // Downlink packet counter for the whole session: a GCM nonce must never repeat under one key,
     // so it is not reset when media restarts inside the same session.
     private val txCounter = AtomicLong()
@@ -241,6 +252,17 @@ object CallAudioRelay : CallManager.CallListener {
     val isIPhoneOwner: Boolean get() = owner == Owner.IPHONE
     val isStreaming: Boolean get() = mediaRunning
 
+    /**
+     * Off until the receiver is proven in the field: while it is off the gateway advertises 0 and
+     * the iPhone keeps sending one frame per packet. Once on, it is offered to local links only
+     * (hotspot, home Wi-Fi) because the copy doubles the audio bitrate and a mobile data link must
+     * not pay for it - the user's data rule.
+     */
+    @Volatile var redundancyEnabled = false
+
+    /** 1 when this link may carry a repeated frame, 0 otherwise. */
+    fun redundancyCapability(): Int = if (redundancyEnabled && !remoteLink) 1 else 0
+
     fun addListener(listener: Listener) {
         if (!listeners.contains(listener)) listeners.add(listener)
     }
@@ -273,6 +295,7 @@ object CallAudioRelay : CallManager.CallListener {
             "underruns" to queue.underruns,
             "jitterTargetFrames" to queue.targetFrames,
             "jitterTargetMs" to queue.targetFrames * FRAME_MS.toInt(),
+            "redundancy" to redundancyCapability(),
             "firstPcmMs" to (if (firstPcmAt == 0L) -1L else firstPcmAt - armedAt),
             "startMediaMs" to (if (cutoverStartedAt == 0L) -1L else cutoverStartedAt - armedAt),
             "maxWriteMs" to maxWriteMs
@@ -306,6 +329,7 @@ object CallAudioRelay : CallManager.CallListener {
                 session = id
                 mediaKey = sessionMediaKey
                 lastRxCounter = 0L
+                lastPcmCounter = 0L
                 txCounter.set(0L)
                 rejectedPackets.set(0)
                 peer = null
@@ -622,6 +646,7 @@ object CallAudioRelay : CallManager.CallListener {
         // frame, and a collection during a call lands as a late AudioTrack write.
         val header = rxHeader
         val sealedPcm = rxSealedPcm
+        val sealedPcmRedundant = rxSealedPcmRedundant
         val sealedKeepalive = rxSealedKeepalive
         while (!datagram.isClosed) {
             try {
@@ -639,7 +664,8 @@ object CallAudioRelay : CallManager.CallListener {
             if (allowed != null && packet.address != allowed) continue
             val key = mediaKey
             val type: Byte
-            val pcm: ByteArray?
+            val frame: ByteArray?
+            val repeatedFrame: ByteArray?
             if (key != null) {
                 if (packet.length < SEALED_HEADER_BYTES + BridgeCrypto.TAG_BYTES) continue
                 val counter = readCounter(buffer)
@@ -648,6 +674,7 @@ object CallAudioRelay : CallManager.CallListener {
                 val ciphertext = packet.length - SEALED_HEADER_BYTES
                 val sealed = when (ciphertext) {
                     FRAME_BYTES + BridgeCrypto.TAG_BYTES -> sealedPcm
+                    2 * FRAME_BYTES + BridgeCrypto.TAG_BYTES -> sealedPcmRedundant
                     BridgeCrypto.TAG_BYTES -> sealedKeepalive
                     else -> ByteArray(BridgeCrypto.NONCE_BYTES + ciphertext)
                 }
@@ -661,28 +688,57 @@ object CallAudioRelay : CallManager.CallListener {
                 }
                 lastRxCounter = counter
                 if (buffer[9].toInt() and FLAG_IPHONE_HEARING != 0) lastIPhoneHearingAt = SystemClock.elapsedRealtime()
-                pcm = if (type == PAYLOAD_PCM16 && plain.size == FRAME_BYTES) plain else null
+                when {
+                    type == PAYLOAD_PCM16 && plain.size == FRAME_BYTES -> {
+                        frame = plain
+                        repeatedFrame = null
+                        lastPcmCounter = counter
+                    }
+                    type == PAYLOAD_PCM16_REDUNDANT && plain.size == 2 * FRAME_BYTES -> {
+                        // The copy is the frame the previous packet carried. It is only new when
+                        // that packet never arrived; a keepalive carries no frame, so the sender
+                        // omits the copy after one and the counter gap alone means a lost frame.
+                        repeatedFrame = if (counter > lastPcmCounter + 1) plain.copyOfRange(0, FRAME_BYTES) else null
+                        frame = plain.copyOfRange(FRAME_BYTES, 2 * FRAME_BYTES)
+                        lastPcmCounter = counter
+                    }
+                    else -> {
+                        frame = null
+                        repeatedFrame = null
+                    }
+                }
             } else {
                 type = buffer[6]
-                pcm = if (type == PAYLOAD_PCM16 && packet.length - HEADER_BYTES == FRAME_BYTES)
+                frame = if (type == PAYLOAD_PCM16 && packet.length - HEADER_BYTES == FRAME_BYTES)
                     buffer.copyOfRange(HEADER_BYTES, HEADER_BYTES + FRAME_BYTES) else null
+                repeatedFrame = null
             }
-            if (type != PAYLOAD_KEEPALIVE && type != PAYLOAD_PCM16) continue
+            if (type != PAYLOAD_KEEPALIVE && type != PAYLOAD_PCM16 && type != PAYLOAD_PCM16_REDUNDANT) continue
             peer = packet.socketAddress
-            if (pcm == null) continue
+            if (frame == null && repeatedFrame == null) continue
             val receivedAt = SystemClock.elapsedRealtime()
-            lastIPhonePcmAt = receivedAt
-            if (firstPcmAt == 0L) firstPcmAt = receivedAt
-            iphoneFrames.incrementAndGet()
-            val frames = pcmSinceArm.incrementAndGet()
-            if (frames == ARRIVAL_WINDOW_MIN_FRAMES && owner == Owner.PREPARING_IPHONE && !mediaRunning) {
-                // The reserve has just arrived: decide on this frame, not at the next monitor tick.
-                handler.removeCallbacks(decideNow)
-                handler.post(decideNow)
-            }
-            if (!mediaRunning) continue
-            uplinkQueue.offer(pcm, receivedAt, authenticated = key != null)
+            acceptFrame(repeatedFrame, receivedAt, authenticated = key != null)
+            acceptFrame(frame, receivedAt, authenticated = key != null)
         }
+    }
+
+    /**
+     * Counts an arrived frame and queues it for playback. A null frame is a redundant copy whose
+     * original already played, so it is not counted and not queued.
+     */
+    private fun acceptFrame(frame: ByteArray?, receivedAt: Long, authenticated: Boolean) {
+        if (frame == null) return
+        lastIPhonePcmAt = receivedAt
+        if (firstPcmAt == 0L) firstPcmAt = receivedAt
+        iphoneFrames.incrementAndGet()
+        val frames = pcmSinceArm.incrementAndGet()
+        if (frames == ARRIVAL_WINDOW_MIN_FRAMES && owner == Owner.PREPARING_IPHONE && !mediaRunning) {
+            // The reserve has just arrived: decide on this frame, not at the next monitor tick.
+            handler.removeCallbacks(decideNow)
+            handler.post(decideNow)
+        }
+        if (!mediaRunning) return
+        uplinkQueue.offer(frame, receivedAt, authenticated = authenticated)
     }
 
     /** Nonce layout shared with the iPhone: 4 byte direction tag, counter, session id (big endian). */
@@ -731,7 +787,7 @@ object CallAudioRelay : CallManager.CallListener {
         lastIPhoneHearingAt = 0L
         plcConsecutiveFrames = 0
         hasValidPcmHistory = false
-        uplinkQueue.reset(remoteLink)
+        uplinkQueue.reset(remoteLink, if (redundancyCapability() == 1) REDUNDANCY_MIN_DEPTH_FRAMES else 0)
         upsampler.reset()
         maxWriteMs = 0
         mediaRunning = true

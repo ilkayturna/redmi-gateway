@@ -516,7 +516,8 @@ public final class GatewayConnection: ObservableObject {
         case "audio_ready":
             if let ready = decode(AudioReadyMessage.self, data) {
                 CallKitManager.shared.handleAudioReady(session: ready.session, port: ready.port,
-                                                      key: ready.sealed == true ? mediaKey : nil)
+                                                      key: ready.sealed == true ? mediaKey : nil,
+                                                      redundancy: ready.redundancy ?? 0)
             }
         case "audio_state":
             if let audio = decode(AudioStateMessage.self, data) { handleAudioState(audio) }

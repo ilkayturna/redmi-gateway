@@ -10,16 +10,32 @@ struct CallAudioPacer<Frame> {
     private let interval: TimeInterval = 0.02
     private let maximumAge: TimeInterval = 0.32
     private let capacity = 12
+    /// How long the queue may stay empty before the send reserve is rebuilt. The tap produces a
+    /// frame every ~21 ms and the timer takes one every 20 ms, so a healthy queue empties all the
+    /// time; treating that as starvation held every following frame back for 60 ms and then sent a
+    /// clump (measured on the Redmi: burst=5, gap=338 ms, 46.7 frames/s, which drained its 20 ms
+    /// buffer into concealment - the crackle). A real stall still rebuilds the reserve.
+    private let starvation: TimeInterval = 0.03
     private var frames: [Capture] = []
     private var primed = false
+    private var emptySince: TimeInterval?
     private var nextSendAt: TimeInterval?
     private(set) var generation: UInt64 = 0
+    /// Diagnostics: frames the capture produced, and frames this queue threw away before sending.
+    /// A sustained produced/s below 50 is the frame deficit no receiver buffer can hide, and the
+    /// two drop counters say whether backpressure or expiry is eating the speech.
+    private(set) var acceptedFrames = 0
+    private(set) var droppedExpired = 0
+    private(set) var droppedOverflow = 0
 
     mutating func reset() {
         frames.removeAll()
         primed = false
         nextSendAt = nil
         generation &+= 1
+        acceptedFrames = 0
+        droppedExpired = 0
+        droppedOverflow = 0
     }
 
     mutating func discardPending() {
@@ -42,9 +58,15 @@ struct CallAudioPacer<Frame> {
             let timestamp = capturedAt - Double(batch.count - index - 1) * interval
             if now - timestamp <= maximumAge {
                 frames.append(Capture(frame: frame, capturedAt: timestamp))
+                acceptedFrames += 1
+            } else {
+                droppedExpired += 1
             }
         }
-        if frames.count > capacity { frames.removeFirst(frames.count - capacity) }
+        if frames.count > capacity {
+            droppedOverflow += frames.count - capacity
+            frames.removeFirst(frames.count - capacity)
+        }
     }
 
     mutating func next(now: TimeInterval) -> Frame? {
@@ -64,18 +86,19 @@ struct CallAudioPacer<Frame> {
         } else {
             nextSendAt = now + interval
         }
-        if frames.isEmpty {
-            primed = false
-        }
+        // The reserve belongs to the start of a stream, not to every drain. The tap produces a
+        // frame every ~21 ms and the timer takes one every 20 ms, so a healthy queue empties all
+        // the time; re-arming the three-frame reserve there held each following frame back for
+        // 60 ms and then sent a clump. Measured on the Redmi: burst=5, gap=338 ms, 46.7 frames/s,
+        // which drained its 20 ms buffer into concealment - the crackle. Only reset() and
+        // discardPending() un-prime now.
         return frame
     }
 
     private mutating func discardExpired(now: TimeInterval) {
         while let first = frames.first, now - first.capturedAt > maximumAge {
             frames.removeFirst()
-        }
-        if frames.isEmpty {
-            primed = false
+            droppedExpired += 1
         }
     }
 }
@@ -149,7 +172,9 @@ struct CallAudioPlaybackBuffer<Frame> {
     mutating func completed(generation: UInt64) {
         guard generation == self.generation else { return }
         scheduledFrames = max(0, scheduledFrames - 1)
-        // Reserve is restored after the device actually played the last queued frame.
-        if scheduledFrames == 0 { primed = false }
+        // No re-priming here either: a steady downlink finishes its last scheduled frame all the
+        // time, and rebuilding the three-frame reserve at that moment delivered the audio in
+        // clumps with holes - the same defect as the sender's, heard on this side. The reserve is
+        // rebuilt only by a real outage (half a second without frames, see enqueue) or reset().
     }
 }
