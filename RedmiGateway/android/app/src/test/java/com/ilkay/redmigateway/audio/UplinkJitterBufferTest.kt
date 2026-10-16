@@ -240,5 +240,20 @@ class UplinkJitterBufferTest {
         assertEquals(24, remote.snapshot().targetFrames)
     }
 
+    // Catches Wi-Fi clumps that arrive a few milliseconds apart being read as paced frames: the
+    // link clearly delivered a burst, and the target has to cover the silence that follows it.
+    @Test fun framesDeliveredFewMillisecondsApartCountAsOneBurst() {
+        val buffer = UplinkJitterBuffer()
+        for (index in 0 until 5) buffer.offer(frame(index), index * 10L)
+        assertEquals(6, buffer.snapshot().targetFrames)
+    }
+
+    // Catches a paced stream being mistaken for a burst, which would raise latency for nothing.
+    @Test fun pacedFramesDoNotRaiseTheTarget() {
+        val buffer = UplinkJitterBuffer()
+        for (index in 0 until 10) buffer.offer(frame(index), index * 20L)
+        assertEquals(2, buffer.snapshot().targetFrames)
+    }
+
     private fun frame(index: Int) = byteArrayOf(index.toByte())
 }

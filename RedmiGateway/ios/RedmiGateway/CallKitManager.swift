@@ -41,6 +41,19 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     private var endpoint: (session: UInt32, port: UInt16, key: Data)?
     private var runningEndpoint: (host: String, session: UInt32, port: UInt16)?
     private var linkLostTask: Task<Void, Never>?
+    /// Where the audio path for the current call started: the answer tap, or the pickup start.
+    /// Every "Audio path:" line is stamped from here, so the iPhone's own numbers can be read
+    /// against the Redmi's firstPcm (measured from the moment audio_start arms the relay).
+    private var audioPathStartedAt: Date?
+
+    private func audioPathLog(_ message: String) {
+        guard let start = audioPathStartedAt else {
+            GatewayConnection.shared.log("Audio path: \(message)")
+            return
+        }
+        let ms = Int((Date().timeIntervalSince(start) * 1000).rounded())
+        GatewayConnection.shared.log("Audio path: \(message) (+\(ms) ms)")
+    }
 
     override private init() {
         let config = CXProviderConfiguration(localizedName: "Telefon Geçidi")
@@ -223,6 +236,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         if !audioRequested {
             audioRequested = true
             GatewayConnection.shared.sendAudioStart()
+            audioPathLog("audio_start sent")
         }
         if audioActivated, let endpoint { startEngine(endpoint) }
     }
@@ -234,6 +248,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         }
         let ready = (session: session, port: port, key: key)
         endpoint = ready
+        audioPathLog("audio_ready received (activated=\(audioActivated))")
         if audioActivated, let uuid = audioCallUuid, isAudioEligible(uuid) {
             startEngine(ready)
         }
@@ -251,11 +266,16 @@ final class CallKitManager: NSObject, CXProviderDelegate {
            running.host == host, running.session == endpoint.session, running.port == endpoint.port {
             return
         }
+        // The engine builds and starts synchronously here; its duration is the biggest single part
+        // of the iPhone's firstPcm, so it is measured from the answer tap on both sides.
+        audioPathLog("engine start called")
         AudioEngine.shared.start(host: host, port: endpoint.port, session: endpoint.session, key: endpoint.key)
         if AudioEngine.shared.isRunning {
             runningEndpoint = (host: host, session: endpoint.session, port: endpoint.port)
+            audioPathLog("engine.start() returned (running=true)")
         } else {
             runningEndpoint = nil
+            audioPathLog("engine.start() returned (running=false)")
         }
     }
 
@@ -266,6 +286,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         if audioRequested { GatewayConnection.shared.sendAudioStop() }
         audioRequested = false
         audioCallUuid = nil
+        audioPathStartedAt = nil
     }
 
     /// The Redmi took the conversation back (its decision, or the person's on either phone).
@@ -328,10 +349,18 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             GatewayConnection.shared.log("Cannot take the call audio: no active call on the link")
             return
         }
+        audioPathStartedAt = Date()
+        audioPathLog("take on iPhone requested")
+        // Warm the graph before CallKit is asked for a call: its activation takes a moment, and the
+        // warm-up overlaps that window. Nothing captures audio until the engine starts.
+        audioPathLog("warmUp called")
+        AudioEngine.shared.warmUp()
+        audioPathLog("warmUp finished")
         if let uuid = currentCallUuid {
             audioCallUuid = uuid
             audioRequested = true
             connection.sendAudioStart()
+            audioPathLog("audio_start sent")
             return
         }
         AudioEngine.shared.prepareSession()
@@ -516,6 +545,14 @@ final class CallKitManager: NSObject, CXProviderDelegate {
 
     private func reportIncoming(uuid: UUID, rawId: String, number: String?) {
         AudioEngine.shared.prepareSession()
+        // The audio path starts here: the user still has to answer, so warming the graph now hides
+        // its cost completely (measured: the voice-processing setup is the biggest single part of
+        // the iPhone's firstPcm). Nothing captures audio yet - the engine stays stopped.
+        audioPathStartedAt = Date()
+        audioPathLog("call presented")
+        audioPathLog("warmUp called")
+        AudioEngine.shared.warmUp()
+        audioPathLog("warmUp finished")
         provider.reportNewIncomingCall(with: uuid, update: callUpdate(number: number)) { error in
             Task { @MainActor in
                 if let error {
@@ -610,14 +647,24 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         }
         answeredHere.insert(uuid)
         audioCallUuid = uuid
+        // Keep the ring-time origin when there is one, so the whole path reads on one timeline.
+        if audioPathStartedAt == nil { audioPathStartedAt = Date() }
+        audioPathLog("answer tapped")
         connection.sendAnswer(callId: rawId)
         if connection.isAuthenticated {
             audioRequested = true
             connection.sendAudioStart()
+            audioPathLog("audio_start sent")
         } else {
             // Answered over Bluetooth; audio follows as soon as the network link is back.
             connection.reconnectNow(reason: "answered on iPhone")
         }
+        // After audio_start, never before: the Redmi's arm clock starts with that frame, and the
+        // ring-time warm-up has long finished for a call that rang here, so this is a no-op on the
+        // critical path. Starting the engine still waits for CallKit either way.
+        audioPathLog("warmUp called")
+        AudioEngine.shared.warmUp()
+        audioPathLog("warmUp finished")
         action.fulfill()
     }
 
@@ -681,6 +728,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
 
     func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
         audioActivated = true
+        audioPathLog("didActivate received")
         if !AudioEngine.shared.isSessionPrepared && !AudioEngine.shared.isRunning {
             AudioEngine.shared.prepareSession()
         }

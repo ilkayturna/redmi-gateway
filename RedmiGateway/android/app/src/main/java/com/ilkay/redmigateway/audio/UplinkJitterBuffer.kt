@@ -52,8 +52,12 @@ class UplinkJitterBuffer {
         const val REMOTE_TARGET_CEILING = 24
         const val LOCAL_MAX_AGE_MS = 400L
         const val REMOTE_MAX_AGE_MS = 640L
-        /** A burst of this many frames arriving back to back counts as one delivery. */
-        const val BURST_GAP_MS = 5L
+        /**
+         * Frames delivered back to back count as one burst. Wi-Fi clumps are forwarded a few
+         * milliseconds apart rather than in the same instant, so this is a fifth of the 20 ms
+         * pacing: a real burst is recognised while a paced stream never looks like one.
+         */
+        const val BURST_GAP_MS = 12L
     }
 
     private val queue = ArrayDeque<QueuedFrame>()
