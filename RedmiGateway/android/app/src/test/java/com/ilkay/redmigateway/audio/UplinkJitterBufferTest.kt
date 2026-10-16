@@ -255,5 +255,33 @@ class UplinkJitterBufferTest {
         assertEquals(2, buffer.snapshot().targetFrames)
     }
 
+    // Catches the sample counted memory ring: it held 32 observations, and a clumped link records
+    // about five per burst, so a 338 ms silence was forgotten in under a second and the target fell
+    // back to the floor long before the next burst - the measured "gap=338 ms but targetFrames=6".
+    @Test fun theBurstMemoryIsTimeBasedNotSampleCounted() {
+        val buffer = UplinkJitterBuffer()
+        buffer.offer(frame(0), 0)
+        buffer.offer(frame(1), 338)
+        assertEquals(12, buffer.snapshot().targetFrames)
+
+        var now = 358L
+        var index = 2
+        while (now < 338 + 3_000) {
+            buffer.offer(frame(index++), now)
+            buffer.poll(now)
+            now += 20
+        }
+        // Three seconds of paced audio later the silence is still remembered.
+        assertEquals(12, buffer.snapshot().targetFrames)
+
+        while (now < 338 + 4_500) {
+            buffer.offer(frame(index++), now)
+            buffer.poll(now)
+            now += 20
+        }
+        // Past the four second window it is not, and the target is back at the floor.
+        assertEquals(2, buffer.snapshot().targetFrames)
+    }
+
     private fun frame(index: Int) = byteArrayOf(index.toByte())
 }

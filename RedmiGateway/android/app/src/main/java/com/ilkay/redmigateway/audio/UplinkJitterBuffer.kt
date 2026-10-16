@@ -35,7 +35,14 @@ class UplinkJitterBuffer {
         const val FRAME_MS = 20
         /** Arrival observations are kept this long: fast attack, four second decay. */
         const val HISTORY_WINDOW_MS = 4_000L
-        const val HISTORY_SAMPLES = 32
+        /**
+         * Room for those observations. The ring counts arrivals, not seconds, and a burst records
+         * one observation per frame, so a small ring forgets a spike in well under a second: 32
+         * slots covered only about 0.8 s of this link's clumped traffic and the target fell back
+         * before the next burst arrived. 256 slots cover about five seconds of 50 frames per
+         * second, which is the four second window plus the extra in-burst samples (~3 KB).
+         */
+        const val HISTORY_SAMPLES = 256
         const val TRIM_HOLD_MS = 500L
         /** Trimming only starts two frames above the target, so a short spike is not cut away. */
         const val TRIM_SLACK_FRAMES = 2
