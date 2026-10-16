@@ -520,6 +520,10 @@ final class AudioEngine {
         guard let packet = sealer.seal(type: type, flags: hearing ? MediaSealer.flagHearing : 0,
                                        counter: txCounter, payload: pcm) else { return false }
         pendingSends += 1
+        // A keepalive breaks the "the previous frame is in the last packet" chain. Without this the
+        // Redmi would read the next type-2 copy as if the packet before it had carried PCM, and
+        // replay a frame it already has (an audible 20 ms repeat).
+        if type == 0 { lastSentPcm = nil }
         socket.send(content: packet, completion: .contentProcessed { [weak self, weak socket] _ in
             self?.networkQueue.async { [weak self, weak socket] in
                 guard let self, let socket, self.connection === socket else { return }
