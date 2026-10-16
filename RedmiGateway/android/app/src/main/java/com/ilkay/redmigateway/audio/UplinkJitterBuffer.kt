@@ -82,18 +82,24 @@ class UplinkJitterBuffer {
     private var maxAuthenticatedArrivalBurstFrames = 0
     // Diagnostics must not report 0 before the first poll: a fresh buffer already aims at the floor.
     private var targetFrames = LOCAL_TARGET_FLOOR
+    /** Raised by [reset] while the sender duplicates frames, so a copy still lands in time. */
+    private var floorOverride = 0
 
     // Rolling window of "how deep the buffer had to be" observations, newest replaces oldest.
     private val needAt = LongArray(HISTORY_SAMPLES)
     private val needFrames = IntArray(HISTORY_SAMPLES)
     private var needIndex = 0
 
-    @Synchronized fun reset(remote: Boolean = false) {
+    @Synchronized fun reset(remote: Boolean = false, minTargetFrames: Int = 0) {
         clear()
         dropped = 0
         underruns = 0
         expiredFrames = 0
         remoteLink = remote
+        // A redundant sender repeats the previous frame in the next packet, and that copy only
+        // helps if the buffer still holds the frame it belongs to: the caller asks for a slightly
+        // deeper floor while redundancy is on.
+        floorOverride = minTargetFrames.coerceAtLeast(0)
         lastArrivalAt = null
         burstFrames = 0
         lastAuthenticatedArrivalAt = null
@@ -164,7 +170,7 @@ class UplinkJitterBuffer {
         return need.coerceIn(floor(), ceiling())
     }
 
-    private fun floor() = if (remoteLink) REMOTE_TARGET_FLOOR else LOCAL_TARGET_FLOOR
+    private fun floor() = maxOf(if (remoteLink) REMOTE_TARGET_FLOOR else LOCAL_TARGET_FLOOR, floorOverride)
 
     private fun ceiling() = if (remoteLink) REMOTE_TARGET_CEILING else LOCAL_TARGET_CEILING
 

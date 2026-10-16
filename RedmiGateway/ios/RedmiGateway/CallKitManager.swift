@@ -241,14 +241,22 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         if audioActivated, let endpoint { startEngine(endpoint) }
     }
 
-    func handleAudioReady(session: UInt32, port: UInt16, key: Data?) {
+    func handleAudioReady(session: UInt32, port: UInt16, key: Data?, redundancy: Int = 0) {
         guard let key else {
             GatewayConnection.shared.log("Refused unsealed call audio")
             return
         }
         let ready = (session: session, port: port, key: key)
         endpoint = ready
-        audioPathLog("audio_ready received (activated=\(audioActivated))")
+        // The uplink copy only helps where the extra bytes are free: over the hotspot or home
+        // Wi-Fi. A remote link runs on the phone's data plan, and the user's rule is to spend as
+        // little of it as possible, so the plain stream stays there.
+        let onLocalLink = !GatewayConnection.shared.isRemoteLink
+        AudioEngine.shared.setUplinkRedundancy(redundancy > 0 && onLocalLink)
+        if redundancy > 0, !onLocalLink {
+            GatewayConnection.shared.log("Uplink redundancy offered but the link is remote; keeping the plain stream")
+        }
+        audioPathLog("audio_ready received (activated=\(audioActivated), redundancy=\(redundancy))")
         if audioActivated, let uuid = audioCallUuid, isAudioEligible(uuid) {
             startEngine(ready)
         }

@@ -404,7 +404,11 @@ class GatewayWebSocketServer(
             .put("port", CallAudioRelay.PORT)
             .put("sampleRate", CallAudioRelay.SAMPLE_RATE)
             .put("frameSamples", CallAudioRelay.FRAME_SAMPLES)
-            .put("sealed", peer.mediaKey != null))
+            .put("sealed", peer.mediaKey != null)
+            // 1 asks the iPhone to repeat the previous frame in the next packet; the receiver drops
+            // the copy unless its original was lost. Off until it is proven, and never on a remote
+            // link: the copy doubles the audio bitrate and a mobile data link must not pay for it.
+            .put("redundancy", CallAudioRelay.redundancyCapability()))
     }
 
     private fun sendSms(peer: Peer, json: JSONObject) {

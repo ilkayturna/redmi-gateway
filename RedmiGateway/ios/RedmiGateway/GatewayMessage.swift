@@ -77,6 +77,9 @@ struct AudioReadyMessage: Decodable {
     let session: UInt32
     let port: UInt16
     let sealed: Bool?
+    /// The Redmi can rebuild an uplink frame lost in transit from the copy the next packet carries.
+    /// Absent on older Redmis, which is exactly how the iPhone knows to keep sending plain PCM.
+    let redundancy: Int?
 }
 
 struct AudioStateMessage: Decodable {

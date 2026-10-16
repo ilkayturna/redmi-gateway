@@ -55,6 +55,14 @@ final class AudioEngine {
     private var loggedPlaybackDrops = 0
     /// True once voice processing has been configured early, so warm-up never pays for it twice.
     private var voiceProcessingWarmed = false
+    /// Repeat every uplink frame in the next packet; see setUplinkRedundancy.
+    private var uplinkRedundancy = false
+    private var lastSentPcm: Data?
+    /// Capture health counters, all touched on the network queue except the pacer's own.
+    private var sentFrames = 0
+    private var lastProducedFrames = 0
+    private var lastSentFrames = 0
+    private var lastCaptureHealthAt: Date?
     /// Timestamps for the "where did the first second go" diagnostics.
     private var engineStartedAt: Date?
     private var firstPcmLogged = false
@@ -115,6 +123,19 @@ final class AudioEngine {
     func resetSessionPrepared() {
         isSessionPrepared = false
         voiceProcessingWarmed = false
+    }
+
+    /// Repeats every uplink frame once, in the packet that follows it.
+    ///
+    /// A frame lost in transit (Wi-Fi retries, a hotspot hiccup) is rebuilt by the Redmi from the
+    /// copy in the next packet, which removes the 20 ms hole that otherwise plays as a click. The
+    /// copy costs 100 % more uplink bytes, so it is only enabled where those bytes are free - the
+    /// Redmi asks for it in audio_ready and the caller keeps it off a remote (data plan) link.
+    /// Nothing is delayed: the copy rides along with the frame that follows.
+    func setUplinkRedundancy(_ enabled: Bool) {
+        guard uplinkRedundancy != enabled else { return }
+        uplinkRedundancy = enabled
+        log("Uplink redundancy \(enabled ? "on" : "off")")
     }
 
     /// Asked while the app is open, so a first call never needs a prompt over the lock screen.
@@ -285,6 +306,8 @@ final class AudioEngine {
             self.pendingSends = 0
             self.playbackBuffer.reset()
             self.lastDownlink = nil
+            // A new stream starts with nothing to repeat: the first packet carries one frame.
+            self.lastSentPcm = nil
             self.lastPcmSentAt = Date()
             self.recoveryRequested = false
             self.loggedPlaybackDrops = 0
@@ -339,6 +362,9 @@ final class AudioEngine {
             timer.setEventHandler { [weak self] in
                 guard let self, self.activeGeneration == generation else { return }
                 self.sendPacket(type: 0, pcm: Data())
+                // Every five seconds: what the capture produced against what actually left, so a
+                // frame deficit (the Redmi's underruns) shows up as numbers instead of a guess.
+                self.captureHealthTick()
                 if self.playbackBuffer.droppedFrames > self.loggedPlaybackDrops {
                     self.loggedPlaybackDrops = self.playbackBuffer.droppedFrames
                     self.log("Downlink playback budget full: \(self.loggedPlaybackDrops) frame(s) dropped")
@@ -439,7 +465,51 @@ final class AudioEngine {
             pcm.append(UInt8(truncatingIfNeeded: bits))
             pcm.append(UInt8(truncatingIfNeeded: bits >> 8))
         }
-        if sendPacket(type: 1, pcm: pcm) { lastPcmSentAt = Date() }
+        // Type 2 carries the frame before this one as well, so the Redmi can rebuild a frame that
+        // was lost on the way. Type 1 stays the plain frame: an older Redmi never asks for the
+        // copy, and the very first frame of a stream has nothing to repeat.
+        if uplinkRedundancy, let previous = lastSentPcm, previous.count == pcm.count {
+            var both = Data(capacity: previous.count + pcm.count)
+            both.append(previous)
+            both.append(pcm)
+            if sendPacket(type: 2, pcm: both) {
+                sentFrames += 1
+                lastSentPcm = pcm
+                lastPcmSentAt = Date()
+            }
+            return
+        }
+        if sendPacket(type: 1, pcm: pcm) {
+            sentFrames += 1
+            lastSentPcm = uplinkRedundancy ? pcm : nil
+            lastPcmSentAt = Date()
+        }
+    }
+
+    /// Every five seconds: the capture rate against the send rate, plus what the queue threw away.
+    ///
+    /// A produced/s below 50 means speech that never existed and no receiver buffer can restore it;
+    /// a sent/s below produced/s points at backpressure or expiry, and the counters say which.
+    private func captureHealthTick() {
+        let now = Date()
+        guard let last = lastCaptureHealthAt else {
+            lastCaptureHealthAt = now
+            return
+        }
+        let elapsed = now.timeIntervalSince(last)
+        guard elapsed >= 5 else { return }
+        lastCaptureHealthAt = now
+        captureLock.lock()
+        let produced = capturePacer.acceptedFrames
+        let expired = capturePacer.droppedExpired
+        let overflow = capturePacer.droppedOverflow
+        captureLock.unlock()
+        let producedPerSecond = Int(Double(produced - lastProducedFrames) / elapsed)
+        let sentPerSecond = Int(Double(sentFrames - lastSentFrames) / elapsed)
+        lastProducedFrames = produced
+        lastSentFrames = sentFrames
+        log("CAPTURE_HEALTH produced=\(producedPerSecond)/s sent=\(sentPerSecond)/s " +
+            "expired=\(expired) overflow=\(overflow) pending=\(pendingSends)")
     }
 
     @discardableResult

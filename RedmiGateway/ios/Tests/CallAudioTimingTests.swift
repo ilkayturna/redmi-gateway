@@ -13,7 +13,8 @@ struct CallAudioTimingTests {
     static func main() {
         captureBatchesArePaced()
         schedulerStallDoesNotCatchUp()
-        microphoneReprimesAfterStarvation()
+        drainedQueueResumesAtTheNextFrame()
+        pacedSpeechHasNoSendGaps()
         reloadedReserveCannotBypassPacing()
         timerCadenceSurvivesHandlerCostAndWakeJitter()
         midIntervalStallCannotEmitCloseCatchUp()
@@ -22,11 +23,11 @@ struct CallAudioTimingTests {
         delayedCallbackCannotReplayMutedInterval()
         staleAndOverflowingCaptureIsDiscarded()
         staleCaptureCannotEnterRestartedStream()
-        playbackReprimesAfterShortGap()
+        playbackResumesWithoutRebufferingShortGaps()
         oldPlaybackCompletionCannotDrainNewStream()
         playbackCapacityStaysBounded()
         if failures != 0 { print("\(failures) audio timing regression(s)"); exit(1) }
-        print("PASS: 14 call audio timing regressions")
+        print("PASS: 15 call audio timing regressions")
     }
 
     // Break caught: emitting every frame from one tap callback at the same instant.
@@ -66,18 +67,53 @@ struct CallAudioTimingTests {
         expect(pacer.next(now: 0.30) == 2, "next frame resumes at real time")
     }
 
-    // Break caught: restarting speech with a single frame after an empty queue.
-    static func microphoneReprimesAfterStarvation() {
+    // Break caught (the 08:33 crackle): re-arming the three-frame reserve every time the queue
+    // drained. The tap produces a frame every ~21 ms and the timer takes one every 20 ms, so a
+    // healthy queue empties constantly; waiting for three frames after every drain sent clumps of
+    // frames separated by 60-100 ms holes (measured on the Redmi: burst=5, gap=338 ms,
+    // 46.7 frames/s), which drained its 20 ms buffer into concealment. A new stream still starts
+    // with the reserve - only a drain mid-stream resumes immediately.
+    static func drainedQueueResumesAtTheNextFrame() {
         var pacer = CallAudioPacer<Int>()
         pacer.enqueue([1, 2, 3], capturedAt: 0.04, now: 0.04, generation: pacer.generation)
         _ = pacer.next(now: 0.04); _ = pacer.next(now: 0.06); _ = pacer.next(now: 0.08)
         expect(pacer.next(now: 0.10) == nil, "empty microphone queue has no fabricated PCM")
         pacer.enqueue([4], capturedAt: 0.12, now: 0.12, generation: pacer.generation)
-        expect(pacer.next(now: 0.12) == nil, "mic waits for reserve after starvation")
+        expect(pacer.next(now: 0.12) == 4, "a drained queue resumes with the very next frame")
         pacer.enqueue([5], capturedAt: 0.14, now: 0.14, generation: pacer.generation)
-        expect(pacer.next(now: 0.14) == nil, "two frames do not prematurely resume mic")
-        pacer.enqueue([6], capturedAt: 0.16, now: 0.16, generation: pacer.generation)
-        expect(pacer.next(now: 0.16) == 4, "mic resumes oldest fresh speech with reserve")
+        expect(pacer.next(now: 0.14) == 5, "steady speech keeps flowing without a new reserve")
+        // A restarted stream is a new stream: the reserve is built again.
+        pacer.reset()
+        pacer.enqueue([6], capturedAt: 0.30, now: 0.30, generation: pacer.generation)
+        expect(pacer.next(now: 0.30) == nil, "a restarted stream builds its three-frame reserve")
+        pacer.enqueue([7], capturedAt: 0.32, now: 0.32, generation: pacer.generation)
+        expect(pacer.next(now: 0.32) == nil, "two frames are not yet a reserve")
+        pacer.enqueue([8], capturedAt: 0.34, now: 0.34, generation: pacer.generation)
+        expect(pacer.next(now: 0.34) == 6, "the new stream resumes with its reserve in order")
+    }
+
+    // Break caught: the same re-priming, measured end to end. One frame captured per 20 ms and a
+    // timer that wakes on the pacer's own deadline must deliver one frame every 20 ms for the whole
+    // call - no clumps, no holes. Those holes are what the Redmi hears as crackle.
+    static func pacedSpeechHasNoSendGaps() {
+        var pacer = CallAudioPacer<Int>()
+        var sent: [(Int, Double)] = []
+        var captured = 0
+        var captureAt = 0.02
+        var wake = 0.02
+        while wake < 10 {
+            while captureAt <= wake + 0.000000001 {
+                pacer.enqueue([captured], capturedAt: captureAt, now: wake, generation: pacer.generation)
+                captured += 1
+                captureAt += 0.02
+            }
+            if let frame = pacer.next(now: wake) { sent.append((frame, wake)) }
+            wake = pacer.nextWakeUp(now: wake)
+        }
+        expect(sent.count >= 495, "steady capture sustains 50 frames per second")
+        expect(sent.map { $0.0 } == Array(0..<sent.count), "steady capture keeps PCM order")
+        let gaps = zip(sent, sent.dropFirst()).map { $0.1.1 - $0.0.1 }
+        expect(gaps.allSatisfy { $0 <= 0.021 }, "no send gap exceeds one frame period")
     }
 
     // Break caught: unbounded capture backlog and sending obsolete speech after a stall.
@@ -201,17 +237,22 @@ struct CallAudioTimingTests {
         expect(pacer.next(now: 0.3) == 7, "new stream accepts its own capture")
     }
 
-    // Break caught: original playbackPrimed stays true after a <500 ms drain.
-    static func playbackReprimesAfterShortGap() {
+    // Break caught (the same defect on the receiving side): completed() re-armed the three-frame
+    // reserve every time the device finished the last scheduled frame, so a steady downlink was
+    // handed to the player in clumps with holes. A caught-up downlink resumes with the next frame;
+    // only a real outage (over half a second without frames) rebuilds the reserve.
+    static func playbackResumesWithoutRebufferingShortGaps() {
         var playback = CallAudioPlaybackBuffer<Int>()
         expect(playback.enqueue(1, now: 0).isEmpty, "first downlink frame waits")
         expect(playback.enqueue(2, now: 0.02).isEmpty, "second downlink frame waits")
         expect(playback.enqueue(3, now: 0.04) == [1, 2, 3], "downlink starts with reserve")
         let generation = playback.generation
         for _ in 0..<3 { playback.completed(generation: generation) }
-        expect(playback.enqueue(4, now: 0.2).isEmpty, "200 ms outage restores downlink reserve")
-        expect(playback.enqueue(5, now: 0.22).isEmpty, "downlink continues re-priming")
-        expect(playback.enqueue(6, now: 0.24) == [4, 5, 6], "downlink resumes in order")
+        expect(playback.enqueue(4, now: 0.2) == [4], "a caught-up downlink resumes with the next frame")
+        expect(playback.enqueue(5, now: 0.22) == [5], "steady downlink keeps flowing without a new reserve")
+        expect(playback.enqueue(6, now: 0.9).isEmpty, "a real outage restores the downlink reserve")
+        expect(playback.enqueue(7, now: 0.92).isEmpty, "the reserve rebuilds")
+        expect(playback.enqueue(8, now: 0.94) == [6, 7, 8], "the downlink restarts in order")
     }
 
     // Break caught: an AVAudioPlayerNode completion from before stop mutating a new stream.

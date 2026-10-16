@@ -283,5 +283,27 @@ class UplinkJitterBufferTest {
         assertEquals(2, buffer.snapshot().targetFrames)
     }
 
+    // Catches a redundant sender's copy arriving after the frame it repeats has already been
+    // trimmed away: while redundancy is on the buffer keeps a deeper floor (40+ ms) so the copy
+    // still lands before its playback deadline.
+    @Test fun redundancyRaisesTheFloorSoACopyCanStillHelp() {
+        val plain = UplinkJitterBuffer()
+        plain.reset(remote = false)
+        assertEquals(2, plain.snapshot().targetFrames)
+
+        val redundant = UplinkJitterBuffer()
+        redundant.reset(remote = false, minTargetFrames = 3)
+        assertEquals(3, redundant.snapshot().targetFrames)
+
+        // A quiet link must not trim the extra reserve back down.
+        var now = 0L
+        repeat(40) {
+            redundant.offer(frame(0), now)
+            redundant.poll(now)
+            now += 20
+        }
+        assertEquals(3, redundant.snapshot().targetFrames)
+    }
+
     private fun frame(index: Int) = byteArrayOf(index.toByte())
 }
