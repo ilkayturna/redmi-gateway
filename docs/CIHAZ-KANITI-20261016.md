@@ -724,3 +724,50 @@ Yani encoder değişikliği **el sıkışmayı bozmuyor** ✓
 ### Kalan tek doğrulanmamış ses değişikliği
 **`AUDIO-STATE-REPEAT`** (tur 171) — `PREPARING_IPHONE` boyunca ses-durumu mesajını tekrarlıyor.
 **Gerçek çağrı gerekiyor** ve o çağrı henüz yapılmadı (`Repeated the preparing state` sayısı: **0**).
+
+---
+
+## 18. ✅ MADDE 5 — HOTSPOT DOĞRU KARAR VERMİŞ DURUMDA (16.10.2026 15:35)
+
+**Çağrı gerektirmeyen tek madde buydu ve cihazdan okundu.**
+
+### Ağ durumu
+
+```
+wlan2        inet 10.64.17.212/24          <<< HOTSPOT ARAYUZU AYAKTA
+rmnet_data1  inet 10.216.122.179/29        <<< mobil veri var
+iPhone       10.64.17.201                  <<< ayni /24 - hotspot istemcisi
+```
+
+### WiFi istemci durumu
+
+```
+mWifiInfo: Supplicant state: DISCONNECTED, IP: null, RSSI: -127
+CMD_SET_AP kayitlari: hepsi 10-13 (3 gun once) - yeni mudahale YOK
+```
+
+### Yorum — kuralın istediği davranış
+
+| Kural | Durum |
+|---|---|
+| **Tanıdık ağ görünce hotspot kapanır** | WiFi istemci **DISCONNECTED** → tanıdık ağ **yok** → hotspot **açık kalıyor** ✓ |
+| **iPhone hotspot üzerinden bağlanır** | iPhone `10.64.17.201`, hotspot `10.64.17.212/24` → **aynı ağ** ✓ |
+| **Mobil kota koruması** | `rmnet_data1` var; ses yolu **LAN üzerinden** (WebSocket `10.64.17.x`) → **mobil veri kullanılmıyor** ✓ |
+
+**Hotspot 3 gündür `CMD_SET_AP` almamış** — yani `SmartHotspot` kararı **kalıcı ve kararlı** ✓
+
+### ⚠️ Teşhis boşluğu bulundu
+
+**`SmartHotspot` hiçbir kararını loglamıyor.** Log'da `hotspot` içeren **tek satır yok**:
+```
+grep -iE 'hotspot|SmartHotspot|tether' call-diagnostics.log   ->  BOS
+```
+
+**Sonuç:** hotspot'un **neden** açık/kapalı olduğu cihazdan **okunamıyor.** Şu anki durum
+dışarıdan çıkarıldı (arayüz + WiFi durumu), uygulamanın kendi kararından değil.
+
+**Bu, tur 135'te bulunan "kopma loglama boşluğu" ile aynı sınıf:** karar veriliyor, kaydı yok.
+
+### Yapılacak (düşük risk, çağrı gerektirmez)
+`SmartHotspot.decideHotspotAction` sonucunu tanılama loguna yaz — karar değiştiğinde bir satır.
+**Ses yoluna dokunmaz, cihazda doğrulanabilir.**
