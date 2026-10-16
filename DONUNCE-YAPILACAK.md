@@ -136,6 +136,53 @@ kalıcı sessizlik olurdu.
 
 ---
 
+## 3.5 ⭐ iPHONE OLMADAN TEST: lab emülatörü
+
+**Fiziksel iPhone gerekmez.** Emülatör, iPhone tarafını oynar: root adb'den anahtarları okur,
+çağrı açar, UDP ile 20 ms 16 kHz PCM akıtır ve **aşağı yön karelerini sayar**.
+
+```
+cd C:\Users\ilkay.turna\source\repos\redmi-gateway\RedmiGateway\scripts\lab
+python iphone_emulator.py --host 192.168.1.147 --dial 532 --scenario handoff --pair
+```
+
+**`--pair`** taze bir protocol-2 eşleşmesi yapar ve **sonunda gerçek iPhone'un eşleşmesini geri
+yükler** → gerçek iPhone çalışmaya devam eder. Lab modu `bridge_client.enable_lab_mode()` ile
+açılır.
+
+### Senaryolar ve neyi kanıtladıkları
+
+| Senaryo | Ne yapar | Neyi kanıtlar |
+|---|---|---|
+| **`handoff`** | 9 aşama: aktarım → ton → **mikrofon susar** → yeniden arm → **iPhone sağır (tek yönlü kayıp)** → geri alma → **manuel dönüş** | **Madde 2** (sahiplik/cevaplama senkronu) + **madde 3** (geçiş) + ses yolu |
+| **`soak`** | 12×5 sn, ton açık/kapalı değişimli (**60+ sn**) | **Madde 4** — cızırtı/kesilme uzun çağrıda ortaya çıkar |
+| **`race`** | `audio_start`, Telecom çağrıyı kurmadan **önce** gönderilir (iPhone build 33 davranışı) | Erken istek yolu, 20 sn tutma |
+| **`security`** | Protocol 1 reddi, sahte proof, yanlış kod, tekrarlanmış/sahteleşmiş kareler | Güvenlik |
+| **`sync`** | Journal replay: tam senkron, sonra `lastSeq` sonrası boş replay | Senkron |
+
+### Nasıl okunur
+Her saniye şu satır basılır:
+```
+  [handoff] downlink 50/s nonzero 48/s sending=True
+```
+- **`downlink 0/s`** → ses **akmıyor** (kullanıcının şikayeti tam bu)
+- **`nonzero`**, gelen karelerin **gerçekten ses içerdiğini** gösterir (sessizlik değil)
+- Etiketler aşamaları ayırır: `handoff` / `iphone_tone` / `iphone_silent` / `rearmed` /
+  `iphone_deaf` / `rearmed_again` / `manual_redmi`
+
+Sonunda `owners:` satırı **sahiplik durum makinesinin** tüm geçişlerini döker — madde 2'nin kanıtı.
+
+### Neden bu, elle çağrıdan iyidir
+- **Otomatik ve sayısal** — "ses geliyor gibi" demek gerekmez
+- **iPhone gerekmez** → iPhone hazır olmasa bile Redmi tarafı doğrulanır
+- **Tekrarlanabilir** — aynı senaryo, aynı ölçüm
+- **Sınırı:** iOS'un `firstPcm`/`firstSend` metriklerini ölçemez (onlar iPhone tarafında) →
+  **v2 için yine gerçek iPhone gerekir.** Emülatör madde 2/4'ü ve Android tarafını kanıtlar.
+
+**Doğrulandı:** üç lab aracı da temiz derleniyor (`py_compile`), `websockets 15.0.1` kurulu.
+
+---
+
 ## 4. BİLİNEN DURUMLAR (dürüst)
 
 | Konu | Durum |
