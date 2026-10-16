@@ -66,10 +66,18 @@ object BridgeCrypto {
         }
     }
 
-    fun b64(bytes: ByteArray): String = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP)
+    // java.util.Base64 rather than android.util.Base64, and the bytes are identical: both are
+    // RFC 4648 standard alphabet with padding and no line breaks, which is what NO_WRAP meant.
+    // java.util.Base64 is available from API 26, which is this app's minSdk.
+    //
+    // The reason for the change is testability, not speed. Under unit tests android.util.Base64 is
+    // a stub that returns null, so every SecureChannel.open returned null and the replay and
+    // direction checks in that class could not be asserted on at all. Base64EncodingTest pins the
+    // equivalence against fixed vectors so the wire format cannot drift unnoticed.
+    fun b64(bytes: ByteArray): String = java.util.Base64.getEncoder().encodeToString(bytes)
 
     fun unb64(text: String): ByteArray? = try {
-        android.util.Base64.decode(text, android.util.Base64.NO_WRAP)
+        java.util.Base64.getDecoder().decode(text)
     } catch (_: IllegalArgumentException) {
         null
     }
