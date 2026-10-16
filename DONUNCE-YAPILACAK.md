@@ -1,6 +1,34 @@
 # DÖNÜNCE NE YAPILACAK — tek sayfa
 
-**Hazırlanma tarihi:** 16.10.2026 · **Ana dal:** `ea009ed` · **v2 dalı:** `f235071`
+**Hazırlanma tarihi:** 16.10.2026 · **Ana dal:** `1ec8a65` · **v2 dalı:** `2585549`
+
+---
+
+## ⚠️ SENDEN İKİ AKSİYON GEREKİYOR
+
+| # | Ne | Neden |
+|---|---|---|
+| 1 | **Telefonları geri getir** | Madde 1-5'in cihaz kanıtı yalnızca cihazda yapılabilir |
+| 2 | **GitHub → Settings → Billing → Actions kotası** | **iOS build ÜRETİLEMİYOR** (aşağıya bak) |
+
+### 🚨 CI kesintisi (16.10.2026)
+
+**Tek adımlık `echo` işi bile runner alamıyor** → hesap seviyesi kısıt:
+```
+JOB health: failure   runner_id=0   steps=0
+```
+- Ne iOS iş akışı, ne macOS, ne de bugünkü değişiklikler — **hiçbir runner yok**
+- En olası neden: **Actions dakika kotası** (private repo, `macos-latest` **10× çarpanı**, bugün ~100 build)
+- **Etki:** v2 (geçiş düzeltmesi) ve CallKit ikonu **build edilemiyor**
+- Detay: `CI-KESINTISI-20261016.md`
+
+**Teslim yine de güvende:** build 96 TestFlight'ta, APK hazır, v2 dalı uzakta bekliyor.
+
+### 📌 Ayrıca: varsayılan dal `main` **127 commit geride**
+
+GitHub'da repoya bakan biri **çok eski bir sürüm** görüyor (197 dosya farklı).
+Merge etmedim — `HANDOVER.md`: *"Merging to main is the owner's decision."*
+**Öneri:** cihaz testi geçtikten sonra `codex/audio-jitter-fix` → `main`.
 
 ---
 
