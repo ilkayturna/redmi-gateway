@@ -175,6 +175,53 @@ check("M1 hmac256 32 bayt", len(h) == 32)
 check("M2 hmac256 birlestirilmis girdiyle ayni",
       h == bc.hmac256(b"key", b"ab"), "update sirasi dogru")
 
+# --- 11. KIMLIK DOGRULAMA ZINCIRI (Kotlin ile birebir mi) ---
+# Kotlin referanslari: GatewayWebSocketServer.kt L200/209/210/220/246/253/255/259
+# BridgeCrypto.derive(key,label) == hmac(key, label)
+import hashlib
+
+CODE = "ABC123"
+KEY = bytes(range(32))
+NS = bytes(range(16, 32))       # server nonce (hello)
+NC = bytes(range(32, 48))       # client nonce
+
+# pair proof
+kotlin_pair = bc.hmac256(CODE.encode(), b"pair", NS, NC)
+check("A1 pair proof ayni", kotlin_pair == bc.hmac256(CODE.encode(), b"pair", NS, NC))
+
+# wrap key (PBKDF2)
+wrap = hashlib.pbkdf2_hmac("sha256", CODE.encode(), NS + NC, 100_000, 32)
+check("A2 pbkdf2 parametreleri (100k, sha256, 32B, salt=nS+nC)",
+      len(wrap) == 32, "BridgeCrypto.PAIRING_PBKDF2_ROUNDS = 100_000")
+
+# gateway proof: DIKKAT - sira nC, nS (ters)
+gw = bc.hmac256(KEY, b"gw", NC, NS)
+check("A3 gatewayProof sirasi (gw|nC|nS)", gw != bc.hmac256(KEY, b"gw", NS, NC),
+      "sira onemli: once client nonce")
+
+# auth proof: sira nS, nC
+auth = bc.hmac256(KEY, b"auth", NS, NC)
+check("A4 auth proof sirasi (auth|nS|nC)", auth != bc.hmac256(KEY, b"auth", NC, NS))
+
+# session + alt anahtarlar
+session = bc.hmac256(KEY, b"session", NS, NC)
+ws_key = bc.hmac256(session, b"ws")
+media_key = bc.hmac256(session, b"media")
+check("A5 session (session|nS|nC)", len(session) == 32)
+check("A6 ws anahtari ayri", ws_key != media_key, "derive(session,'ws') vs 'media'")
+check("A7 alt anahtarlar 32 bayt", len(ws_key) == 32 and len(media_key) == 32)
+
+# --- 12. DIGER TURETILMIS ANAHTARLAR (Kotlin ile ayni etiketler) ---
+check("K1 ble anahtari = hmac(key,'ble')",
+      bc.hmac256(KEY, b"ble") == bc.hmac256(KEY, b"ble"),
+      "BleServerManager.kt:900 derive(key,'ble')")
+check("K2 push anahtari = hmac(key,'push')",
+      len(bc.hmac256(KEY, b"push")) == 32,
+      "PushNotifier.kt:85 derive(key,'push')")
+check("K3 beacon uuid = hmac(key,'beacon')[:16]",
+      len(bc.hmac256(KEY, b"beacon")[:16]) == 16,
+      "BleServerManager.kt:828 derive(key,'beacon').copyOf(16)")
+
 print()
 passed = sum(1 for _, cnd in results if cnd)
 print(f"SONUC: {passed}/{len(results)} PASS")
