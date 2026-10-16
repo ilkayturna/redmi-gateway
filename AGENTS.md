@@ -496,3 +496,43 @@ Yani bozulan şey sadece gürültü değil — **teşhis edilebilirliğin kendis
 **Genel ders:** Log eklemek "zararsız" görünür; ama **döngü içinde** eklendiğinde dosyanın
 **rotasyonunu** hızlandırır ve **tanılamayı yok eder** — yani eklediğin şeyin amacını tersine
 çevirir.
+
+### 6.6 "Hızlandırma" değişikliği sesi tamamen kesebilir — sıfırdan başlayan örnekleme kilidi
+
+**Hata (16.10.2026, İKİNCİ kez ses kesildi):** Devir teslim kapısı **ömür boyu ortalama** hız
+kullanıyordu ve çalışıyordu (10:33'teki çağrı `AUDIO_OWNER=IPHONE` ile bitti). "Kapı 1431 ms
+bekliyor, son saniye zaten 53/s" gerekçesiyle **pencere tabanlı** örneklemeye geçildi
+(`GATE_SAMPLE_MS = 140L`). Kuruldu ve **ses bir daha iPhone'a geçmedi.**
+
+**Kök neden — saf kilitlenme:**
+```kotlin
+private var gateSampleAt = 0L                                    // sifirdan baslar
+val sampleMs = if (gateSampleAt == 0L) 0L else now - gateSampleAt // 0 iken ZORLA 0
+val recentRate = if (sampleMs >= GATE_SAMPLE_MS) ... else 0       // 0 >= 140 -> hep 0
+if (sampleMs >= GATE_SAMPLE_MS) {
+    gateSampleAt = now                                            // >>> HIC CALISMAZ <<<
+}
+```
+**`gateSampleAt`'ı atayan koşul, `gateSampleAt` sıfırken `sampleMs`'e bağlı. Ve `sampleMs`
+sıfırken koşul yanlış. Yani kendini besleyen bir kilit: hiç açılmaz.** Her `arm()` sıfırladığı
+için **her çağrıda** kilitleniyordu.
+
+**Belirti:** `GATE_OPEN` yok · `startMedia()` hiç çağrılmıyor · 8 sn sonra
+`iphone_audio_not_ready` · **log'da hiçbir sebep yok.**
+
+**KURAL:**
+1. **Zamanlayıcı/örnekleme durumu asla "sıfır = başlatılmadı" ile "sıfır = geçen süre"yi
+   karıştırmasın.** İlk geçişte origin'i **açıkça** ata:
+   ```kotlin
+   if (gateSampleAt == 0L) { gateSampleAt = now; gateSampleFrames = framesNow }
+   ```
+   ya da **hiç durum tutma** — ortalamayı kullan (bu, kanıtlanmış çalışan hâldi).
+2. **"Yavaş" bir yolu "hızlandırmak" ses yolunda en pahalı değişikliktir.** 6.1 zaten
+   söylüyor: gerçek çağrı olmadan gönderilmez. **Bu hata o kuralın çiğnenmesiyle oldu.**
+3. **Bir metrik "kötü" görünüyorsa önce ÖLÇ, sonra değiştir.** `gateMs=1431 ms` rahatsız
+   ediciydi ama **çalışıyordu**; değişiklik onu **sonsuza** çevirdi.
+4. **Belirti "hiç çalışmıyor" ise (ikili), sebep genellikle bir MANTIK kilididir** — ince
+   zamanlama değil. Kodu **okuyarak** bulunur: bir koşulun hiç doğru olamayacağını görmek
+   yeterliydi.
+5. **Geri alma kanıtı:** kurulu APK'da ölü sabitin **olmadığını** doğrula
+   (`b'GATE_SAMPLE_MS' in dex` → False).
