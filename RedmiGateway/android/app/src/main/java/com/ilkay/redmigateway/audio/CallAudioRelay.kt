@@ -115,6 +115,21 @@ object CallAudioRelay : CallManager.CallListener {
     private const val MONITOR_INTERVAL_MS = 150L
     private const val IPHONE_SILENCE_LIMIT_MS = 1800L
     private const val MIN_FRAMES_PER_SECOND = 38
+    /**
+     * The gate reads the rate over its own short window instead of over the whole arm. The old
+     * measure divided every frame of the arm by the whole arm's length, so a slow start poisoned it
+     * for good: on 16.10.2026 23:28 the iPhone's engine restarted twice during setup and ran at 27
+     * frames a second (the gate wants 38), the arm gave up at 8.02 s, and the audio only moved when
+     * the user pressed the button by hand - at which point the same engine ran at 49/s and the
+     * cutover took 243 ms. The window's origin is written when the first frame of the arm arrives,
+     * so it has no "zero means unset" state to get stuck in (AGENTS 6.6).
+     */
+    private const val GATE_RATE_WINDOW_MS = 1_000L
+    /**
+     * While the iPhone is still sending frames, the arm keeps waiting this long before giving up.
+     * The 8 s cap stays for the case that matters: nothing is arriving any more.
+     */
+    private const val PREPARE_GIVE_UP_MS = 30_000L
     // The iPhone streams within a second of answering. Waiting for a full one second window to
     // close delayed the cutover by up to 500 ms, so a partial window is read as a rate as soon as
     // it holds this much speech. The threshold above and the freshness rule are unchanged.
@@ -187,6 +202,13 @@ object CallAudioRelay : CallManager.CallListener {
     // iPhone's own startup apart from the gate that waits for its frames.
     @Volatile private var armedAt = 0L
     @Volatile private var firstPcmAt = 0L
+    /**
+     * Origin and frame count of the gate's short window (see [GATE_RATE_WINDOW_MS]). Written when
+     * the first frame of an arm arrives, never left at a "zero means unset" state that a condition
+     * would then have to work around.
+     */
+    private var gateRateWindowAt = 0L
+    private var gateRateWindowFrames = 0
     @Volatile private var firstCutoverWriteAt = 0L
     @Volatile private var firstCutoverReadAt = 0L
     /** When the caller's path last delivered a frame: the cutover needs both paths live now. */
@@ -376,6 +398,8 @@ object CallAudioRelay : CallManager.CallListener {
             armedAt = SystemClock.elapsedRealtime()
             firstPcmAt = 0L
             pcmSinceArm.set(0)
+            gateRateWindowAt = 0L
+            gateRateWindowFrames = 0
             scheduleMonitor()
         }
         CallManager.log("Call audio session armed")
@@ -601,7 +625,11 @@ object CallAudioRelay : CallManager.CallListener {
                     // second to 52.
                     val framesNow = pcmSinceArm.get()
                     val streamMs = if (firstPcmAt == 0L) 0L else now - firstPcmAt
-                    val recentRate = if (streamMs > 0L) (framesNow * 1000L / streamMs).toInt() else 0
+                    val lifetimeRate = if (streamMs > 0L) (framesNow * 1000L / streamMs).toInt() else 0
+                    val windowRate = gateWindowRate(framesNow, now)
+                    // The window is the fast path; the arm's average stays as the fallback so a
+                    // window that somehow cannot fill can never hold the gate shut.
+                    val recentRate = if (windowRate > 0) windowRate else lifetimeRate
                     val blocker = CutoverDecision.startMediaBlocker(
                         live = live,
                         iphoneFresh = iphoneFresh,
@@ -627,11 +655,22 @@ object CallAudioRelay : CallManager.CallListener {
                         if (blocker != lastGateBlocker || now - lastGateLogAt >= 500L) {
                             lastGateBlocker = blocker
                             lastGateLogAt = now
-                            Log.i(TAG, "GATE_WAIT reason=$blocker wait=${streamMs}ms " +
-                                "frames=$framesNow rate=$recentRate/s live=$live fresh=$iphoneFresh")
+                            Log.i(TAG, "GATE_WAIT reason=$blocker wait=${streamMs}ms frames=$framesNow " +
+                                "rate=$recentRate/s window=$windowRate/s avg=$lifetimeRate/s " +
+                                "live=$live fresh=$iphoneFresh")
                         }
-                        if (now - preparingSince > PREPARE_TIMEOUT_MS && live) {
-                            releaseMediaAndKeepSession("iphone_audio_not_ready")
+                        if (live) {
+                            val waitedMs = now - preparingSince
+                            // Give up only when there is nothing left to wait for: nothing arriving
+                            // any more, or an arm preparing far past any plausible ramp-up. Giving up
+                            // at 8 s while frames were still arriving is exactly what made the user
+                            // press the button by hand on 16.10.2026 23:28.
+                            val nothingArriving = !iphoneFresh && waitedMs > PREPARE_TIMEOUT_MS
+                            if (nothingArriving || waitedMs > PREPARE_GIVE_UP_MS) {
+                                Log.w(TAG, "Giving up the handover after ${waitedMs}ms: " +
+                                    "fresh=$iphoneFresh frames=$framesNow rate=$recentRate/s")
+                                releaseMediaAndKeepSession("iphone_audio_not_ready")
+                            }
                         }
                     }
                     return
@@ -860,10 +899,37 @@ object CallAudioRelay : CallManager.CallListener {
      * Counts an arrived frame and queues it for playback. A null frame is a redundant copy whose
      * original already played, so it is not counted and not queued.
      */
+    /**
+     * Frames per second over the gate's own short window, refreshed once the window has filled.
+     *
+     * The origin is written when the first frame of an arm arrives, so a zero here can only mean
+     * "no frame yet" - the trap that kept the previous windowed attempt from ever opening the gate
+     * (AGENTS 6.6) is structurally impossible: this function never assigns the origin.
+     */
+    private fun gateWindowRate(framesNow: Int, now: Long): Int {
+        val origin = gateRateWindowAt
+        if (origin == 0L) return 0
+        val elapsed = now - origin
+        if (elapsed <= 0L) return 0
+        val frames = framesNow - gateRateWindowFrames
+        if (frames < 0) return 0
+        val rate = (frames * 1000L / elapsed).toInt()
+        if (elapsed >= GATE_RATE_WINDOW_MS) {
+            gateRateWindowAt = now
+            gateRateWindowFrames = framesNow
+        }
+        return rate
+    }
+
     private fun acceptFrame(frame: ByteArray?, receivedAt: Long, authenticated: Boolean) {
         if (frame == null) return
         lastIPhonePcmAt = receivedAt
-        if (firstPcmAt == 0L) firstPcmAt = receivedAt
+        if (firstPcmAt == 0L) {
+            firstPcmAt = receivedAt
+            // The gate's fast path measures from the first frame of this arm; see gateWindowRate.
+            gateRateWindowAt = receivedAt
+            gateRateWindowFrames = 0
+        }
         iphoneFrames.incrementAndGet()
         val frames = pcmSinceArm.incrementAndGet()
         if (frames == ARRIVAL_WINDOW_MIN_FRAMES && owner == Owner.PREPARING_IPHONE && !mediaRunning) {
