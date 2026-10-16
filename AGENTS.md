@@ -458,6 +458,17 @@ için **her çağrıda** kilitleniyordu.
 çağrıda tuttu; **her çağrıda tutacağı kanıtlanmadı.** Kapı sabit değil, **iPhone'un sesi ne
 kadar hızlı başlarsa** o kadar hızlı açılıyor.
 
+**Sonuç (16.10.2026, düzeltme sonrası n=2 — kural işe yaradı):**
+
+| Çağrı | firstPcm | gate | startMedia | hedef <1 sn |
+|---|---|---|---|---|
+| 16:06 | 524 ms | 431 ms | **955 ms** | ✓ |
+| 16:15 | 505 ms | 683 ms | **1236 ms** | ✗ |
+
+Yani **min 955 · ort 1096 · max 1236 ms** → hedef **bir çağrıda tuttu, bir çağrıda tutmadı.**
+Sabit olan `firstPcm` (505-524 ms, iPhone motoru); değişen **kapının beklediği süre**. Eğer
+16:06'daki tek ölçümle "hedefi tuttum" denseydi, **yanlış bir rapor** verilmiş olurdu.
+
 **KURAL:**
 1. Bir gecikme hedefi için **en az 3 çağrı** ölç ve **dağılımı** yaz (min / ort / max).
    Tek ölçümü "hedefi tuttum" diye raporlamak, 6.4'ün kardeşi bir hatadır.
@@ -468,6 +479,39 @@ kadar hızlı başlarsa** o kadar hızlı açılıyor.
 3. **Kapsamayan tamponda yokluk kanıt değildir (3.1'in log hâli):** cihaz logcat tamponu bu
    oturumda 15:33:55'te başlıyordu; 10:33 çağrısı tamponda **yoktu**. "Eski çağrıda bu satır
    yoktu" demek için **tamponun o pencereyi kapsadığını** önce doğrula.
+
+### 6.8 Tavan ile ihtiyaç formülü çakışırsa kayıp "yapısal" olur — sayıyı koddan çıkar
+
+**Bulgu (16.10.2026, madde 4 — cızırtı/kesilme):** İki çağrının da devir teslim **sonrası**
+sağlık satırları okundu. HAL temizdi (`pcm_prepare`=0, stream tek ve kesintisiz), kuyruk temizdi
+(`dropped`=0, `expired`=0, `partial`=0, `maxWriteMs`=1 ms) — **ama** `underruns` 5.1 saniyede
+12 → 28 çıktı: 16 çerçeve (320 ms) gerçek ses yerine gizleme ile dolduruldu = **~%6**.
+10:33'teki çağrıda aynı ölçüm **%1.6**'ydı.
+
+Fark ağın geliş desenindeydi: `maxAuthenticatedArrivalGapMs` **197-204 ms** (10:33'te 52 ms),
+`maxAuthenticatedArrivalBurstFrames` **7-8** (10:33'te 3).
+
+Ve tampon tavanı bunu karşılayamıyor:
+```kotlin
+const val LOCAL_TARGET_CEILING = 12                      // 12 x 20 ms = 240 ms (yerel link)
+val gapFrames = ((gapMs - FRAME_MS + FRAME_MS - 1) / FRAME_MS)   // ceil((gap-20)/20)
+val need = maxOf(gapFrames, burst) + 1
+needFrames[needIndex] = minOf(need, ceiling())           // >>> TAVANDA KIRPILIYOR <<<
+```
+`need = gapFrames + 1` ve tavan 12 olduğu için **240 ms'den büyük her geliş boşluğu yapısal
+olarak karşılanamaz** (241 ms → gapFrames 12 → need 13 → 12'ye kırpılır). Bugünkü ağın en kötü
+boşluğu (197-204 ms) tavanın **~40 ms altında**, yani tampon sürekli sınırda çalışıyor ve her
+ekstra jitter'da kuru kalıyor (`queued=0`).
+
+**KURAL:**
+1. "Ses bozuk" dendiğinde **hangi katman olduğunu ayır**: HAL (`pcm_prepare`, stream tekrarı) ·
+   kuyruk (`dropped`, `expired`) · yazıcı (`maxWriteMs`) · **ağ deseni (`gap`, `burst`)**.
+   Dördü de temizse kalan şey **tamponun matematiksel sınırıdır** — kod hatası değil.
+2. **Ölçüyü tavana çevir:** `need = ceil((gap-20)/20)+1` ile `ceiling`'i karşılaştır. Ağın en
+   kötü boşluğu tavana yaklaşıyorsa o link için tampon **tasarım gereği** yetersizdir; bu, test
+   yazmakla değil ancak **tavanı ya da link sınıflandırmasını** değiştirmekle düzelir.
+3. Böyle bir değişiklik **ses yoludur** (6.1): gerçek çağrıyla doğrulanmadan kurulmaz ve bedeli
+   (gecikme 240 → 320-480 ms) **kullanıcıya söylenir**. "Sessizce iyileştirme" yok.
 
 ---
 

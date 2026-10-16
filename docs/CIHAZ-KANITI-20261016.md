@@ -1193,3 +1193,126 @@ Vendor düzeltmesi (USECASE_INCALL_MUSIC_UPLINK2 → SIM 2) **çalışıyor**.
 - **26 → 27.** Bu kurulum kullanıcının açık talimatıyla yapıldı ("ses hiç iPhone'a geçmiyor;
   ya düzelt ya da eski hâline getir") ve kural 0.4'ün beş sorusu yanıtlandı.
 - Sonrasında **hiçbir kurulum yapılmadı**; bu bölümdeki tüm kanıt **salt okuma** ile toplandı.
+
+---
+
+## 33. İkinci ve üçüncü çağrı + madde 4'ün ölçülü teşhisi (16.10.2026 16:15, salt okuma)
+
+Kullanıcı "konuştum" dedi: 16:15:13 → 16:15:27 çağrısı, **konuşma penceresi 9.6 sn**
+(`active` 16:15:17.591 → hangup 16:15:27.208). Bu, kural 6.7'nin istediği ≥5 sn eşiğini geçen
+ilk çağrı; yani **devir teslim sonrası `RELAY_HEALTH` satırları ilk kez yazıldı.**
+
+### Çağrı ve geçiş
+```
+16:15:13.672  Audio: AUDIO_OWNER=PREPARING_IPHONE reason=waiting_for_iphone_audio
+16:15:14.980  Call: media started (gate=731ms frames=32 rate=38/s)
+16:15:15.384  Audio: AUDIO_OWNER=IPHONE reason=iphone_confirmed
+16:15:15.387  Call: moved to iPhone (uplink=50/s downlink=49/s firstPcm=505ms startMedia=1236ms gateMs=683 gateRate=38/s)
+16:15:17.591  Call State Changed: State=active
+16:15:27.208  Executing HANGUP / DISCONNECT
+```
+
+### Geçiş süresi — n=2, hedef TUTARLI tutmuyor (dürüst tablo)
+
+| Çağrı | firstPcm | gate | startMedia | hedef <1 sn |
+|---|---|---|---|---|
+| 08:34 (eski mantık) | 474 ms | — | 1474 ms | ✗ |
+| 10:33 (son çalışan, eski mantık) | 592 ms | 1431 ms | 2023 ms | ✗ |
+| 16:06 (düzeltme sonrası) | 524 ms | 431 ms | **955 ms** | ✓ |
+| **16:15 (düzeltme sonrası)** | 505 ms | 683 ms | **1236 ms** | ✗ |
+
+**Düzeltme sonrası: min 955 · ort 1096 · max 1236 ms.** Yani `<1 sn` **bir çağrıda tuttu,
+bir çağrıda tutmadı.** Değişen kısım `firstPcm` değil (505-524 ms, neredeyse sabit = iPhone
+motorunun başlama süresi); değişen **kapının beklediği süre** (431 vs 683 ms). Kapı, iPhone'un
+çerçeve hızı 38/s eşiğini geçene kadar bekliyor; 16:15'te hız tam sınırda (gateRate=38/s) açtı.
+
+**Sonuç:** taban ~0.95 sn, tavan ~1.25 sn. Hedefi **garantili** kılmak, iPhone motorunun devir
+teslimden önce ısınmasını gerektirir — ki bu iOS tarafında bir değişikliktir ve bölüm 30'da
+iPhone'un `state == .active` guard'ı yüzünden mümkün olmadığı okunmuştu.
+
+### Madde 4 (cızırtı/kesilme) — ölçülü teşhis
+
+Devir teslim sonrası sağlık satırları:
+```
+16:15:20.102  owner=IPHONE iphone=52/s uplink=52/s pcm=52/s silence=0/s partial=0/s
+              queued=7 targetFrames=10 dropped=0 expired=0 underruns=12 maxWriteMs=1
+              maxAuthenticatedArrivalGapMs=197 maxAuthenticatedArrivalBurstFrames=7
+16:15:25.226  owner=IPHONE iphone=50/s uplink=53/s pcm=51/s silence=2/s partial=0/s
+              queued=0 targetFrames=11 dropped=0 expired=0 underruns=28 maxWriteMs=1
+              maxAuthenticatedArrivalGapMs=204 maxAuthenticatedArrivalBurstFrames=8
+```
+
+**Temiz olanlar (hepsi iyi):**
+- `pcm_prepare` = 0, HAL stream **tek ve kesintisiz**: `start_output_stream usecase(51:
+  incall_music_uplink2)` 16:15:14.926 → `out_standby` 16:15:30.336 (~15.4 sn tek açılış).
+  Yani "helikopter" imzası yok.
+- `dropped=0`, `expired=0` → hiçbir çerçeve atılmadı.
+- `maxWriteMs=1` → ses yazıcısı hiç bloklanmadı.
+- `partial=0` → bozuk/eksik çerçeve yok.
+
+**Kalan tek kusur — bağlantı patlamalı (bursty) ve tampon tam sınırda:**
+`underruns` 12 → 28, yani 5.124 saniyede **16 çerçeve** (16 × 20 ms = 320 ms) gerçek ses yerine
+gizleme ile dolduruldu → **~3.1 çerçeve/sn = çerçevelerin ~%6'sı.** Karşılaştırma: 10:33'teki
+smooth çağrıda aynı ölçüm **0.78/sn (~%1.6)** idi.
+
+Fark, ağın geliş deseninde:
+| Çağrı | maxAuthenticatedArrivalGapMs | burstFrames | underrun hızı |
+|---|---|---|---|
+| 10:33 | 52 ms | 3 | 0.78/s (%1.6) |
+| 08:34 | 206 ms | 5 | (tek satır: 41) |
+| **16:15** | **197-204 ms** | **7-8** | **3.1/s (%6.2)** |
+
+**Kök neden koddan doğrulandı (UplinkJitterBuffer.kt):**
+```kotlin
+const val LOCAL_TARGET_CEILING = 12       // 12 * 20 ms = 240 ms  (yerel link)
+private fun observe(gapMs, burst, nowMs) {
+    val gapFrames = if (gapMs > FRAME_MS) ((gapMs - FRAME_MS + FRAME_MS - 1) / FRAME_MS) else 0
+    val need = maxOf(gapFrames, burst) + 1
+    needFrames[needIndex] = minOf(need, ceiling())      // <<< TAVANDA KIRPILIYOR
+}
+```
+`need = gapFrames + 1` ve `ceiling = 12` olduğu için **240 ms'den büyük her geliş boşluğu
+yapısal olarak karşılanamaz** (gap 241 ms → gapFrames 12 → need 13 → 12'ye kırpılır).
+Bugünkü ağın en kötü boşluğu **197-204 ms**, yani tavanın **~40 ms altında**: tampon
+hedefi 10-11 çerçeveye çıkıyor ve her ekstra jitter'da kuru kalıyor (`queued=0` tam da bunu
+gösteriyor). Yani cızırtının kaynağı **kod hatası değil, tamponun yerel-link tavanının bu ağın
+gerçek davranışına göre dar olması.**
+
+**Aday düzeltme (KURULMADI — kural 0.4/6.1 gereği çağrı doğrulaması ve karar bekliyor):**
+yerel tavanı yükseltmek ya da gözlenen boşluk bir eşiği geçtiğinde linki "remote" profiline
+(480 ms tavan) almaya izin vermek. Bedeli: gecikme 240 → 320-480 ms'ye çıkar (telsiz bütçesi).
+Bu bir ses yolu değişikliğidir: **kurulmadan önce gerçek çağrıyla doğrulanmalıdır.**
+
+### Madde 1 (arayüz) — ilk GEÇERLİ ekran görüntüsü bulundu
+Ekran şu an kilitli (`mDreamingLockscreen=true`, `mWakefulness=Awake`), yeni görüntü alınamıyor:
+16:15:29'da alınan kare **kilit ekranı** çıktı. Ancak bugün 10:31'de alınmış **geçerli** bir
+kare var (`call-now.png`, 182 KB) ve uygulamanın kendi arayüzünü gösteriyor:
+
+| Öge | Durum |
+|---|---|
+| "Son aramalar" başlığı + ayar dişlisi | ✅ |
+| "iPhone bağlı" durum şeridi (yeşil nokta + ok) | ✅ |
+| Yeşil "Görüşme sürüyor · 532" bandı + "Aç" düğmesi | ✅ |
+| Arama geçmişi: avatar, ad, yön (Gelen/Giden), süre, **"iPhone'da"** etiketi | ✅ |
+| Alt sekme çubuğu: Son · Kişiler · Tuşlar · Mesajlar | ✅ |
+
+Dikkat: `call-ui2.png`, `call-live.png`, `call-live2.png`, `call-screen-live.png` **siyah**
+(14.8 KB) — geçersiz kareler; kanıt sayılmaz.
+
+**Hâlâ eksik:** çağrı **sırasında** tam ekran çağrı arayüzünün karesi. 10:29'da kilit ekranında
+yalnızca "Görüşme sürüyor" **bildirimi** görünüyordu, tam ekran çağrı ekranı değil. Ama o kare
+**13:21'deki `198e372` commit'inden önce** alındı ve o commit tam da bu yolu yeniden yazdı
+(`setShowWhenLocked`/`setTurnScreenOn` → `FLAG_SHOW_WHEN_LOCKED | FLAG_TURN_SCREEN_ON`). Yani
+kilitliyken tam ekran çağrı ekranı çıkıyor mu sorusu **kurulu sürüm için hâlâ açık** — ve testi
+tek: kilitliyken bir çağrı + ekran görüntüsü.
+
+### Teardown'daki `E` satırı artık tekrarlanabilir
+`E audio_hw_primary: disable_snd_device: Invalid sound device 0` — 16:06:30.283 **ve**
+16:15:30.410, yani her iki çağrının da **kapanışında** (out_standby sonrası), ses akarken değil.
+Hâlâ "zararsız" diyemem (10:33 penceresi tamponda yok), ama artık **her çağrıda tekrarlıyor** ve
+zamanlaması sabit: çağrı bittikten ~3 sn sonra, stream kapanırken.
+
+### Kurulum disiplini
+Kurulum **27 → 27**: bu bölümdeki her şey **salt okuma** ile toplandı (adb shell okuma +
+screencap). Kullanıcının çektiği ekran görüntüsü dosyası cihazdan silindi; hiçbir ayar,
+kurulum veya `am start` yapılmadı.
