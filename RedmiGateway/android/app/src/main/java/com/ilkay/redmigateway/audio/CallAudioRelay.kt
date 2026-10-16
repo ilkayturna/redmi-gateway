@@ -698,7 +698,8 @@ object CallAudioRelay : CallManager.CallListener {
                         // The copy is the frame the previous packet carried. It is only new when
                         // that packet never arrived; a keepalive carries no frame, so the sender
                         // omits the copy after one and the counter gap alone means a lost frame.
-                        repeatedFrame = if (counter > lastPcmCounter + 1) plain.copyOfRange(0, FRAME_BYTES) else null
+                        repeatedFrame = if (RedundantFrames.copyIsNew(counter, lastPcmCounter))
+                            plain.copyOfRange(0, FRAME_BYTES) else null
                         frame = plain.copyOfRange(FRAME_BYTES, 2 * FRAME_BYTES)
                         lastPcmCounter = counter
                     }

@@ -10,12 +10,16 @@ struct CallAudioPacer<Frame> {
     private let interval: TimeInterval = 0.02
     private let maximumAge: TimeInterval = 0.32
     private let capacity = 12
-    /// How long the queue may stay empty before the send reserve is rebuilt. The tap produces a
-    /// frame every ~21 ms and the timer takes one every 20 ms, so a healthy queue empties all the
-    /// time; treating that as starvation held every following frame back for 60 ms and then sent a
-    /// clump (measured on the Redmi: burst=5, gap=338 ms, 46.7 frames/s, which drained its 20 ms
-    /// buffer into concealment - the crackle). A real stall still rebuilds the reserve.
-    private let starvation: TimeInterval = 0.03
+    /// How long the queue may stay empty before the send reserve is rebuilt.
+    ///
+    /// The tap produces a frame every ~21 ms and the timer takes one every 20 ms, so a healthy
+    /// queue is empty for one to two frame periods all the time - and when the microphone runs
+    /// slightly slow (the measured 46.7 frames/s) it is empty almost permanently. Rebuilding the
+    /// three-frame reserve there held each following frame back for 60 ms and turned the small
+    /// production shortfall into 60-80 ms holes (measured on the Redmi: burst=5, gap=338 ms), which
+    /// drained its 20 ms buffer into concealment - the crackle. Only a real outage, seven frame
+    /// periods without a single frame, rebuilds the reserve.
+    private let starvation: TimeInterval = 0.15
     private var frames: [Capture] = []
     private var primed = false
     private var emptySince: TimeInterval?
@@ -96,19 +100,23 @@ struct CallAudioPacer<Frame> {
         } else {
             nextSendAt = now + interval
         }
-        // The reserve belongs to the start of a stream, not to every drain. The tap produces a
-        // frame every ~21 ms and the timer takes one every 20 ms, so a healthy queue empties all
-        // the time; re-arming the three-frame reserve there held each following frame back for
-        // 60 ms and then sent a clump. Measured on the Redmi: burst=5, gap=338 ms, 46.7 frames/s,
-        // which drained its 20 ms buffer into concealment - the crackle. Only reset() and
-        // discardPending() un-prime now.
+        // The queue is empty until the microphone's next frame: remember when, so only a real
+        // starvation (see the header of this method) rebuilds the reserve.
+        if frames.isEmpty { emptySince = now }
         return frame
     }
 
     private mutating func discardExpired(now: TimeInterval) {
+        var dropped = false
         while let first = frames.first, now - first.capturedAt > maximumAge {
             frames.removeFirst()
+            dropped = true
             droppedExpired += 1
+        }
+        // Speech that aged out means the stream really stopped; that reserve is rebuilt too.
+        if dropped, frames.isEmpty {
+            primed = false
+            emptySince = nil
         }
     }
 }

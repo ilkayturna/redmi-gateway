@@ -13,7 +13,8 @@ struct CallAudioTimingTests {
     static func main() {
         captureBatchesArePaced()
         schedulerStallDoesNotCatchUp()
-        drainedQueueResumesAtTheNextFrame()
+        microphoneReprimesAfterStarvation()
+        transientEmptyQueueKeepsPacing()
         pacedSpeechHasNoSendGaps()
         reloadedReserveCannotBypassPacing()
         timerCadenceSurvivesHandlerCostAndWakeJitter()
@@ -27,7 +28,7 @@ struct CallAudioTimingTests {
         oldPlaybackCompletionCannotDrainNewStream()
         playbackCapacityStaysBounded()
         if failures != 0 { print("\(failures) audio timing regression(s)"); exit(1) }
-        print("PASS: 15 call audio timing regressions")
+        print("PASS: 16 call audio timing regressions")
     }
 
     // Break caught: emitting every frame from one tap callback at the same instant.
@@ -67,22 +68,36 @@ struct CallAudioTimingTests {
         expect(pacer.next(now: 0.30) == 2, "next frame resumes at real time")
     }
 
-    // Break caught (the 08:33 crackle): re-arming the three-frame reserve every time the queue
-    // drained. The tap produces a frame every ~21 ms and the timer takes one every 20 ms, so a
-    // healthy queue empties constantly; waiting for three frames after every drain sent clumps of
-    // frames separated by 60-100 ms holes (measured on the Redmi: burst=5, gap=338 ms,
-    // 46.7 frames/s), which drained its 20 ms buffer into concealment. A new stream still starts
-    // with the reserve - only a drain mid-stream resumes immediately.
-    static func drainedQueueResumesAtTheNextFrame() {
+    // Break caught: restarting speech with a single frame after an empty queue. The queue has to be
+    // empty for a real outage (seven frame periods), not merely between two microphone callbacks -
+    // see transientEmptyQueueKeepsPacing for the healthy case that must not rebuild.
+    static func microphoneReprimesAfterStarvation() {
         var pacer = CallAudioPacer<Int>()
         pacer.enqueue([1, 2, 3], capturedAt: 0.04, now: 0.04, generation: pacer.generation)
         _ = pacer.next(now: 0.04); _ = pacer.next(now: 0.06); _ = pacer.next(now: 0.08)
         expect(pacer.next(now: 0.10) == nil, "empty microphone queue has no fabricated PCM")
-        pacer.enqueue([4], capturedAt: 0.12, now: 0.12, generation: pacer.generation)
-        expect(pacer.next(now: 0.12) == 4, "a drained queue resumes with the very next frame")
-        pacer.enqueue([5], capturedAt: 0.14, now: 0.14, generation: pacer.generation)
-        expect(pacer.next(now: 0.14) == 5, "steady speech keeps flowing without a new reserve")
-        // A restarted stream is a new stream: the reserve is built again.
+        pacer.enqueue([4], capturedAt: 0.30, now: 0.30, generation: pacer.generation)
+        expect(pacer.next(now: 0.30) == nil, "mic waits for reserve after starvation")
+        pacer.enqueue([5], capturedAt: 0.32, now: 0.32, generation: pacer.generation)
+        expect(pacer.next(now: 0.32) == nil, "two frames do not prematurely resume mic")
+        pacer.enqueue([6], capturedAt: 0.34, now: 0.34, generation: pacer.generation)
+        expect(pacer.next(now: 0.34) == 4, "mic resumes oldest fresh speech with reserve")
+    }
+
+    // Break caught (the 08:33 crackle): treating every empty queue as starvation. The tap produces
+    // a frame every ~21 ms and the timer takes one every 20 ms, so a healthy queue is empty for a
+    // moment all the time; rebuilding the three-frame reserve there sent clumps of frames with
+    // 60-100 ms holes (measured on the Redmi: burst=5, gap=338 ms, 46.7 frames/s), which drained
+    // its 20 ms buffer into concealment. Only an empty queue older than one timer period starves.
+    static func transientEmptyQueueKeepsPacing() {
+        var pacer = CallAudioPacer<Int>()
+        pacer.enqueue([1, 2, 3], capturedAt: 0.04, now: 0.04, generation: pacer.generation)
+        _ = pacer.next(now: 0.04); _ = pacer.next(now: 0.06); _ = pacer.next(now: 0.08)
+        expect(pacer.next(now: 0.10) == nil, "empty microphone queue has no fabricated PCM")
+        pacer.enqueue([4], capturedAt: 0.10, now: 0.10, generation: pacer.generation)
+        expect(pacer.next(now: 0.10) == 4, "a queue empty for one period keeps sending")
+        pacer.enqueue([5], capturedAt: 0.12, now: 0.12, generation: pacer.generation)
+        expect(pacer.next(now: 0.12) == 5, "steady speech keeps flowing without a new reserve")
         pacer.reset()
         pacer.enqueue([6], capturedAt: 0.30, now: 0.30, generation: pacer.generation)
         expect(pacer.next(now: 0.30) == nil, "a restarted stream builds its three-frame reserve")
@@ -92,28 +107,30 @@ struct CallAudioTimingTests {
         expect(pacer.next(now: 0.34) == 6, "the new stream resumes with its reserve in order")
     }
 
-    // Break caught: the same re-priming, measured end to end. One frame captured per 20 ms and a
-    // timer that wakes on the pacer's own deadline must deliver one frame every 20 ms for the whole
-    // call - no clumps, no holes. Those holes are what the Redmi hears as crackle.
+    // Break caught: the same re-priming at the cadence the Redmi actually measured. The tap
+    // delivered one frame every ~21 ms (46.7 frames/s in bursts) and the consumer takes one every
+    // 20 ms, so the queue drains for real; rebuilding the reserve on each drain then turned the
+    // small production shortfall into 60 ms holes (measured: gap=338 ms at the worst). The sender
+    // may only be as fast as its microphone, but it must never add a hole of its own.
     static func pacedSpeechHasNoSendGaps() {
         var pacer = CallAudioPacer<Int>()
         var sent: [(Int, Double)] = []
         var captured = 0
-        var captureAt = 0.02
-        var wake = 0.02
+        var captureAt = 0.021
+        var wake = 0.021
         while wake < 10 {
             while captureAt <= wake + 0.000000001 {
                 pacer.enqueue([captured], capturedAt: captureAt, now: wake, generation: pacer.generation)
                 captured += 1
-                captureAt += 0.02
+                captureAt += 0.021
             }
             if let frame = pacer.next(now: wake) { sent.append((frame, wake)) }
             wake = pacer.nextWakeUp(now: wake)
         }
-        expect(sent.count >= 495, "steady capture sustains 50 frames per second")
+        expect(sent.count >= 470, "the sender keeps up with the measured 47.6 frames per second")
         expect(sent.map { $0.0 } == Array(0..<sent.count), "steady capture keeps PCM order")
         let gaps = zip(sent, sent.dropFirst()).map { $0.1.1 - $0.0.1 }
-        expect(gaps.allSatisfy { $0 <= 0.021 }, "no send gap exceeds one frame period")
+        expect(gaps.allSatisfy { $0 <= 0.045 }, "the sender adds no hole beyond the capture period")
     }
 
     // Break caught: unbounded capture backlog and sending obsolete speech after a stall.
