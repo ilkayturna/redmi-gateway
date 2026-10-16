@@ -807,3 +807,44 @@ dosyaya yazıyordu, `START_HOTSPOT`/`TRY_KNOWN_NETWORK` yalnızca logcat'e.
 | **Mobil kota koruması** | ✅ Ses yolu LAN üzerinden; mobil veri harcanmıyor |
 
 **Madde 5 tamamen doğrulandı** ✓ — davranış + teşhis edilebilirlik.
+
+---
+
+## 20. ⚠️ KENDİ REGRESYONUM: log satırı 20 saniyede bir tekrarlıyordu (16.10.2026 15:34)
+
+**Bölüm 19'da eklediğim log satırı cihazda hemen görüldü — ve hemen bir kusur gösterdi:**
+
+```
+15:32:13.150  Wi-Fi lost; trying a known network...
+15:32:33.206  Wi-Fi lost; trying a known network...
+15:32:53.227  Wi-Fi lost; trying a known network...
+```
+
+**Değerlendirme her 20 saniyede çalışıyor** ve durum genelde **değişmemiş** oluyor. Satırı her geçişte
+yazmak **dakikada 3 kez aynı metni** yazıyordu → **4000 satırlık döngüde gerçek geçmişi itiyordu.**
+
+### Düzeltme: `recordDecision` — yalnızca karar DEĞİŞTİĞİNDE dosyaya yaz
+
+```kotlin
+private fun recordDecision(action: HotspotAction, message: String) {
+    Log.i(TAG, message)                        // logcat: her gecis
+    if (action == lastRecordedAction) return   // dosya: yalnizca degisim
+    lastRecordedAction = action
+    DiagnosticsLog.record(TAG, message)
+}
+```
+
+### ✅ Cihazda doğrulandı
+
+```
+Dosya (tanilama) :  6 -> 6     120 saniyede ARTMADI
+Logcat           :  10 satir   orada tam kayit devam ediyor
+```
+
+**Kurulumdan 1 sn sonra gelen tek satır (`15:33:53.206`) doğru davranış:** ilk değerlendirmede
+karar `null → TRY_KNOWN_NETWORK` **değiştiği** için yazıldı; sonraki tekrarlar yazılmadı ✓
+
+### Ders
+**Bir log satırı eklerken "bu kaç kez çalışır?" sorusu sorulmalı.** Değerlendirme döngüsü içindeki
+her kayıt, döngü frekansında yazar. Kullanıcının gördüğü yan etki sınıfı (kural 0.2) log için de
+geçerli: **dosya dolup faydalı geçmiş kaybolur.**

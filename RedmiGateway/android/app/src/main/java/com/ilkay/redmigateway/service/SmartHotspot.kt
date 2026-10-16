@@ -56,6 +56,8 @@ object SmartHotspot {
     private var trying: String? = null
     private var tryDeadline = 0L
     private var lastScanAt = 0L
+    /** The last decision written to the diagnostics file, so repeats are not written again. */
+    private var lastRecordedAction: HotspotAction? = null
     private val backoff = HashMap<String, Long>()
     private var started = false
 
@@ -220,28 +222,39 @@ object SmartHotspot {
         )
         when (action) {
             HotspotAction.STOP_HOTSPOT -> {
-                Log.i(TAG, "Known Wi-Fi in use; hotspot off to save mobile data")
-                com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Known Wi-Fi in use; hotspot off to save mobile data")
+                recordDecision(action, "Known Wi-Fi in use; hotspot off to save mobile data")
                 stopHotspot()
             }
             HotspotAction.START_HOTSPOT -> {
-                val why = "No Wi-Fi; hotspot on for the iPhone${if (inCall) " (during a call)" else ""}"
-                Log.i(TAG, why)
-                // The stop half of this decision is recorded in the file the phone can hand over;
-                // the start half was only going to logcat, which rotates away. On the device the
-                // hotspot was found up and the iPhone connected through it, and the file said
-                // nothing about why, so the state had to be worked out from the interfaces.
-                com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, why)
+                recordDecision(action, "No Wi-Fi; hotspot on for the iPhone${if (inCall) " (during a call)" else ""}")
                 HotspotRestarter.startIfNeeded(context)
                 lostSince = now
             }
             HotspotAction.TRY_KNOWN_NETWORK -> {
-                Log.i(TAG, "Wi-Fi lost; trying a known network before falling back to the hotspot")
-                com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Wi-Fi lost; trying a known network before falling back to the hotspot")
+                recordDecision(action, "Wi-Fi lost; trying a known network before falling back to the hotspot")
                 tryKnownNetwork(now)
             }
             HotspotAction.NONE -> Unit
         }
+    }
+
+    /**
+     * Writes a decision to logcat and to the diagnostics file, but only when it changes.
+     *
+     * The evaluation runs every twenty seconds, and the state it is evaluating usually has not
+     * changed, so recording every pass would write the same line three times a minute and push
+     * real history out of a file that keeps four thousand lines. The first version of this did
+     * exactly that and it was visible on the device within the minute: "Wi-Fi lost; trying a known
+     * network" appeared at 15:32:13, again at 15:32:33, and again at 15:32:53.
+     *
+     * What is worth keeping is the transition, which is what a person reading the file later is
+     * looking for: when the hotspot went off and when it came back on.
+     */
+    private fun recordDecision(action: HotspotAction, message: String) {
+        Log.i(TAG, message)
+        if (action == lastRecordedAction) return
+        lastRecordedAction = action
+        com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, message)
     }
 
     private fun tryKnownNetwork(now: Long) {
