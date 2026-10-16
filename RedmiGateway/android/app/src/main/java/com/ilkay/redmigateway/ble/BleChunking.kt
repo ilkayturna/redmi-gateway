@@ -1,4 +1,4 @@
-package com.ilkay.redmigateway.ble
+﻿package com.ilkay.redmigateway.ble
 
 /**
  * Splits a sealed state frame into ATT notification sized chunks, in the format the iPhone
@@ -57,3 +57,4 @@ internal object BleChunking {
         return chunks
     }
 }
+
