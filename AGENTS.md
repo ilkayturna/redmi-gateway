@@ -6,6 +6,69 @@
 
 ---
 
+# ⛔ 0. KULLANICIYA ZARAR VERME — EN ÖNCE BU
+
+> Bu bölüm dosyanın **en başında** durur çünkü buradaki hata **kullanıcıya doğrudan
+> zarar verir** ve ben farkına varmadan **saatlerce tekrarlanır**. Diğer kuralların hepsi
+> teknik; bu kural **insani**.
+
+## 0.1 Başarısız her CI koşumu kullanıcıya **MAİL** atar
+
+**Hata (16.10.2026):** GitHub Actions runner atamaz hâle geldi (hesap seviyesi kısıt).
+Her `git push` `build-android.yml`'i tetikledi → her koşum **5 saniyede çöktü** → GitHub
+**depo sahibine hata bildirimi maili** gönderdi. Ben bu sırada **15+ commit** push ettim.
+Kullanıcı namazdan döndüğünde **posta kutusu hata maili doluydu.**
+
+**Bunu fark etmedim** çünkü ben mailleri görmüyorum. Kullanıcının gördüğü şeyi
+**modelleyemedim.**
+
+**KURAL — bir push yapmadan ÖNCE şunu sor:**
+> *"Bu push bir iş akışını tetikler mi? O iş akışı şu an ÇALIŞIYOR mu?"*
+
+1. **Bilinen-bozuk bir iş akışını tetikleyen push YAPMA.** Önce:
+   ```
+   PUT /repos/{owner}/{repo}/actions/workflows/{id}/disable
+   ```
+   Doğrula: `state=disabled_manually`. Sonra push et.
+2. **Bir kesinti doğrulandıysa TEKRAR DENEMEYİ BIRAK.** Her "bir daha deneyeyim" =
+   kullanıcıya **bir mail daha**. Kesinti tespiti **tek** koşumla yapılır, sonra susulur.
+3. **Kesinti doğrulanınca ilk iş iş akışlarını devre dışı bırakmaktır** — teşhisi
+   bitirmeden önce. Teşhis sürerken her deneme bir maildir.
+4. İş akışını **yeniden etkinleştirmeyi unutma** (`PUT .../enable`) — kesinti bitince.
+   Devre dışı bırakılan iş akışı sessizce ölüdür; CI'nın çalıştığını sanırsın.
+
+## 0.2 Kullanıcının gördüğü yan etkileri modelle
+
+**Genel kural:** Benim çalıştırdığım her komutun **kullanıcıya görünen** bir yan etkisi
+olabilir: mail, bildirim, ses, pil, veri, para (CI dakikası). Bir işlemi tekrarlamadan önce
+**"kullanıcı bunu kaç kez görür?"** diye sor.
+
+| İşlem | Kullanıcıya görünen |
+|---|---|
+| Başarısız CI koşumu | **E-posta bildirimi** |
+| Başarılı CI koşumu | (genelde sessiz, ayara bağlı) |
+| TestFlight yüklemesi | Bildirim + beta uyarısı |
+| Cihaza kurulum | Telefon ekranında değişiklik |
+| APK derleme tekrarı | (yerel, görünmez) |
+
+## 0.3 "Farkında değildim" mazeret değil — kontrol et
+
+Bir şeyi **göremiyorsam** (mail kutusu, telefon ekranı, kullanıcının oturumu), o şeyin
+**benim yüzümden nasıl göründüğünü** başka yoldan kontrol et:
+```powershell
+# Kac kosum BASARISIZ oldu (her biri bir mail olabilir)
+$runs.workflow_runs | Where-Object { $_.conclusion -eq "failure" } | Measure-Object
+# Kullanici kac bildirim almis olabilir
+Invoke-RestMethod "https://api.github.com/repos/$repo/actions/runs?per_page=100" -Headers $h |
+  Select-Object -ExpandProperty workflow_runs |
+  Group-Object conclusion | ForEach-Object { "$($_.Name): $($_.Count)" }
+```
+
+**KURAL:** Uzun bir oturumda **periyodik olarak** "kaç başarısız koşum ürettim?" say.
+Sayı 3'ü geçtiyse **dur ve sebebini bul** — kullanıcı o sayıda mail almış olabilir.
+
+---
+
 ## 1. KABUK (PowerShell) — EN SIK ZAMAN KAYBI
 
 ### 1.1 `<` ve `>` kabuk operatörleridir — metin içinde kullanma
