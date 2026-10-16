@@ -123,7 +123,7 @@ object CallAudioRelay : CallManager.CallListener {
     /** Shortest gap between two event driven gate evaluations. */
     private const val GATE_KICK_MS = 60L
     /** How long a "take the audio" press stays valid while the iPhone has no control link. */
-    private const val AUDIO_REQUEST_GRACE_MS = 10_000L
+    private const val AUDIO_REQUEST_GRACE_MS = 30_000L
 
     private val lastValidPcm = ByteArray(FRAME_BYTES)
     private val plcBuf = ByteArray(FRAME_BYTES)
@@ -369,6 +369,8 @@ object CallAudioRelay : CallManager.CallListener {
             if (isLiveCallState(CallManager.currentCallState)) callSeenLive = true
             if (owner == Owner.REDMI) {
                 preparingSince = SystemClock.elapsedRealtime()
+                // The iPhone answered the request: stop replaying the kept press.
+                pendingAudioRequestAt = 0L
                 setOwner(Owner.PREPARING_IPHONE, "waiting_for_iphone_audio")
             }
             armedAt = SystemClock.elapsedRealtime()
@@ -404,8 +406,12 @@ object CallAudioRelay : CallManager.CallListener {
                 // A sleeping iPhone may refuse the pickup with its screen off, and the region beacon
                 // is what brings the app forward; ask for it while this request is in flight.
                 com.ilkay.redmigateway.ble.BleServerManager.wakeForAudioTransfer()
+                // Keep the request even when a client looks authenticated right now: that socket may
+                // die before the answer arrives (measured on 16.10.2026: sessions lived 60-190 ms
+                // while the iPhone reconnected every ~20 s). A press made into a dying socket used
+                // to be lost with nothing to retry it, and the user saw the audio stay on the Redmi.
+                pendingAudioRequestAt = SystemClock.elapsedRealtime()
                 if (GatewayService.authenticatedClientCount() == 0) {
-                    pendingAudioRequestAt = SystemClock.elapsedRealtime()
                     Log.w(TAG, "No iPhone on the control link; keeping the audio request for $AUDIO_REQUEST_GRACE_MS ms")
                 }
                 for (l in listeners) runCatching { l.onAudioOwnerChanged(Owner.REDMI, "request_iphone_audio") }
@@ -416,14 +422,26 @@ object CallAudioRelay : CallManager.CallListener {
     /**
      * A client just authenticated: replay a recent "take the audio" press, so the press the user
      * made while the iPhone was asleep still moves the call once it comes back.
+     *
+     * The request stays armed for the whole grace window and is replayed on **every** new
+     * authentication inside it, not just the first: the iPhone often reconnects several times
+     * before its audio answer lands, and clearing the marker after one replay threw the user's
+     * press away. The marker is dropped when the request is fulfilled (the relay arms and takes
+     * ownership) or when the window expires.
      */
     fun onControlClientAvailable() {
         handler.post {
             val askedAt = pendingAudioRequestAt
             if (askedAt == 0L) return@post
-            pendingAudioRequestAt = 0L
-            if (SystemClock.elapsedRealtime() - askedAt > AUDIO_REQUEST_GRACE_MS) return@post
-            if (!isLiveCallState(CallManager.currentCallState) || owner != Owner.REDMI) return@post
+            if (SystemClock.elapsedRealtime() - askedAt > AUDIO_REQUEST_GRACE_MS) {
+                pendingAudioRequestAt = 0L
+                return@post
+            }
+            if (!isLiveCallState(CallManager.currentCallState) || owner != Owner.REDMI) {
+                // The call ended, or somebody already armed the audio: nothing left to ask for.
+                pendingAudioRequestAt = 0L
+                return@post
+            }
             Log.i(TAG, "iPhone is back on the control link; sending the kept audio request")
             CallManager.log("iPhone reconnected; sending the kept audio request")
             for (l in listeners) runCatching { l.onAudioOwnerChanged(Owner.REDMI, "request_iphone_audio") }

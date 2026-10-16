@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.ilkay.redmigateway.audio.CallAudioRelay
@@ -33,6 +34,16 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
         private const val TAG = "GatewayService"
         private const val CHANNEL_ID = "redmi_gateway_channel"
         private const val NOTIFICATION_ID = 1001
+
+        /**
+         * The iPhone reconnects many times an hour and every authentication flips the status line.
+         * On 16.10.2026 that produced 460 notification posts in 40 minutes (937 enqueues in the
+         * events buffer), each one a NotificationManagerService:post wakelock, for a line the user
+         * cannot read that fast anyway. Two rules keep the same information with far fewer posts:
+         * the same text is never posted twice, and a change arriving inside this window waits for
+         * the quiet moment. The window is short enough that the row still follows the phone.
+         */
+        private const val NOTIFICATION_MIN_INTERVAL_MS = 15_000L
 
         const val ACTION_START = "com.ilkay.redmigateway.ACTION_START"
         const val ACTION_STOP = "com.ilkay.redmigateway.ACTION_STOP"
@@ -71,6 +82,18 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     private val restoreHotspot = Runnable { if (isRunning && !SmartHotspot.enabled) HotspotRestarter.startIfNeeded(this) }
     @Volatile private var callAudioOnIPhone = false
     private val reachabilityListener: () -> Unit = { if (isRunning) updateNotification(statusText()) }
+
+    // Notification coalescing (see NOTIFICATION_MIN_INTERVAL_MS). All three fields are touched on
+    // the main thread only: updateNotification runs from this handler or from IPhoneReachability's
+    // listener, which posts to the main thread.
+    private var lastPostedNotificationText: String? = null
+    private var lastPostedNotificationAt = 0L
+    private var pendingNotificationText: String? = null
+    private val postPendingNotification = Runnable {
+        val text = pendingNotificationText ?: return@Runnable
+        pendingNotificationText = null
+        postNotificationNow(text)
+    }
 
     inner class LocalBinder : Binder() {
         fun getService(): GatewayService = this@GatewayService
@@ -220,6 +243,24 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     }
 
     private fun updateNotification(text: String) {
+        if (text == lastPostedNotificationText && pendingNotificationText == null) return
+        val waitMs = lastPostedNotificationAt + NOTIFICATION_MIN_INTERVAL_MS - SystemClock.elapsedRealtime()
+        if (waitMs <= 0L) {
+            handler.removeCallbacks(postPendingNotification)
+            pendingNotificationText = null
+            postNotificationNow(text)
+            return
+        }
+        // The state is flapping faster than a person can read it: keep only the newest text and
+        // let one post cover every change that arrived inside the window.
+        pendingNotificationText = text
+        handler.removeCallbacks(postPendingNotification)
+        handler.postDelayed(postPendingNotification, waitMs)
+    }
+
+    private fun postNotificationNow(text: String) {
+        lastPostedNotificationText = text
+        lastPostedNotificationAt = SystemClock.elapsedRealtime()
         val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         manager.notify(NOTIFICATION_ID, buildNotification(text))
     }
