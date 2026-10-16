@@ -105,15 +105,12 @@ class SmsStore private constructor(context: Context) :
         }
     }
 
-    private fun fingerprint(sender: String, body: String, timestamp: Long): String {
-        val bytes = MessageDigest.getInstance("SHA-256")
-            .digest("$sender\u0000$timestamp\u0000$body".toByteArray(Charsets.UTF_8))
-        return bytes.joinToString("") { "%02x".format(it) }
-    }
+    private fun fingerprint(sender: String, body: String, timestamp: Long): String =
+        smsFingerprint(sender, body, timestamp)
 
     @Synchronized
     fun readAfter(afterId: Long, limit: Int = 100): SmsHistoryPage {
-        val safeLimit = limit.coerceIn(1, 100)
+        val safeLimit = smsPageLimit(limit)
         val messages = ArrayList<StoredSms>(safeLimit)
         var hasMore = false
         readableDatabase.query(
@@ -144,3 +141,29 @@ class SmsStore private constructor(context: Context) :
         return SmsHistoryPage(messages, hasMore)
     }
 }
+
+/**
+ * The deduplication key for a stored message.
+ *
+ * The store inserts with this fingerprint and ignores conflicts, so it decides which messages are
+ * considered the same one. Getting it wrong is not symmetric: too loose and two different messages
+ * collapse into one, which loses a message silently and is very hard to notice; too tight and the
+ * same message is stored twice every time the system inbox is rescanned.
+ *
+ * The separator is a NUL byte rather than a dash or a colon, and that matters. With an ordinary
+ * separator the fields can be shuffled into the same string, so a message from "0555" saying
+ * "1234" and one from "05551234" saying nothing would produce the same key. NUL cannot appear in
+ * a phone number or in a timestamp, so the three fields stay separate.
+ *
+ * Kept as a function so it can be asserted on. A unit test cannot open the store's database, and
+ * this is the kind of line that gets "simplified" later by someone who does not know why the
+ * separator is unusual.
+ */
+internal fun smsFingerprint(sender: String, body: String, timestamp: Long): String {
+    val bytes = java.security.MessageDigest.getInstance("SHA-256")
+        .digest("$sender\u0000$timestamp\u0000$body".toByteArray(Charsets.UTF_8))
+    return bytes.joinToString("") { "%02x".format(it) }
+}
+
+/** How many messages one page may hold. Guards against a caller asking for everything at once. */
+internal fun smsPageLimit(limit: Int): Int = limit.coerceIn(1, 100)
