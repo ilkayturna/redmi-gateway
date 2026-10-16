@@ -256,7 +256,7 @@ final class AudioEngine {
                                                  channels: 1, interleaved: false),
                   let converter = AVAudioConverter(from: inputFormat, to: monoFormat) else {
                 log("Audio format unavailable")
-                return
+                return false
             }
             if inputFormat.channelCount > 1 { converter.channelMap = [0 as NSNumber] }
             engine.connect(player, to: engine.mainMixerNode, format: monoFormat)
