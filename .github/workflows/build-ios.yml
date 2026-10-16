@@ -48,6 +48,18 @@ jobs:
             RedmiGateway/ios/Tests/BLEReassemblyTests.swift \
             -o "$RUNNER_TEMP/ble-reassembly-tests"
           "$RUNNER_TEMP/ble-reassembly-tests"
+      # The two steps above compile single files, so they never see AudioEngine, CallKitManager or
+      # the rest of the app. Two builds in a row failed in the Xcode step and only there: an
+      # optional Error cast to NSError, and a bare return in a function that returns Bool. This
+      # step type checks every app source together, which is what the Xcode build does, but it
+      # reports in seconds and names the file and line.
+      - name: Typecheck app sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+          find RedmiGateway/ios/RedmiGateway -name '*.swift' -print0 \
+            | xargs -0 swiftc -typecheck -sdk "$SDK" -target arm64-apple-ios15.0
       - name: Build for iOS Simulator
         run: |
           xcodebuild \
