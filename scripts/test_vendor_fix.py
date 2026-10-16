@@ -39,7 +39,9 @@ def apply_mixer(mixer):
 
 
 def apply_platform(platform):
-    indent = platform[:platform.index(PLATFORM_ANCHOR)].rsplit("\n", 1)[1]
+    # vendor_audio_fix.py ile birebir (duzeltilmis hali)
+    prefix = platform[:platform.index(PLATFORM_ANCHOR)]
+    indent = prefix.rsplit("\n", 1)[1] if "\n" in prefix else prefix
     return platform.replace(PLATFORM_ANCHOR, PLATFORM_ANCHOR + "\n" + indent + PLATFORM_LINE)
 
 
@@ -116,14 +118,19 @@ mf0, pf0 = state(MIXER_SAMPLE, PLATFORM_SAMPLE)
 check("T6 status: duzeltilmemis -> not fixed", (not mf0) and (not pf0),
       f"mixer={mf0} platform={pf0}")
 
-# T7 edge: ANCHOR ilk satir (onek bos)
+# T7 edge: ANCHOR ilk satir (onek bos) -- DUZELTILDI, artik hata vermemeli
 edge7 = PLATFORM_ANCHOR + "\n</audio_platform_info>\n"
 try:
-    apply_platform(edge7)
-    check("T7 edge: ANCHOR ilk satirsa", False, "IndexError BEKLENIRDI ama hata vermedi")
-except IndexError as e:
-    check("T7 edge: ANCHOR ilk satirsa IndexError", True,
-          "rsplit('\\n',1)[1] -> IndexError (gercek ROM'da ANCHOR girintili, risk dusuk)")
+    out7 = apply_platform(edge7)
+    ok7 = PLATFORM_LINE in out7 and out7.split("\n")[1] == PLATFORM_LINE
+    check("T7 edge: ANCHOR ilk satirsa (DUZELTILDI)", ok7,
+          "girinti bos, satir dogru eklendi")
+except Exception as e:
+    check("T7 edge: ANCHOR ilk satirsa (DUZELTILDI)", False, f"hala hata: {type(e).__name__}")
+
+# T7b girintili ANCHOR hala dogru calisiyor mu (regresyon)
+check("T7b girintili ANCHOR bozulmadi",
+      PLATFORM_LINE in apply_platform(PLATFORM_SAMPLE))
 
 # T8 edge: ANCHOR baska satirin ONEKI
 edge8 = PLATFORM_SAMPLE.replace(
