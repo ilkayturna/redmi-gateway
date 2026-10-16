@@ -18,7 +18,7 @@ import java.io.File
  * text, keys or audio; safe to copy into a support report.
  */
 object DiagnosticsReport {
-    private val permissions = listOf(
+    internal val permissions = listOf(
         Manifest.permission.CALL_PHONE, Manifest.permission.READ_PHONE_STATE, Manifest.permission.READ_CALL_LOG,
         Manifest.permission.READ_CONTACTS, Manifest.permission.READ_SMS, Manifest.permission.SEND_SMS,
         Manifest.permission.RECEIVE_SMS, Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS,
@@ -75,7 +75,7 @@ object DiagnosticsReport {
                 .put("iphoneRegistered", com.ilkay.redmigateway.push.ApnsSender.hasDeviceToken)
                 .put("alertsRegistered", com.ilkay.redmigateway.push.ApnsSender.hasAlertToken))
             .put("permissions", JSONObject().apply {
-                for (p in permissions) put(p.substringAfterLast('.'), context.checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED)
+                for (k in permissionKeys()) put(k, context.checkSelfPermission(permissionFor(k)) == PackageManager.PERMISSION_GRANTED)
             })
     }
 }
@@ -97,3 +97,16 @@ object DiagnosticsReport {
 internal fun vendorFixPresent(platformInfo: String, mixerPaths: String): Boolean =
     platformInfo.contains("USECASE_INCALL_MUSIC_UPLINK2") &&
         mixerPaths.contains("Incall_Music_2 Audio Mixer MultiMedia9")
+
+/**
+ * The short key each permission is reported under.
+ *
+ * The report is a flat JSON object keyed by the last part of the permission name, so two
+ * permissions that shorten to the same key would silently overwrite each other and one of them
+ * would be reported with the other's state. The list is asserted for that.
+ */
+internal fun permissionKeys(): List<String> = DiagnosticsReport.permissions.map { it.substringAfterLast('.') }
+
+/** The full permission name for a short key, for looking its state up. */
+internal fun permissionFor(key: String): String =
+    DiagnosticsReport.permissions.firstOrNull { it.substringAfterLast('.') == key } ?: key
