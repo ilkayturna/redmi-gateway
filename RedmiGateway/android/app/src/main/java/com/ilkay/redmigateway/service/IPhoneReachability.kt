@@ -32,13 +32,12 @@ object IPhoneReachability {
     @Volatile private var lastLevel: Level? = null
 
     fun current(): Status {
-        val level = when {
-            PairingStore.pairedClient() == null -> Level.UNPAIRED
-            GatewayService.authenticatedClientCount() > 0 -> Level.CONNECTED
-            BleServerManager.linkedCentrals() > 0 -> Level.BLUETOOTH
-            ApnsSender.isReady -> Level.PUSH
-            else -> Level.OFFLINE
-        }
+        val level = decideLevel(
+            paired = PairingStore.pairedClient() != null,
+            hasSocket = GatewayService.authenticatedClientCount() > 0,
+            hasBluetoothLink = BleServerManager.linkedCentrals() > 0,
+            pushReady = ApnsSender.isReady,
+        )
         if (level == Level.CONNECTED || level == Level.BLUETOOTH) lastSeenAt = System.currentTimeMillis()
         return when (level) {
             Level.UNPAIRED -> Status(level, "Eşleşmiş iPhone yok", "iPhone eşleşmesi bekleniyor",
@@ -77,4 +76,29 @@ object IPhoneReachability {
             listeners.forEach { runCatching { it() } }
         }
     }
+}
+
+/**
+ * Which of the five things to say about the iPhone, given what is actually up.
+ *
+ * This is the line the user reads, and it is the line that was wrong: only the network socket
+ * counted, so a sleeping iPhone whose app had closed its socket on purpose showed as not
+ * connected while it was still ringing for every call. The Bluetooth link is a real way to reach
+ * it, so it belongs above push and below the socket.
+ *
+ * The order is the whole meaning. A pairing that does not exist outranks everything, because
+ * nothing else can be true without it. A live socket beats a Bluetooth link, which beats push,
+ * which beats having nothing at all to say.
+ */
+internal fun decideLevel(
+    paired: Boolean,
+    hasSocket: Boolean,
+    hasBluetoothLink: Boolean,
+    pushReady: Boolean,
+): IPhoneReachability.Level = when {
+    !paired -> IPhoneReachability.Level.UNPAIRED
+    hasSocket -> IPhoneReachability.Level.CONNECTED
+    hasBluetoothLink -> IPhoneReachability.Level.BLUETOOTH
+    pushReady -> IPhoneReachability.Level.PUSH
+    else -> IPhoneReachability.Level.OFFLINE
 }
