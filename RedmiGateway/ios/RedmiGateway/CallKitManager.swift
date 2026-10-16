@@ -351,18 +351,26 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         }
         audioPathStartedAt = Date()
         audioPathLog("take on iPhone requested")
-        // Warm the graph before CallKit is asked for a call: its activation takes a moment, and the
-        // warm-up overlaps that window. Nothing captures audio until the engine starts.
-        audioPathLog("warmUp called")
-        AudioEngine.shared.warmUp()
-        audioPathLog("warmUp finished")
+        // One place for the warm-up stamps, so both branches read the same way in the log.
+        func warmTheGraph() {
+            audioPathLog("warmUp called")
+            AudioEngine.shared.warmUp()
+            audioPathLog("warmUp finished")
+        }
         if let uuid = currentCallUuid {
             audioCallUuid = uuid
             audioRequested = true
             connection.sendAudioStart()
             audioPathLog("audio_start sent")
+            // After audio_start, never before: the Redmi's arm clock starts with that frame and no
+            // ring warmed this path, so the cost is real and must land inside firstPcm instead of
+            // being hidden from the measurement by delaying the arm.
+            warmTheGraph()
             return
         }
+        // No CallKit call yet: CallKit has to be asked for one and activate it either way, so this
+        // warm-up runs while that happens and the Redmi's clock starts only later.
+        warmTheGraph()
         AudioEngine.shared.prepareSession()
         let uuid = UUID()
         uuidByCallId[call.rawCallId] = uuid
