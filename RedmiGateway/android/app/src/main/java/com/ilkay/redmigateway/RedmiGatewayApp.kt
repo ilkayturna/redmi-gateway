@@ -25,7 +25,7 @@ class RedmiGatewayApp : Application() {
             if (deviceId.isNullOrBlank()) {
                 val bytes = ByteArray(4)
                 secureRandom.nextBytes(bytes)
-                deviceId = bytes.joinToString("") { "%02X".format(it) }
+                deviceId = opaqueDeviceId(bytes)
                 prefs.edit().putString(KEY_DEVICE_ID, deviceId).apply()
             }
             return deviceId
@@ -46,3 +46,20 @@ class RedmiGatewayApp : Application() {
         com.ilkay.redmigateway.journal.DiagnosticsLog.record("App", "diagnostics started")
     }
 }
+
+/**
+ * The opaque identifier this Redmi advertises and the iPhone matches against.
+ *
+ * It is deliberately not derived from anything about the phone: four random bytes, written once
+ * and kept. The iPhone compares the identifier in the Bluetooth advertisement with the one it was
+ * told during pairing, and ignores anything that does not match, so this value has to be stable
+ * across restarts and exactly the same shape every time.
+ *
+ * The shape is the part worth pinning. Each byte is formatted to two characters, so a byte below
+ * sixteen keeps its leading zero and the result is always eight characters. A plain hexadecimal
+ * conversion would drop that zero and produce a seven character identifier for roughly one value
+ * in sixteen, and the iPhone would then ignore an advertisement it should have accepted, which
+ * looks exactly like the phone being out of range.
+ */
+internal fun opaqueDeviceId(bytes: ByteArray): String =
+    bytes.joinToString("") { "%02X".format(it) }
