@@ -255,9 +255,31 @@ class UplinkJitterBufferTest {
         assertEquals(2, buffer.snapshot().targetFrames)
     }
 
-    // Catches the sample counted memory ring: it held 32 observations, and a clumped link records
-    // about five per burst, so a 338 ms silence was forgotten in under a second and the target fell
-    // back to the floor long before the next burst - the measured "gap=338 ms but targetFrames=6".
+    // Catches a memory ring too small to hold a full four second window of this link's traffic.
+    // The clumped link records about one observation per frame, so a 32 slot ring forgot the spike
+    // after ~1.3 s while the window promises four; the target then fell back to the clump's need -
+    // the measured "gap=338 ms but targetFrames=6".
+    @Test fun theMemoryRingHoldsAFullWindowOfClumpedTraffic() {
+        val buffer = UplinkJitterBuffer()
+        // One 338 ms silence takes the target to the local ceiling.
+        buffer.offer(frame(1), 0)
+        buffer.offer(frame(2), 338)
+        assertEquals(12, buffer.snapshot().targetFrames)
+
+        // Clumped traffic for the rest of the window: four frames every 100 ms, which is four
+        // qualifying observations per clump and ~136 of them inside the four second window.
+        var index = 3
+        var now = 438L
+        while (now <= 3_800) {
+            repeat(4) { buffer.offer(frame(index++), now) }
+            repeat(4) { buffer.poll(now + it * 20L) }
+            now += 100
+        }
+        // The spike is still inside the window: the answer must not depend on how many clumps ran.
+        assertEquals(12, buffer.snapshot().targetFrames)
+    }
+
+    // Catches the same ring being sized by seconds rather than by the samples a burst produces.
     @Test fun theBurstMemoryIsTimeBasedNotSampleCounted() {
         val buffer = UplinkJitterBuffer()
         buffer.offer(frame(0), 0)

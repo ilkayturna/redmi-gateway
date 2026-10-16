@@ -7,7 +7,7 @@ import java.util.ArrayDeque
  *
  * The depth is adaptive because this link delivers 20 ms frames in bursts: a measured call showed
  * `maxAuthenticatedArrivalGapMs=240` (nominal 20 ms) followed by `maxAuthenticatedArrivalBurstFrames=10`
- * — the Wi-Fi retry storm releases ten frames at once after a quarter second of silence. A fixed
+ * â€” the Wi-Fi retry storm releases ten frames at once after a quarter second of silence. A fixed
  * depth therefore fails twice over: it drops the tail of a burst that arrives above the ceiling and
  * it runs dry during the silence that follows a burst it did absorb.
  *
@@ -37,10 +37,12 @@ class UplinkJitterBuffer {
         const val HISTORY_WINDOW_MS = 4_000L
         /**
          * Room for those observations. The ring counts arrivals, not seconds, and a burst records
-         * one observation per frame, so a small ring forgets a spike in well under a second: 32
-         * slots covered only about 0.8 s of this link's clumped traffic and the target fell back
-         * before the next burst arrived. 256 slots cover about five seconds of 50 frames per
-         * second, which is the four second window plus the extra in-burst samples (~3 KB).
+         * one observation per frame (a ten frame clump writes about nine), so a small ring forgets
+         * a spike long before the window ends: 32 slots covered roughly 1.3 s of this link's
+         * clumped traffic, which is why one measured call showed a 338 ms gap and a target of 6 in
+         * the same health line. 256 slots cover 5-10 s of that traffic, comfortably past the four
+         * second window, for about 3 KB. The test that pins this is
+         * UplinkJitterBufferTest.theMemoryRingHoldsAFullWindowOfClumpedTraffic.
          */
         const val HISTORY_SAMPLES = 256
         const val TRIM_HOLD_MS = 500L
@@ -229,3 +231,4 @@ class UplinkJitterBuffer {
     @Synchronized fun snapshot() = Snapshot(queue.size, dropped, underruns, expiredFrames,
         maxAuthenticatedArrivalGapMs, maxAuthenticatedArrivalBurstFrames, targetFrames)
 }
+
