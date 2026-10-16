@@ -44,7 +44,15 @@ object ContactResolver {
         if (digits.length == 11 && digits.startsWith("0")) return digits.takeLast(10)
         if (digits.length > 10) {
             val last10 = digits.takeLast(10)
-            if (last10.startsWith("5")) return last10
+            // Only reduce to the last ten when the number actually looks Turkish. This branch used
+            // to fire on the last ten digits alone, so a German number ending 5112345678 was cut
+            // down to 5112345678 and would then match a Turkish contact: the call would show the
+            // wrong person's name, which is worse than showing no name at all. A real Turkish
+            // number of this length starts with the country code or the trunk zero, and the two
+            // rules above handle the ordinary spellings, so nothing that used to resolve stops
+            // resolving.
+            val looksTurkish = digits.startsWith("90") || digits.startsWith("0")
+            if (last10.startsWith("5") && looksTurkish) return last10
         }
         if (digits.length == 10) return digits
         return digits
