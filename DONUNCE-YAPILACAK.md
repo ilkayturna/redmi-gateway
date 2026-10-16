@@ -346,3 +346,28 @@ Pacer dokunuşu (`beginImmediately`, ~60 ms) v2'den **çıkarıldı** — motor 
 - `scripts\run-wake-test.ps1` — ölçüm betiği
 - `scripts\push-both-repos.ps1` — iki repoya push
 - `AI-DERSLERI.md` — kalıcı dersler (AGENTS.md kopyası)
+
+---
+
+## 1d. ✅ CİHAZ DURUMU (16.10.2026 15:25)
+
+**Kurulu sürüm: `IDLE-WAKE`** — uyanma + kapı tanılaması + boşta uyandırma + **geri çekilme düzeltmesi**.
+**Doğrulanmamış protokol değişikliği (Base64) KURULU DEĞİL** ✓
+
+**Cihazda doğrulananlar:**
+
+| Ne | Kanıt |
+|---|---|
+| **Geri çekilme** | `idle wake 2, next in 60s` → `idle wake 3, next in 120s` ✅ sayaç artıyor, aralık büyüyor |
+| **Nudge/push ayrımı** | Nudge 15 sn (ucuz BLE), push 60→120→300→900 sn ✅ |
+| **Tetiklenme sebebi** | iPhone **BLE linkini tutuyor, soketi yok** ✅ tam hedeflenen durum |
+| **Vendor düzeltmesi** | Yerinde ✅ (tur 134) |
+
+**⚠️ LATEST (Base64) DOĞRULANAMADI — denendi, sonuçsuz:**
+LATEST kuruldu, 120 sn izlendi → **`iPhone connected` 0, `WebSocket opened` 0**.
+Yani **soket hiç açılmadı**, kimlik doğrulamaya sıra gelmedi → **Base64 suçlanamaz ama aklandı da sayılmaz.**
+
+**Bu yüzden LATEST cihazdan KALDIRILDI**, bilinen-iyi IDLE-WAKE'e dönüldü.
+
+**Base64'ü doğrulamanın yolu:** iPhone o sırada **bağlanıyor olmalı.** Önce iPhone'un bağlandığını gör
+(`iPhone connected` satırı), **sonra** LATEST'i kur ve aynı satırın geldiğini doğrula.
