@@ -95,8 +95,8 @@ Tanılamada üç anahtar: `push.key` (APNs anahtarı), `push.iphoneRegistered` (
 
 | # | Dosya | Test | Ne var | Ne zaman |
 |---|---|---|---|---|
-| **1** | **`apk\app-debug-IDLE-WAKE.apk`** | 109 test | Uyanma + kapı tanılaması + **boşta uyandırma** (kullanıcının 1 no'lu şikayeti) | **⭐ ÖNCE BUNU KUR** |
-| 2 | `apk\app-debug-LATEST.apk` | 171 test | Yukarıdakiler + **Base64/protokol değişikliği** + saf çıkarma refactor'ları | 1 çalıştıktan **sonra** |
+| **1** | **`apk\app-debug-IDLE-WAKE.apk`** | 109 test | Uyanma + kapı tanılaması + **boşta uyandırma** + geri çekilme düzeltmesi | **⭐ ÖNCE BUNU KUR** |
+| 2 | `apk\app-debug-LATEST.apk` | 231 test | Yukarıdakiler + **Base64/protokol değişikliği** + refactor'lar | 1 çalıştıktan **sonra** |
 
 **Sıra önemli:** LATEST içinde **doğrulanmamış bir protokol değişikliği** var (aşağıya bak).
 Önce IDLE-WAKE ile sesin ve bağlantının çalıştığını gör, **sonra** LATEST'i kur ve
