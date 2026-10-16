@@ -2,6 +2,8 @@ package com.ilkay.redmigateway.server
 
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import com.ilkay.redmigateway.BuildConfig
@@ -517,7 +519,53 @@ class GatewayWebSocketServer(
 
     override fun onAudioOwnerChanged(owner: CallAudioRelay.Owner, reason: String) {
         for (peer in peers.values) if (peer.authenticated) sendAudioState(peer, owner, reason)
+        // While the gateway is waiting for the iPhone to offer its uplink, keep telling it whose
+        // turn it is. Measured on the device: after the app was reinstalled the iPhone connected,
+        // the gateway waited for its audio, and no uplink ever arrived, so the gate never saw a
+        // frame and the media never started. The state was announced exactly once, at the moment
+        // the owner changed, and the iPhone did not act on it.
+        //
+        // Rule 6.1 records the same shape from an earlier fault: audio_start arrives once per arm
+        // and is never retried, so a phone that misses the one announcement stays silent for the
+        // whole call. Repeating an idempotent state message is the cheap half of that lesson, and
+        // it needs no iOS build.
+        if (owner == CallAudioRelay.Owner.PREPARING_IPHONE) {
+            preparingRepeats = 0
+            handler.removeCallbacks(repeatAudioState)
+            handler.postDelayed(repeatAudioState, AUDIO_STATE_REPEAT_MS)
+        } else {
+            handler.removeCallbacks(repeatAudioState)
+        }
     }
+
+    /**
+     * Re-announces the preparing state every second for as long as it lasts, so an iPhone that
+     * missed the single announcement gets another chance. Stops on its own when the owner changes,
+     * and gives up after the same eight seconds the audio wait allows.
+     */
+    private val repeatAudioState = object : Runnable {
+        override fun run() {
+            val owner = CallAudioRelay.owner
+            if (owner != CallAudioRelay.Owner.PREPARING_IPHONE) return
+            preparingRepeats++
+            if (preparingRepeats > AUDIO_STATE_REPEAT_LIMIT) {
+                Log.i(TAG, "Stopped repeating the preparing state after $preparingRepeats attempts")
+                return
+            }
+            for (peer in peers.values) {
+                if (peer.authenticated) sendAudioState(peer, owner, "waiting_for_iphone_audio_repeat")
+            }
+            Log.i(TAG, "Repeated the preparing state ($preparingRepeats)")
+            handler.postDelayed(this, AUDIO_STATE_REPEAT_MS)
+        }
+    }
+
+    /** How often the preparing state is re-announced while the iPhone has not answered. */
+    private val AUDIO_STATE_REPEAT_MS = 1_000L
+    /** How many times before giving up, matching the eight second audio wait. */
+    private val AUDIO_STATE_REPEAT_LIMIT = 8
+    private var preparingRepeats = 0
+    private val handler = Handler(Looper.getMainLooper())
 
     private fun sendAudioState(peer: Peer, owner: CallAudioRelay.Owner, reason: String) {
         // Protocol 1 iPhones stop their audio engine on any running=false that is not a retry
