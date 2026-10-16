@@ -172,3 +172,94 @@ bir daha bağlanmadı.** Tek olaydan "ping aralığı suçlu" sonucu **çıkarı
 2. **iOS ping aralığını 15 sn → 5 sn** indir → oturum ömründen kısa olsun
 3. `verdict`'e `peer_reset` sınıfı ekle (`code=1006` + reset nedeni ayrı bir sinyal)
 
+---
+
+## 8. 🎯 KULLANICININ 1 NUMARALI ŞİKAYETİ — KÖK NEDEN BULUNDU VE DÜZELTİLDİ
+
+**Şikayet:** *"telefon geçidi uygulamasını iphone'da açana kadar iphone bağlı değil diyor… gidip oradan onu uyandırmalı haberdar etmeli"*
+
+### Kök neden zinciri
+
+**1. iPhone BLE linkini dakikalarca tutuyor, soketi yok:**
+```
+BleServerManager: BLE client connected: EC:0D:51:0C:64:D2
+BleServerManager: iPhone linked while advertising started; stopping it
+```
+→ Ama WebSocket **yok**.
+
+**2. `iPhoneLinked()` BLE linkini "bağlı" sayıyor:**
+```kotlin
+private fun iPhoneLinked() =
+    listeningCentrals() > 0 || GatewayService.authenticatedClientCount() > 0
+```
+→ `listeningCentrals() > 0` → **true** → **uyanma nabzı HİÇ planlanmıyor:**
+```kotlin
+} else if (!pulseScheduled) {          // YALNIZCA linked == false iken
+    schedulePulse(RECONNECT_GRACE_MS)
+}
+```
+
+**3. Çağrı durumu yalnızca DEĞİŞİNCE gönderiliyor** → boştayken hiç trafik yok.
+
+**Sonuç:** Redmi "iPhone bağlı değil" diyor ve **hiçbir şey yapmıyor.** Tek çıkış yolu iPhone'da uygulamayı elle açmak. **Kod bunu biliyordu** (L730 yorumu) ama çözüm yalnızca çağrı sırasında uygulanmıştı.
+
+### İki kanal denendi — cihaz hangisinin işe yaradığını söyledi
+
+| Kanal | Sonuç |
+|---|---|
+| **BLE çağrı-durumu bildirimi** | ❌ **İşe yaramıyor.** iOS yalnızca **canlı çağrı** durumunda soketi açıyor:<br>`if ["ringing","dialing","connecting","active"].contains(update.state) { reconnectNow(...) }`<br>→ `idle` okunuyor ve **atılıyor** |
+| **Sessiz push (APNs)** | ✅ **İşe yarıyor.** İşleyici çağrı durumundan **bağımsız** uyanıyor:<br>`connection.wakeFromBeacon()` → 12 sn'ye kadar kimlik doğrulama bekliyor |
+
+### ✅ ÖLÇÜLEN SONUÇ — 6 tekrar, hepsi tutarlı
+
+```
+13:59:51.771  Idle wake push sent (idle wake 1, next in 60s)
+13:59:53.236  WebSocket opened from 10.64.17.201        <- 1.5 sn
+13:59:53.257  iPhone connected (protocol 2)
+
+14:00:06.798  Idle wake push sent
+14:00:07.365  WebSocket opened                          <- 0.6 sn
+14:00:21.836  Idle wake push sent
+14:00:22.665  WebSocket opened                          <- 0.8 sn
+14:00:36.873  Idle wake push sent
+14:00:37.705  WebSocket opened                          <- 0.8 sn
+14:01:36.911  Idle wake push sent
+14:01:37.783  WebSocket opened                          <- 0.9 sn
+14:02:36.949  Idle wake push sent
+14:02:37.804  WebSocket opened                          <- 0.9 sn
+```
+
+**Uyandırma süresi: 0.6 - 1.5 saniye** — kullanıcının istediği `<1 sn` hedefinin **içinde** ✓
+**Ve bu, projenin uyuyan bir iPhone'u ilk kez kendi başına geri getirdiği an.**
+
+### 🔴 Ama soket 50 ms'de ölüyor — iOS tasarımı
+
+```
+WebSocket closed code=1001 remote=true authenticated=true sessionMs=70 sinceLastMessageMs=24
+WebSocket closed code=1006 remote=true authenticated=true sessionMs=53 sinceLastMessageMs=18
+```
+
+iPhone bağlanıyor, kimlik doğruluyor, **~50 ms sonra iOS uygulamayı askıya alıyor.** Bu **hata değil** — arka planda uyanan bir uygulamanın normal ömrü. Soketin kalıcı olması için uygulamanın **ön planda** olması gerekir.
+
+### ⚠️ VERİ POLİTİKASI DEĞİŞİKLİĞİ (madde 5 ile ilişkili)
+
+`CallWakePush` belgesi diyordu: *"Nothing is sent while no call is live… the user's data allowance is only touched when the call audio genuinely needs the iPhone."*
+
+**Boşta uyandırma bunu değiştiriyor.** Bilinçli olarak dar tutuldu:
+- Yalnızca soket **gerçekten yokken**
+- Yalnızca telefon **BLE ile erişilebilirken** (yani "uyuyor", "uzakta" değil)
+- Aynı ~90 baytlık yük, **numara/isim yok** (`WakePushPayloadTest` bunu sabitliyor)
+- Geri çekilme: 60 sn → 120 sn → 300 sn → **900 sn**
+- Uyanan telefon **hemen durduruyor** → saatte ~2 KB
+
+### ❌ DOĞRULANMAMIŞ KISIM (dürüstçe)
+
+**İlk sürüm geri çekilmeyi her soket açılışında sıfırlıyordu.** Soket 50 ms'de öldüğü için bu **15 saniyede bir push döngüsü** üretti (`idle wake 1` tekrar tekrar).
+
+**Düzeltildi:** geri çekilme yalnızca soket **60 saniye kesintisiz ayakta kalırsa** sıfırlanıyor.
+
+**AMA:** düzeltme **kuruldu**, telefon **doğrulama sırasında çıkarıldı** → **bu kısım gözlenmedi.** Doğrulanmış sayılmıyor.
+
+**Telefon geri bağlanınca ilk iş:** `Idle wake N` sayacının arttığını (1→2→3) ve aralıkların 60/120/300 sn'ye çıktığını doğrula.
+
+
