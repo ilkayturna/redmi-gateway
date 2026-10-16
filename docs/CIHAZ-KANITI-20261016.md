@@ -501,3 +501,66 @@ Sonraki her çağrıda `iphone_audio_not_ready`. **Sebebi bilinmiyor.**
 ### Doğrulamak için
 `manual_redmi` neden oldu (kullanıcı mı sesi elle aldı?) ve sonrasında iPhone neden bir daha ses
 vermedi. 10:33-10:41 arası tüm log satırları okunmalı.
+
+---
+
+## 14. 🎯 GEÇİŞ SÜRESİNİN KIRILIMI ve SESİN KOPTUĞU AN (16.10.2026)
+
+### Geçiş nerede harcanıyor — uygulamanın kendi satırı
+
+10:33'teki **son başarılı** çağrıdan:
+
+```
+Call audio moved to iPhone (uplink=50/s downlink=49/s
+    settle=454ms firstWrite=80ms firstRead=133ms
+    firstPcm=592ms startMedia=2023ms gateMs=1431ms gateFrames=76)
+```
+
+| Bileşen | Süre | Pay |
+|---|---|---|
+| **`startMedia`** | **2023 ms** | **baskın** |
+| `gateMs` | 1431 ms (76 kare) | `startMedia`'nın parçası |
+| `firstPcm` | 592 ms | |
+| `settle` | 454 ms | |
+| `firstWrite` / `firstRead` | 80 / 133 ms | küçük |
+
+**Toplam 2023 ms** — ölçülen 2.2-2.5 sn ile **tutarlı** ✓
+
+**Sonuç:** madde 3'ün (`<1 sn`) önündeki tek büyük engel **`startMedia` = 2023 ms.**
+Bu, daha önce hesaplanan **"1286 ms taban"** ile aynı yönü gösteriyor: **kurulum `arm()` öncesine
+taşınmadan (v2 motor ayrımı) `<1 sn` ulaşılamaz.**
+
+### 🔴 Sesin koptuğu an: 10:39'daki YENİDEN KURULUM
+
+```
+10:33:33  AUDIO_OWNER=IPHONE reason=iphone_confirmed     <<< SON BASARILI
+10:34:02  AUDIO_OWNER=REDMI  reason=manual_redmi         <<< KULLANICI sesi elle aldi - BUG DEGIL
+10:34:02  Call audio session closed: manual_redmi
+10:34:07  AUDIO_OWNER=REDMI  reason=iphone_disconnected
+10:34:17  Call State Changed: State=disconnecting
+10:39:31  App: diagnostics started
+10:39:31  Device boot event: android.intent.action.MY_PACKAGE_REPLACED   <<<<<< YENIDEN KURULDU
+10:39:32  Gateway Foreground Service started on port 8787
+10:40:10  Yeni cagri basladi
+10:40:48  AUDIO_OWNER=REDMI reason=iphone_audio_not_ready   <<< BIR DAHA GECMEDI
+```
+
+**`manual_redmi` bir hata değil** — kullanıcı sesi elle Redmi'ye aldı ✓
+
+**Ama 10:39:31'de uygulama YENİDEN KURULDU (`MY_PACKAGE_REPLACED`) ve sonrasında ses bir daha
+iPhone'a geçmedi.** 10:40, 10:56, 11:48, 11:52 — hepsi `iphone_audio_not_ready`.
+
+### Hipotez
+**Yeniden kurulum sonrası iPhone'a ses verme yolu bozuluyor.**
+`iPhone connected (protocol 2)` **geliyor** (yani kimlik doğrulama çalışıyor) ama iPhone
+**uplink sesi göndermiyor**.
+
+**Bu, AGENTS.md 6.1'deki `audio_start` sınıfıyla aynı kokuyor:** *"arm başına bir kez geldiği için
+bir daha denenmiyor."* Yeniden kurulumdan sonra arm bir kez geliyor ve iPhone tarafı hazır
+değilse **bir daha denenmiyor.**
+
+### Doğrulamak için
+1. Uygulamayı yeniden kur → **cevaplanan** bir çağrı yap → `iphone_audio_not_ready` **tekrarlıyor mu?**
+2. Tekrarlıyorsa: yeniden kurulum sonrası `arm()`/`audio_start` zincirini logdan izle
+3. **Bu, kullanıcının "iPhone'a hiç akmamaya başladı" şikayetinin kök nedeni olabilir** —
+   çünkü her APK kurulumu (benim turlarım dahil) bu durumu yaratıyor olabilir
