@@ -53,6 +53,11 @@ final class AudioEngine {
     private var recoveryRequested = false
     /// Playback budget drops are silent; the diagnostics log has to show them to be fixable.
     private var loggedPlaybackDrops = 0
+    /// True once voice processing has been configured early, so warm-up never pays for it twice.
+    private var voiceProcessingWarmed = false
+    /// Timestamps for the "where did the first second go" diagnostics.
+    private var engineStartedAt: Date?
+    private var firstPcmLogged = false
 
     // The tap deposits directly into this bounded queue, so a stalled network queue
     // cannot retain an unbounded number of async closures containing microphone PCM.
@@ -109,6 +114,7 @@ final class AudioEngine {
 
     func resetSessionPrepared() {
         isSessionPrepared = false
+        voiceProcessingWarmed = false
     }
 
     /// Asked while the app is open, so a first call never needs a prompt over the lock screen.
@@ -121,6 +127,30 @@ final class AudioEngine {
 
     var microphoneAllowed: Bool {
         AVAudioSession.sharedInstance().recordPermission == .granted
+    }
+
+    /// Builds the parts of the call-audio graph that do not depend on the active session, so the
+    /// start after CallKit activates it only has to run engine.start(). Nothing captures audio
+    /// here: the engine stays stopped, so there is no microphone use, no indicator and no CPU while
+    /// the phone is idle. The format-dependent steps stay in start(), because activating the
+    /// session can still change the input format.
+    func warmUp() {
+        guard !running else { return }
+        let began = Date()
+        _ = engine.inputNode
+        if !voiceProcessingWarmed {
+            do {
+                try engine.inputNode.setVoiceProcessingEnabled(true)
+                voiceProcessingWarmed = true
+            } catch {
+                // The session may not accept voice processing before CallKit activates it; the
+                // start path configures it exactly as it always did.
+                log("Audio path: voice processing warm-up skipped: \(error.localizedDescription)")
+            }
+        }
+        engine.prepare()
+        let ms = Int(Date().timeIntervalSince(began) * 1000)
+        log("Audio path: warm-up \(voiceProcessingWarmed ? "done" : "partial") in \(ms) ms (engine stopped)")
     }
 
     /// CallKit activates the audio session; its policy is set before a call is reported.
@@ -166,7 +196,12 @@ final class AudioEngine {
         captureLock.unlock()
         do {
             let input = engine.inputNode
+            // Voice processing is the expensive part of this setup the first time (hundreds of
+            // milliseconds). warmUp() pays that while the phone is still ringing; this call stays
+            // unconditional, so a warm-up that the idle session refused changes nothing here.
+            let vpBegan = Date()
             try? input.setVoiceProcessingEnabled(true)
+            let vpMs = Int(Date().timeIntervalSince(vpBegan) * 1000)
             let inputFormat = input.outputFormat(forBus: 0)
             guard inputFormat.sampleRate > 0,
                   let monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
@@ -220,9 +255,12 @@ final class AudioEngine {
             }
             tapInstalled = true
             engine.prepare()
+            let startBegan = Date()
             try engine.start()
+            let startMs = Int(Date().timeIntervalSince(startBegan) * 1000)
             player.play()
             running = true
+            log("Audio engine: vp=\(vpMs) ms start=\(startMs) ms")
             if isSpeakerEnabled { try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker) }
         } catch {
             log("Audio engine start failed: \(error.localizedDescription)")
@@ -232,6 +270,10 @@ final class AudioEngine {
 
         networkQueue.async { [weak self] in
             guard let self else { return }
+            // Both are read by sendPcm on this same queue, so the first-frame measurement stays
+            // single-threaded.
+            self.engineStartedAt = Date()
+            self.firstPcmLogged = false
             if self.lastSession != session || self.lastKey != key {
                 self.txCounter = 0
                 self.rxLastCounter = 0
@@ -385,6 +427,10 @@ final class AudioEngine {
 
     private func sendPcm(_ samples: [Int16]) {
         guard sealer != nil else { return }
+        if !firstPcmLogged, let startedAt = engineStartedAt {
+            firstPcmLogged = true
+            log("Audio path: firstPcmOut=\(Int(Date().timeIntervalSince(startedAt) * 1000)) ms after start")
+        }
         var pcm = Data(capacity: samples.count * 2)
         let muted = isMuted
         for sample in samples {

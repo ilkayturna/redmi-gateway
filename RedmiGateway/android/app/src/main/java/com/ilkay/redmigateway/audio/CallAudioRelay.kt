@@ -99,8 +99,10 @@ object CallAudioRelay : CallManager.CallListener {
     private const val ARM_TIMEOUT_MS = 90_000L
     private const val PREPARE_TIMEOUT_MS = 8_000L
     // The iPhone answers and starts sending within a second; a shorter window hands the audio over
-    // fast ("the sound jumps to the iPhone at once") while still checking both directions.
-    private const val VERIFY_WINDOW_MS = 400L
+    // fast ("the sound jumps to the iPhone at once") while still checking both directions. Both
+    // paths must still deliver this much continuous audio at the rate above before the Redmi's own
+    // microphone and earpiece are muted.
+    private const val VERIFY_WINDOW_MS = 300L
     private const val VERIFY_TIMEOUT_MS = 2_500L
     private const val MONITOR_INTERVAL_MS = 150L
     private const val IPHONE_SILENCE_LIMIT_MS = 1800L
@@ -172,6 +174,8 @@ object CallAudioRelay : CallManager.CallListener {
     @Volatile private var firstPcmAt = 0L
     @Volatile private var firstCutoverWriteAt = 0L
     @Volatile private var firstCutoverReadAt = 0L
+    /** True once the one-shot decision is queued for the moment both spans are long enough. */
+    @Volatile private var verificationScheduled = false
     // Sealed sessions only: last time the iPhone reported that it is receiving downlink.
     @Volatile private var lastIPhoneHearingAt = 0L
     private const val FLAG_IPHONE_HEARING = 0x01
@@ -208,6 +212,8 @@ object CallAudioRelay : CallManager.CallListener {
         return bytes.copyOf(8).toList() !in prefixes
     }
     private val iphoneFrames = AtomicInteger()
+    /** Every PCM frame since the arm: the handover gate must not be diluted by the window roll. */
+    private val pcmSinceArm = AtomicInteger()
     private val uplinkWrites = AtomicInteger()
     private val uplinkPcmWrites = AtomicInteger()
     private val insertedSilenceWrites = AtomicInteger()
@@ -317,6 +323,7 @@ object CallAudioRelay : CallManager.CallListener {
             }
             armedAt = SystemClock.elapsedRealtime()
             firstPcmAt = 0L
+            pcmSinceArm.set(0)
             scheduleMonitor()
         }
         CallManager.log("Call audio session armed")
@@ -388,6 +395,17 @@ object CallAudioRelay : CallManager.CallListener {
      */
     private val decideNow = Runnable { if (session != 0) tick() }
 
+    /**
+     * Decides the cutover the moment both directions have run for a full verification window,
+     * instead of waiting for the next monitor tick (a 400 ms window measured 668 ms that way).
+     */
+    private fun scheduleVerificationDecision() {
+        if (firstCutoverWriteAt == 0L || firstCutoverReadAt == 0L || verificationScheduled) return
+        verificationScheduled = true
+        handler.removeCallbacks(decideNow)
+        handler.postDelayed(decideNow, VERIFY_WINDOW_MS + 20)
+    }
+
     private fun scheduleMonitor() {
         handler.removeCallbacks(monitor)
         resetWindow()
@@ -444,14 +462,15 @@ object CallAudioRelay : CallManager.CallListener {
                     return
                 }
                 if (!mediaRunning) {
-                    // The current window is still open: read it as a rate instead of waiting for the
-                    // one second boundary, which used to add up to half a second to the handover.
-                    val windowMs = now - windowStartedAt
-                    val windowCount = iphoneFrames.get()
-                    val windowReady = windowMs >= ARRIVAL_WINDOW_MIN_MS &&
-                        windowCount >= ARRIVAL_WINDOW_MIN_FRAMES
-                    val windowRate = if (windowMs > 0) (windowCount * 1000L / windowMs).toInt() else 0
-                    if (live && iphoneFresh && windowReady && windowRate >= MIN_FRAMES_PER_SECOND) {
+                    // Timed from the first frame the iPhone sent, never from the one second window
+                    // roll: the roll mixed the silence before the stream started into the rate and
+                    // held the handover back by up to a full window (measured 554 ms).
+                    val streamMs = if (firstPcmAt == 0L) 0L else now - firstPcmAt
+                    val streamFrames = pcmSinceArm.get()
+                    val streamReady = streamMs >= ARRIVAL_WINDOW_MIN_MS &&
+                        streamFrames >= ARRIVAL_WINDOW_MIN_FRAMES
+                    val streamRate = if (streamMs > 0) (streamFrames * 1000L / streamMs).toInt() else 0
+                    if (live && iphoneFresh && streamReady && streamRate >= MIN_FRAMES_PER_SECOND) {
                         startMedia()
                     } else if (now - preparingSince > PREPARE_TIMEOUT_MS && live) {
                         releaseMediaAndKeepSession("iphone_audio_not_ready")
@@ -481,7 +500,9 @@ object CallAudioRelay : CallManager.CallListener {
                                 "settle=${elapsed}ms firstWrite=${firstCutoverWriteAt - cutoverStartedAt}ms " +
                                 "firstRead=${firstCutoverReadAt - cutoverStartedAt}ms " +
                                 "firstPcm=${if (firstPcmAt == 0L) -1 else firstPcmAt - armedAt}ms " +
-                                "startMedia=${cutoverStartedAt - armedAt}ms)")
+                                "startMedia=${cutoverStartedAt - armedAt}ms " +
+                                "gateMs=${if (firstPcmAt == 0L) -1 else cutoverStartedAt - firstPcmAt}ms " +
+                                "gateFrames=${pcmSinceArm.get()})")
                         } else {
                             releaseMediaAndKeepSession("isolation_failed")
                         }
@@ -632,7 +653,8 @@ object CallAudioRelay : CallManager.CallListener {
             val receivedAt = SystemClock.elapsedRealtime()
             lastIPhonePcmAt = receivedAt
             if (firstPcmAt == 0L) firstPcmAt = receivedAt
-            val frames = iphoneFrames.incrementAndGet()
+            iphoneFrames.incrementAndGet()
+            val frames = pcmSinceArm.incrementAndGet()
             if (frames == ARRIVAL_WINDOW_MIN_FRAMES && owner == Owner.PREPARING_IPHONE && !mediaRunning) {
                 // The reserve has just arrived: decide on this frame, not at the next monitor tick.
                 handler.removeCallbacks(decideNow)
@@ -700,6 +722,7 @@ object CallAudioRelay : CallManager.CallListener {
         cutoverReads.set(0)
         firstCutoverWriteAt = 0L
         firstCutoverReadAt = 0L
+        verificationScheduled = false
         badWindows = 0
         resetWindow()
         track.play()
@@ -828,7 +851,10 @@ object CallAudioRelay : CallManager.CallListener {
                 // received PCM (including naturally silent samples) from substituted silence.
                 uplinkWrites.incrementAndGet()
                 cutoverWrites.incrementAndGet()
-                if (firstCutoverWriteAt == 0L) firstCutoverWriteAt = finished
+                if (firstCutoverWriteAt == 0L) {
+                    firstCutoverWriteAt = finished
+                    scheduleVerificationDecision()
+                }
                 if (frame == null) insertedSilenceWrites.incrementAndGet() else uplinkPcmWrites.incrementAndGet()
             } else {
                 // A positive short write did not deliver a full 20 ms frame.
@@ -848,7 +874,10 @@ object CallAudioRelay : CallManager.CallListener {
             }
             downlinkReads.incrementAndGet()
             cutoverReads.incrementAndGet()
-            if (firstCutoverReadAt == 0L) firstCutoverReadAt = SystemClock.elapsedRealtime()
+            if (firstCutoverReadAt == 0L) {
+                firstCutoverReadAt = SystemClock.elapsedRealtime()
+                scheduleVerificationDecision()
+            }
             val target = peer ?: continue
             val datagram = socket ?: break
             // Session, key and counter are taken together so a re-arm cannot mix them.
