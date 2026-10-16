@@ -19,6 +19,13 @@ name: CI Health Check
 
 on:
   workflow_dispatch:
+  # workflow_dispatch only lists workflows that exist on the default branch, and main here
+  # is 127 commits behind the working branch, so this file cannot be dispatched from where
+  # the work actually is. A push trigger fires from whichever branch carries the file,
+  # which makes it reachable; the path filter keeps it from running on ordinary pushes.
+  push:
+    paths:
+      - '.github/workflows/ci-health.yml'
 
 jobs:
   health:
