@@ -88,12 +88,12 @@ object PushNotifier : CallManager.CallListener, CallJournal.Listener, SmsJournal
     }
 
     override fun onSmsJournalEntry(entry: SmsJournal.Entry) {
-        if (entry.box != "inbox" || entry.read) return
+        if (!isPushableSms(entry.box, entry.read)) return
         handler.postDelayed({
             if (deliveredSmsSeq >= entry.seq || !ApnsSender.alertsReady) return@postDelayed
             val sender = contactName(entry.address) ?: entry.address.ifBlank { "Bilinmeyen" }
-            val text = if (smsContentInPush) entry.body.take(400) else "Yeni mesaj"
-            ApnsSender.sendAlert(sender, text, "sms-${entry.address.filter(Char::isDigit).takeLast(10)}", "sms-${entry.id}")
+            val text = smsPushBody(smsContentInPush, entry.body)
+            ApnsSender.sendAlert(sender, text, smsPushThreadId(entry.address), "sms-${entry.id}")
         }, 8000)
     }
 
@@ -117,3 +117,35 @@ object PushNotifier : CallManager.CallListener, CallJournal.Listener, SmsJournal
         }.getOrNull()
     }
 }
+
+/**
+ * Whether an SMS is worth an Apple notification at all.
+ *
+ * Only an unread inbox message is news. Sent messages and messages already read on the Redmi are
+ * things the person has seen, and pushing them would make the iPhone buzz about its own history.
+ */
+internal fun isPushableSms(box: String, read: Boolean): Boolean = box == "inbox" && !read
+
+/**
+ * What the SMS notification is allowed to say.
+ *
+ * This is the privacy control, and it is the reason it is a function rather than a line inside the
+ * listener. With the switch off the notification says only that a message arrived, and the body
+ * never leaves the Redmi. With it on the body is included, cut to 400 characters so a long message
+ * does not turn into a large push. Apple's servers carry whatever is put here, so the default and
+ * the switch both matter.
+ *
+ * @param includeContent the user's switch for putting the message text in the notification
+ * @param body the message as received
+ */
+internal fun smsPushBody(includeContent: Boolean, body: String): String =
+    if (includeContent) body.take(400) else "Yeni mesaj"
+
+/**
+ * The notification grouping key for a sender.
+ *
+ * Reduced to the last ten digits so the same person's messages stack together whether the number
+ * arrives with a country code, a trunk zero or not.
+ */
+internal fun smsPushThreadId(address: String): String =
+    "sms-" + address.filter(Char::isDigit).takeLast(10)
