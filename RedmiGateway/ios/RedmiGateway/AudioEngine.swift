@@ -83,6 +83,9 @@ final class AudioEngine {
     private var attached = false
     private var lastAttachedHost: String?
     private var lastAttachedSession: UInt32?
+    /// Watchdog for an early engine that never got attached; see armEarlyWatchdog.
+    private var earlyWatchdogToken = 0
+    private static let earlyWatchdogSeconds: TimeInterval = 8
     /// Stamps that split the Redmi's firstPcm, and the end-to-end time the person waits.
     private var engineStartRequestedAt = Date()
     private var firstCaptureLogged = false
@@ -221,7 +224,10 @@ final class AudioEngine {
             log("Audio endpoint unusable (host empty=\(host.isEmpty), session=\(session), key=\(key.count) bytes); engine not started")
             return
         }
-        guard startLocal() else { return }
+        guard startLocal() else {
+            log("start() gave up: the graph could not be built; no audio")
+            return
+        }
         attachNetwork(host: host, port: port, session: session, key: key)
     }
 
@@ -232,16 +238,17 @@ final class AudioEngine {
 
     /// Builds and starts the audio graph with no network at all, and starts the downlink with it.
     ///
-    /// A transfer calls this before `audio_start`, so the Redmi's clock starts when the graph is
-    /// already running instead of while it is being built. Nothing is sent until `attachNetwork`
-    /// runs (the timers do not exist and `sendPcm` has no sealer), but the downlink plays from here
-    /// on: tying it to the attach would turn one missed attach into total silence (M2).
+    /// A transfer calls this with `early` before `audio_start`, so the Redmi's clock starts when the
+    /// graph is already running instead of while it is being built. Nothing is sent until
+    /// `attachNetwork` runs (the timers do not exist and `sendPcm` has no sealer), but the downlink
+    /// plays from here on: tying it to the attach would turn one missed attach into total silence
+    /// (M2).
     ///
-    /// Nothing here stops the engine on a timer. A transfer that takes longer than expected must
-    /// still find its engine alive when `audio_ready` finally arrives (M1); the microphone is
-    /// released by `stop()`, which the call ending or the Redmi taking the audio back calls.
+    /// `early` arms the microphone watchdog. Such an engine has no endpoint yet, so if the arm never
+    /// arrives nothing would release it; the watchdog is bounded, logged and idempotent, and it can
+    /// never cause silence, because a late attach rebuilds the graph (M1).
     @discardableResult
-    func startLocal() -> Bool {
+    func startLocal(early: Bool = false) -> Bool {
         stop(preservingControls: true)
         guard microphoneAllowed else {
             log("Microphone permission missing")
@@ -337,7 +344,36 @@ final class AudioEngine {
             return false
         }
         localGeneration = generation
+        earlyWatchdogToken &+= 1
+        if early { armEarlyWatchdog(token: earlyWatchdogToken) }
         return true
+    }
+
+    /// Bounded watchdog for an engine started before the Redmi armed.
+    ///
+    /// Such an engine has no endpoint, so if the arm never arrives (the call ended on the Redmi, the
+    /// link dropped, the request was lost) nothing else would release the microphone: it would stay
+    /// open, capturing and burning power for the rest of the call.
+    ///
+    /// The deadline is 8 s. Measured and specified parts of a normal round: the graph build 0.4-0.5 s,
+    /// `audio_start` -> `arm` -> `audio_ready` 10-30 ms on Wi-Fi (up to ~0.7 s when the control link
+    /// falls back to Bluetooth), and an app woken from a silent push 1-3 s before any of that. So a
+    /// normal transfer attaches within ~4 s worst case, and 8 s leaves a 2x margin. v1 used 4 s,
+    /// which is below that worst case - exactly how M1 fired: the watchdog stopped the engine and the
+    /// silent attach guard dropped the ready message for good.
+    ///
+    /// It is idempotent (a token invalidates it on stop and on every new start) and it never produces
+    /// silence: `attachNetwork` rebuilds the graph for a late attach.
+    private func armEarlyWatchdog(token: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.earlyWatchdogSeconds) { [weak self] in
+            guard let self, self.earlyWatchdogToken == token else { return }
+            guard !self.attached else {
+                self.log("Early audio watchdog fired after \(Int(Self.earlyWatchdogSeconds)) s: already attached, nothing to do")
+                return
+            }
+            self.log("Early audio start was never attached after \(Int(Self.earlyWatchdogSeconds)) s; releasing the microphone")
+            self.stop(preservingControls: true)
+        }
     }
 
     /// The network half: sealer, socket, timers.
@@ -497,6 +533,8 @@ final class AudioEngine {
     /// Tears the socket half down and leaves the local graph alone, so a re-attach can reuse it.
     private func detachNetwork() {
         attached = false
+        // Any pending early watchdog belongs to the stream that is going away.
+        earlyWatchdogToken &+= 1
         lastAttachedHost = nil
         lastAttachedSession = nil
         networkQueue.async { [weak self] in

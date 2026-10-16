@@ -260,7 +260,8 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         // endpoint and the attach runs; the downlink starts with the graph.
         if engineGateOpen(for: uuid) {
             audioPathLog("startLocal called (live call)")
-            AudioEngine.shared.startLocal()
+            // `early`: there is no endpoint yet, so this engine gets the microphone watchdog.
+            AudioEngine.shared.startLocal(early: true)
             audioPathLog("startLocal returned")
         }
         if !audioRequested {
@@ -434,7 +435,8 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             warmTheGraph()
             if engineGateOpen(for: uuid) {
                 audioPathLog("startLocal called (transfer)")
-                AudioEngine.shared.startLocal()
+                // `early`: the endpoint arrives with audio_ready, so the watchdog is armed here too.
+                AudioEngine.shared.startLocal(early: true)
                 audioPathLog("startLocal returned")
             } else {
                 audioPathLog("startLocal skipped: the call audio gate is shut")
