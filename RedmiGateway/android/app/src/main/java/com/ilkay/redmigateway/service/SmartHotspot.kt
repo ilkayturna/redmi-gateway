@@ -225,11 +225,21 @@ object SmartHotspot {
                 stopHotspot()
             }
             HotspotAction.START_HOTSPOT -> {
-                Log.i(TAG, "No Wi-Fi; hotspot on for the iPhone${if (inCall) " (during a call)" else ""}")
+                val why = "No Wi-Fi; hotspot on for the iPhone${if (inCall) " (during a call)" else ""}"
+                Log.i(TAG, why)
+                // The stop half of this decision is recorded in the file the phone can hand over;
+                // the start half was only going to logcat, which rotates away. On the device the
+                // hotspot was found up and the iPhone connected through it, and the file said
+                // nothing about why, so the state had to be worked out from the interfaces.
+                com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, why)
                 HotspotRestarter.startIfNeeded(context)
                 lostSince = now
             }
-            HotspotAction.TRY_KNOWN_NETWORK -> tryKnownNetwork(now)
+            HotspotAction.TRY_KNOWN_NETWORK -> {
+                Log.i(TAG, "Wi-Fi lost; trying a known network before falling back to the hotspot")
+                com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Wi-Fi lost; trying a known network before falling back to the hotspot")
+                tryKnownNetwork(now)
+            }
             HotspotAction.NONE -> Unit
         }
     }
