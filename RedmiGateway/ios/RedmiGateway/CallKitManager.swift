@@ -242,9 +242,27 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         }
     }
 
+    /// The one gate for the call audio: it decides the early engine start *and* the attach.
+    ///
+    /// v1 started the engine on `audioActivated` but attached it through `isAudioEligible`, and in a
+    /// pickup those two never met: an engine that could not be attached (M4). Both halves read this
+    /// function now, so they cannot drift apart.
+    private func engineGateOpen(for uuid: UUID?) -> Bool {
+        guard let uuid, audioActivated else { return false }
+        return isAudioEligible(uuid)
+    }
+
     private func maybeStartAudio(for uuid: UUID) {
         guard isAudioEligible(uuid), GatewayConnection.shared.isAuthenticated else { return }
         audioCallUuid = uuid
+        // Build the graph before the Redmi's clock starts: the engine build was the largest part of
+        // firstPcm and it overlapped with nothing. Nothing is sent until the Redmi answers with its
+        // endpoint and the attach runs; the downlink starts with the graph.
+        if engineGateOpen(for: uuid) {
+            audioPathLog("startLocal called (live call)")
+            AudioEngine.shared.startLocal()
+            audioPathLog("startLocal returned")
+        }
         if !audioRequested {
             audioRequested = true
             GatewayConnection.shared.sendAudioStart()
@@ -269,8 +287,17 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             GatewayConnection.shared.log("Uplink redundancy offered but the link is remote; keeping the plain stream")
         }
         audioPathLog("audio_ready received (activated=\(audioActivated), redundancy=\(redundancy))")
-        if audioActivated, let uuid = audioCallUuid, isAudioEligible(uuid) {
+        // The attach takes the endpoint and the running engine, never eligibility again: a second
+        // gate here is what left v1 with an engine that could not be attached (M4). If the graph is
+        // not running (a pickup whose engine was never started early, or a late ready), startEngine
+        // builds it now instead of dropping the only ready message this arm will send.
+        if let uuid = audioCallUuid {
+            if !engineGateOpen(for: uuid) {
+                GatewayConnection.shared.log("audio_ready: call gate is shut; attaching anyway rather than dropping the ready")
+            }
             startEngine(ready)
+        } else {
+            GatewayConnection.shared.log("audio_ready arrived with no call waiting for audio; endpoint stored")
         }
     }
 
@@ -282,14 +309,21 @@ final class CallKitManager: NSObject, CXProviderDelegate {
 
     private func startEngine(_ endpoint: (session: UInt32, port: UInt16, key: Data), force: Bool = false) {
         let host = GatewayConnection.shared.connectedHost
-        if !force, AudioEngine.shared.isRunning, let running = runningEndpoint,
+        if !force, AudioEngine.shared.isRunning, AudioEngine.shared.isAttached, let running = runningEndpoint,
            running.host == host, running.session == endpoint.session, running.port == endpoint.port {
             return
         }
         // The engine builds and starts synchronously here; its duration is the biggest single part
         // of the iPhone's firstPcm, so it is measured from the answer tap on both sides.
         audioPathLog("engine start called")
-        AudioEngine.shared.start(host: host, port: endpoint.port, session: endpoint.session, key: endpoint.key)
+        if AudioEngine.shared.isRunning, !AudioEngine.shared.isAttached, !force {
+            // The graph was built before the Redmi armed (a transfer); attach it instead of throwing
+            // it away and paying for the build a second time on the critical path.
+            AudioEngine.shared.attachNetwork(host: host, port: endpoint.port,
+                                             session: endpoint.session, key: endpoint.key)
+        } else {
+            AudioEngine.shared.start(host: host, port: endpoint.port, session: endpoint.session, key: endpoint.key)
+        }
         if AudioEngine.shared.isRunning {
             runningEndpoint = (host: host, session: endpoint.session, port: endpoint.port)
             audioPathLog("engine.start() returned (running=true)")
@@ -393,12 +427,20 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             audioCallUuid = uuid
             audioRequested = true
             beginTransferTask()
+            // Build the graph before the Redmi's clock starts. v1 sent audio_start first and paid the
+            // build inside firstPcm, where it overlapped with nothing; the person waits for it either
+            // way, so it belongs before the arm. The same gate decides this and the attach
+            // (requirement 5); a shut gate skips the build and the attach path builds it instead.
+            warmTheGraph()
+            if engineGateOpen(for: uuid) {
+                audioPathLog("startLocal called (transfer)")
+                AudioEngine.shared.startLocal()
+                audioPathLog("startLocal returned")
+            } else {
+                audioPathLog("startLocal skipped: the call audio gate is shut")
+            }
             connection.sendAudioStart()
             audioPathLog("audio_start sent")
-            // After audio_start, never before: the Redmi's arm clock starts with that frame and no
-            // ring warmed this path, so the cost is real and must land inside firstPcm instead of
-            // being hidden from the measurement by delaying the arm.
-            warmTheGraph()
             return
         }
         // No CallKit call yet: CallKit has to be asked for one and activate it either way, so this
@@ -798,7 +840,13 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             AudioEngine.shared.prepareSession()
         }
         for uuid in answeredHere.union(outgoing) { maybeStartAudio(for: uuid) }
-        if let endpoint, let uuid = audioCallUuid, isAudioEligible(uuid) { startEngine(endpoint) }
+        // Same gate as the early start and the attach; a session that activates late still gets its
+        // engine, and an attach that already happened is a logged no-op inside AudioEngine.
+        if let endpoint, engineGateOpen(for: audioCallUuid) {
+            startEngine(endpoint)
+        } else if endpoint != nil {
+            GatewayConnection.shared.log("didActivate with no gated call waiting for audio; nothing to start")
+        }
     }
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
