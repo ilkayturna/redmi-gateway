@@ -59,8 +59,6 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         private const val SWIPED_AWAY_GRACE_MS = 3_000L
         private const val BEACON_MAJORS = 4
         private const val PULSE_MS = 10_000L
-        /** How long an outgoing call asks the iPhone to wake before it stops advertising. */
-        private const val OUTGOING_WAKE_MS = 30_000L
         /** How long a manual "take the audio" press asks the iPhone to wake. */
         private const val TRANSFER_WAKE_MS = 8_000L
         private val BLE_STATE_AAD = "phonebridge-ble-state".toByteArray(Charsets.UTF_8)
@@ -80,10 +78,26 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
                 .put("notificationRoom", server.reportedNotificationRoom)
                 .put("skippedNotifications", server.skippedNotifications)
                 .put("chunkedNotifications", server.chunkedNotifications)
+                .put("wakeToConnectMs", server.wakeToConnectMs)
+                .put("silentPushesSent", com.ilkay.redmigateway.push.CallWakePush.sent)
+                .put("lastSilentPushAgoMs", com.ilkay.redmigateway.push.CallWakePush.lastPushAgoMs)
         }
 
         /** Bluetooth links to this Redmi that still listen; in practice only the paired iPhone connects. */
         fun linkedCentrals(): Int = current?.listeningCentrals() ?: 0
+
+        /**
+         * The iPhone is back on the control link. When a wake beacon was asking for it, this is the
+         * moment the wake latency is measured to - the number the beacon exists for.
+         */
+        fun onControlLinkUp() {
+            val server = current ?: return
+            val started = server.beaconStartedAt
+            if (started == 0L) return
+            server.beaconStartedAt = 0L
+            server.wakeToConnectMs = android.os.SystemClock.elapsedRealtime() - started
+            Log.i(TAG, "iPhone connected ${server.wakeToConnectMs} ms after the wake beacon started")
+        }
 
         /**
          * The user asked the iPhone to take the call audio. An iPhone with its screen off may
@@ -132,6 +146,9 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
     @Volatile private var reportedNotificationRoom = 0
     /** Until when a manual "take the audio" press keeps the wake beacon lit. */
     @Volatile private var transferWakeUntil = 0L
+    /** When the wake beacon last started, and how long the iPhone then took to connect. */
+    @Volatile private var beaconStartedAt = 0L
+    @Volatile private var wakeToConnectMs = -1L
     // A long read continues at an offset; it must see the same sealed bytes as its first part.
     @Volatile private var lastStateRead = ByteArray(0)
 
@@ -698,7 +715,6 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
     // pairing key; the iPhone monitors that region and wakes up to present the call.
 
     private var beaconCallback: AdvertiseCallback? = null
-    private var beaconIsUrgent: Boolean? = null
     private var beaconMajor = 0
     private val beaconCheck = object : Runnable {
         override fun run() {
@@ -713,20 +729,22 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         // An outgoing call wakes the iPhone the same way an incoming one does. A sleeping iPhone
         // holds its Bluetooth link but no socket, so the reconnect pulse (which needs no link at
         // all) never fires and the call audio would stay on the Redmi until somebody opens the app.
-        // Bounded to the first 30 seconds so a long call does not keep the beacon lit.
-        val outgoingHere = CallManager.currentDirection == "outgoing" &&
-            CallManager.currentCallState in setOf("dialing", "connecting", "active") &&
-            com.ilkay.redmigateway.service.GatewayService.authenticatedClientCount() == 0 &&
-            CallManager.addedAtMillis > 0 &&
-            System.currentTimeMillis() - CallManager.addedAtMillis < OUTGOING_WAKE_MS
+        // The call is the bound, not a fixed window: a 30 second one went dark while the iPhone was
+        // still waking (measured: it connected 58 seconds into the call).
+        val outgoingHere = CallWakePolicy.outgoingAsksForWake(
+            live = CallManager.currentCallState in setOf("dialing", "connecting", "active"),
+            hasControlLink = com.ilkay.redmigateway.service.GatewayService.authenticatedClientCount() > 0,
+            addedAtMillis = CallManager.addedAtMillis,
+            nowMillis = System.currentTimeMillis()
+        ) && CallManager.currentDirection == "outgoing"
         val pulsing = android.os.SystemClock.elapsedRealtime() < pulseUntil
         // A manual "take the audio" press right now: an iPhone whose screen is off may refuse the
         // pickup, and the region beacon is the only thing that brings the app forward. Bounded to
-        // a few seconds and non-urgent, so it never competes with a ringing call.
+        // a few seconds, so it never competes with a ringing call.
         val transferring = android.os.SystemClock.elapsedRealtime() < transferWakeUntil &&
             CallManager.currentCallState in setOf("dialing", "connecting", "active")
         if ((ringingHere || outgoingHere || transferring || pulsing) && shouldBeRunning) {
-            startCallBeacon(isUrgent = ringingHere)
+            startCallBeacon()
         } else {
             stopCallBeacon()
         }
@@ -800,12 +818,9 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         mainHandler.postDelayed({ updateCallBeacon() }, PULSE_MS + 100)
     }
 
-    private fun startCallBeacon(isUrgent: Boolean = false) {
+    private fun startCallBeacon() {
         if (!hasAdvertisePermission()) return
-        if (beaconCallback != null) {
-            if (beaconIsUrgent == isUrgent) return
-            stopCallBeacon()
-        }
+        if (beaconCallback != null) return
         // One legacy advertising set: the wake beacon needs the advertiser itself.
         stopAdvertising()
         val key = PairingStore.pairedClient()?.key ?: return
@@ -820,36 +835,37 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
             .setIncludeTxPowerLevel(false)
             .addManufacturerData(0x004C, payload)
             .build()
-        val mode = if (isUrgent) AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY else AdvertiseSettings.ADVERTISE_MODE_BALANCED
-        val txPower = if (isUrgent) AdvertiseSettings.ADVERTISE_TX_POWER_HIGH else AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM
+        // Always the fastest setting: the beacon is the only thing that reaches a suspended iPhone,
+        // and it only burns while a call has no control socket (or during the short reconnect
+        // pulses), so the duty cycle stays around one percent of one radio. A slower interval was
+        // measurably worse: the iPhone took most of a minute to notice the region entry.
         val settings = AdvertiseSettings.Builder()
-            .setAdvertiseMode(mode)
-            .setTxPowerLevel(txPower)
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
             .setConnectable(false)
             .setTimeout(0)
             .build()
         val callback = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-                Log.i(TAG, "Call wake beacon on (major $beaconMajor, urgent=$isUrgent)")
+                // The wake latency is measured from here to the iPhone's first authenticated packet.
+                if (beaconStartedAt == 0L) beaconStartedAt = android.os.SystemClock.elapsedRealtime()
+                Log.i(TAG, "Call wake beacon on (major $beaconMajor, low latency, high power)")
             }
 
             override fun onStartFailure(errorCode: Int) {
                 Log.w(TAG, "Call wake beacon failed: $errorCode")
                 if (beaconCallback === this) {
                     beaconCallback = null
-                    beaconIsUrgent = null
                 }
             }
         }
         beaconCallback = callback
-        beaconIsUrgent = isUrgent
         try {
             advertiser.startAdvertising(settings, data, callback)
             mainHandler.removeCallbacks(beaconCheck)
             mainHandler.postDelayed(beaconCheck, 500)
         } catch (e: Exception) {
             beaconCallback = null
-            beaconIsUrgent = null
             Log.w(TAG, "Call wake beacon failed: ${e.javaClass.simpleName}")
         }
     }
@@ -862,7 +878,6 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
     private fun stopCallBeacon() {
         val callback = beaconCallback ?: return
         beaconCallback = null
-        beaconIsUrgent = null
         mainHandler.removeCallbacks(beaconCheck)
         runCatching { if (hasAdvertisePermission()) bluetoothAdapter?.bluetoothLeAdvertiser?.stopAdvertising(callback) }
         Log.i(TAG, "Call wake beacon off")
@@ -1078,6 +1093,10 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
     override fun onCallStateChanged(callId: String, state: String, number: String?) {
         charState?.let { notifyCharacteristicToSubscribers(it, buildStateBytes()) }
         mainHandler.post { updateCallBeacon() }
+        // The beacon is the fast path, a silent push is the guaranteed one: iOS alone decides when
+        // it scans for a region, and a measured call took most of a minute to notice it.
+        com.ilkay.redmigateway.push.CallWakePush.onCallState(
+            callId, state, CallManager.currentDirection)
     }
 
     // CallManager.WaitingListener implementation
@@ -1110,3 +1129,5 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         }
     }
 }
+
+

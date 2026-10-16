@@ -114,6 +114,9 @@ public final class GatewayConnection: ObservableObject {
     private var closeAfterCatchUp = false
     /// The bounded grace that keeps the socket alive just after the app leaves the screen.
     private var idleLinkTask: UIBackgroundTaskIdentifier = .invalid
+    /// What woke the app, and when, for the wake latency line.
+    private var wakeAt: Date?
+    private var wakeReason: String?
     /// VoIP push token (PushKit); sent to the Redmi for calls while this iPhone is away.
     private var pushToken: String?
     private var alertPushToken: String?
@@ -769,6 +772,9 @@ public final class GatewayConnection: ObservableObject {
         defaults.set(currentHost, forKey: kLastHost)
         defaults.set(currentPort, forKey: kLastPort)
         log("Connected to the Redmi")
+        reportWakeLatency()
+        // The wake is over: stop spending radio time on beacon ranging.
+        CallWakeMonitor.shared.stopRanging()
         CallKitManager.shared.handleGatewayLinkRestored()
         sendPushToken()
         startPing()
@@ -780,6 +786,24 @@ public final class GatewayConnection: ObservableObject {
         guard state == .authenticated else { return }
         syncCallsHasMore = false
         send(["type": "sync", "callsAfter": history.callsSeq, "smsAfter": history.smsSeq])
+    }
+
+    /// Remembers what woke the app, so the link-up log can say how long the wake took.
+    ///
+    /// The person's complaint was "the iPhone never hears about it until I open the app"; the only
+    /// way to tell a slow wake from a missed one is to measure region entry (or a Bluetooth
+    /// notification) against the moment the socket authenticates.
+    func noteWake(reason: String) {
+        wakeAt = Date()
+        wakeReason = reason
+    }
+
+    private func reportWakeLatency() {
+        guard let started = wakeAt, let reason = wakeReason else { return }
+        wakeAt = nil
+        wakeReason = nil
+        let ms = Int(Date().timeIntervalSince(started) * 1000)
+        log("Wake latency: \(reason) -> authenticated in \(ms) ms")
     }
 
     // MARK: - Calls

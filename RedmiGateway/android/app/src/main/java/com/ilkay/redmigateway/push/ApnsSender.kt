@@ -153,9 +153,24 @@ object ApnsSender {
         post("alert", BUNDLE_ID, KEY_ALERT_TOKEN, payload, "setup-test", done)
     }
 
+    /**
+     * Silent push: wakes the app in the background without a banner and without a CallKit screen,
+     * which is how a sleeping iPhone learns that a call is waiting for it. PushKit cannot carry
+     * this - a silent push needs the app's ordinary token and topic, and priority 5 is mandatory
+     * for the background push type. Carries only what the app needs to react, never a number or a
+     * name. Returns false when there is no alert token, which only the iPhone can register.
+     */
+    fun sendBackground(payload: JSONObject, done: ((String?) -> Unit)? = null): Boolean {
+        if (!alertsReady) return false
+        val body = JSONObject().put("aps", JSONObject().put("content-available", 1))
+        payload.keys().forEach { key -> body.put(key, payload.get(key)) }
+        post("background", BUNDLE_ID, KEY_ALERT_TOKEN, body, collapseId = null, done = done, priority = "5")
+        return true
+    }
+
     private fun post(
         type: String, topic: String, tokenKey: String, payload: JSONObject, collapseId: String?,
-        done: ((String?) -> Unit)? = null
+        done: ((String?) -> Unit)? = null, priority: String = "10"
     ) {
         val token = prefs.getString(tokenKey, null) ?: return done?.invoke("iPhone bildirim kaydı yok.") ?: Unit
         val jwt = providerToken() ?: return done?.invoke("Apple anahtarı okunamadı.") ?: Unit
@@ -164,7 +179,7 @@ object ApnsSender {
             .header("authorization", "bearer $jwt")
             .header("apns-push-type", type)
             .header("apns-topic", topic)
-            .header("apns-priority", "10")
+            .header("apns-priority", priority)
             // Never deliver late: a call or code that arrives minutes later only confuses.
             .header("apns-expiration", "0")
             .apply { if (collapseId != null) header("apns-collapse-id", collapseId.take(64)) }

@@ -84,7 +84,12 @@ final class CallWakeMonitor: NSObject, ObservableObject {
     }
 
     private func wake(_ reason: String) {
+        GatewayConnection.shared.noteWake(reason: "beacon \(reason)")
         GatewayConnection.shared.log("Call wake beacon: \(reason)")
+        // While the app is alive, ranging notices the beacon in about a second where region
+        // monitoring can take a minute; it is dropped as soon as the link is up, so the radio is
+        // busy only during the wake itself.
+        startRanging()
         if backgroundTask == .invalid {
             // Time to connect and show the call; CallKit keeps the app running after that.
             backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "incoming-call") {
@@ -96,6 +101,26 @@ final class CallWakeMonitor: NSObject, ObservableObject {
         }
         BLECentralManager.shared.start()
         GatewayConnection.shared.wakeFromBeacon()
+    }
+
+    /// Ranging is the fast path to a beacon entry; region monitoring is the one iOS still delivers
+    /// while the app is suspended. Both run, and ranging is dropped once the socket is up.
+    private func startRanging() {
+        let wanted = GatewayConnection.shared.pairing.map(Self.beaconUUID(for:))
+        for region in manager.monitoredRegions where isCallWakeRegion(region) {
+            guard let beacon = region as? CLBeaconRegion else { continue }
+            if let wanted, beacon.uuid == wanted,
+               !manager.rangedRegions.contains(where: { $0.identifier == region.identifier }) {
+                manager.startRangingBeacons(in: beacon)
+            }
+        }
+    }
+
+    /// Called when the link comes up: the wake is over, so the radio goes quiet again.
+    func stopRanging() {
+        for case let region as CLBeaconRegion in manager.rangedRegions where isCallWakeRegion(region) {
+            manager.stopRangingBeacons(in: region)
+        }
     }
 
     private func endBackgroundTask() {
