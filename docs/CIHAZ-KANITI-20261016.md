@@ -928,3 +928,65 @@ iPhone'da olduğu için gereksiz mi?"*
 ### Kalan işler (kurulum gerektirir — kural 0.4: kullanıcı onayı olmadan kurulmaz)
 1. **Bluetooth butonu** — yalnızca kullanıcı isterse
 2. Ses geçişi (`startMedia=2023ms` → `<1 sn`) — motor ayrımı, **çağrı doğrulaması şart** (6.1)
+
+---
+
+## 23. 🎯 GEÇİŞ GECİKMESİNİN KESİN SEBEBİ: iPhone'un SES MOTORU GEÇ BAŞLIYOR (16.10.2026)
+
+**Kapı eşikleri `CallAudioRelay.kt`'den okundu:**
+
+```kotlin
+ARRIVAL_WINDOW_MIN_MS     = 240L    // 240 ms yeterli
+ARRIVAL_WINDOW_MIN_FRAMES = 12      // 12 kare = 240 ms
+MIN_FRAMES_PER_SECOND     = 38      // saniyede 38 kare sart
+GATE_SAMPLE_MS            = 140L
+```
+
+**Eşiklere göre kapı ~240 ms'de açılmalı. Ölçülen:**
+
+```
+gateMs     = 1431 ms      <<< esigin gerektirdiginin 6 KATI
+gateFrames = 76
+```
+
+### Sebep: iPhone 14 kare/sn ile başlıyor
+
+**Başarılı çağrının kendi `RELAY_HEALTH` satırı** (10:33:33.443):
+```
+owner=PREPARING_IPHONE iphone=14/s uplink=0/s pcm=0/s ... maxWriteMs=3
+```
+**Sonra** (10:33:38.566):
+```
+owner=IPHONE iphone=52/s uplink=52/s pcm=51/s ...
+```
+
+**iPhone `14/s` ile başlıyor, `38/s` eşiğini geçmesi ~1.4 saniye sürüyor.**
+
+### Hesap birebir tutuyor
+
+```
+firstPcm   592 ms   ilk kare geldi
+gate      1431 ms   hiz 38/sn esigini gecene kadar beklendi (76 kare)
+------------------------------
+startMedia 2023 ms  OLCULEN DEGER
+```
+
+### Sonuç — `<1 sn` neden eşik gevşeterek tutulamaz
+
+**Sorun eşik değil, iPhone'un ses motorunun GEÇ BAŞLAMASI.** Kapıyı gevşetmek
+(`MIN_FRAMES_PER_SECOND` düşürmek) iPhone **ses vermeden** devir teslim yapmak demektir →
+**kullanıcı sessizlik duyar.** Bu, 6.1'in doğduğu hatanın ta kendisi.
+
+**Tek doğru çözüm:** iPhone'un ses motoru **devir teslimden ÖNCE** çalışıyor olmalı —
+**motor ayrımı (pre-arm)**, yani `codex/engine-split-v2` dalının yaptığı şey.
+
+**Ve 6.1 gereği:** cihazda **gerçek çağrı** ile doğrulanmadan gönderilemez ✗
+
+### Kalan tek belirsizlik
+**`firstPcm=592 ms` neden bu kadar uzun?** İki bileşen olabilir:
+1. iPhone'un ses motorunu başlatma süresi (iOS tarafı)
+2. Redmi'nin `audio_state` mesajının iPhone'a ulaşma + işlenme süresi
+
+**Ayırt etmek için:** `AUDIO_STATE_REPEAT` düzeltmesi çağrıda denendiğinde, tekrar **hemen**
+başlıyorsa (1 sn aralıklarla) ve `firstPcm` **düşüyorsa**, ikinci bileşen baskındı — yani
+Redmi tarafında yapılabilecek bir şey var. **Düşmüyorsa** sorun iOS'ta ve **CI şart.**
