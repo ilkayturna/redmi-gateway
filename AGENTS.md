@@ -397,6 +397,80 @@ zamanlama değil. İkili şeyleri **önce** ele.
 
 ---
 
+### 6.6 "Hızlandırma" değişikliği sesi tamamen kesebilir — sıfırdan başlayan örnekleme kilidi
+
+**Hata (16.10.2026, İKİNCİ kez ses kesildi):** Devir teslim kapısı **ömür boyu ortalama** hız
+kullanıyordu ve çalışıyordu (10:33'teki çağrı `AUDIO_OWNER=IPHONE` ile bitti). "Kapı 1431 ms
+bekliyor, son saniye zaten 53/s" gerekçesiyle **pencere tabanlı** örneklemeye geçildi
+(`GATE_SAMPLE_MS = 140L`). Kuruldu ve **ses bir daha iPhone'a geçmedi.**
+
+**Kök neden — saf kilitlenme:**
+```kotlin
+private var gateSampleAt = 0L                                    // sifirdan baslar
+val sampleMs = if (gateSampleAt == 0L) 0L else now - gateSampleAt // 0 iken ZORLA 0
+val recentRate = if (sampleMs >= GATE_SAMPLE_MS) ... else 0       // 0 >= 140 -> hep 0
+if (sampleMs >= GATE_SAMPLE_MS) {
+    gateSampleAt = now                                            // >>> HIC CALISMAZ <<<
+}
+```
+**`gateSampleAt`'ı atayan koşul, `gateSampleAt` sıfırken `sampleMs`'e bağlı. Ve `sampleMs`
+sıfırken koşul yanlış. Yani kendini besleyen bir kilit: hiç açılmaz.** Her `arm()` sıfırladığı
+için **her çağrıda** kilitleniyordu.
+
+**Belirti:** `GATE_OPEN` yok · `startMedia()` hiç çağrılmıyor · 8 sn sonra
+`iphone_audio_not_ready` · **log'da hiçbir sebep yok.**
+
+**KURAL:**
+1. **Zamanlayıcı/örnekleme durumu asla "sıfır = başlatılmadı" ile "sıfır = geçen süre"yi
+   karıştırmasın.** İlk geçişte origin'i **açıkça** ata:
+   ```kotlin
+   if (gateSampleAt == 0L) { gateSampleAt = now; gateSampleFrames = framesNow }
+   ```
+   ya da **hiç durum tutma** — ortalamayı kullan (bu, kanıtlanmış çalışan hâldi).
+2. **"Yavaş" bir yolu "hızlandırmak" ses yolunda en pahalı değişikliktir.** 6.1 zaten
+   söylüyor: gerçek çağrı olmadan gönderilmez. **Bu hata o kuralın çiğnenmesiyle oldu.**
+3. **Bir metrik "kötü" görünüyorsa önce ÖLÇ, sonra değiştir.** `gateMs=1431 ms` rahatsız
+   ediciydi ama **çalışıyordu**; değişiklik onu **sonsuza** çevirdi.
+4. **Belirti "hiç çalışmıyor" ise (ikili), sebep genellikle bir MANTIK kilididir** — ince
+   zamanlama değil. Kodu **okuyarak** bulunur: bir koşulun hiç doğru olamayacağını görmek
+   yeterliydi.
+5. **Geri alma kanıtı:** kurulu APK'da ölü sabitin **olmadığını** doğrula
+   (`b'GATE_SAMPLE_MS' in dex` → False).
+
+**DOĞRULAMA — kapatıldı (16.10.2026 16:06, cihaz, gerçek çağrı, kurulum 27):**
+```
+16:06:21.361  AUDIO_OWNER=PREPARING_IPHONE reason=waiting_for_iphone_audio
+16:06:22.383  Call audio media started; verifying before handing over (gate=431ms frames=21 rate=50/s)
+16:06:22.796  AUDIO_OWNER=IPHONE reason=iphone_confirmed
+16:06:22.797  Call audio moved to iPhone (uplink=50/s downlink=43/s firstPcm=524ms startMedia=955ms gateMs=380 ...)
+```
+- Kapı **açıldı** (10:39'dan sonra ilk kez), ses **iPhone'a geçti** — kullanıcı da doğruladı.
+- `startMedia = 955 ms` · 10:33'te **2023 ms**. **Aynı metrik** (kural 6.4 ihlali yok):
+  `firstPcm + gate` → 592+1431=2023 ✓ ve 524+431=955 ✓.
+- HAL kanıtı: `usecase(51: incall_music_uplink2)` **tek kesintisiz stream** olarak açıldı
+  (16:06:22.332 → 16:06:30.208) ve tamponda **`pcm_prepare` eşleşmesi 0** → 6.5'teki
+  "helikopter" imzası **yok** (vendor düzeltmesi çalışıyor).
+
+### 6.7 Tek çağrı "çalışıyor"u kanıtlar, "hedefi tuttum"u kanıtlamaz
+
+**Gözlem (aynı çağrılar):** `gateMs` çağrıdan çağrıya **değişiyor** — 1431 ms (10:33, iPhone
+14/s ile başladı) vs 380-431 ms (16:06, iPhone 50/s ile başladı). Yani `<1 sn` hedefi bu
+çağrıda tuttu; **her çağrıda tutacağı kanıtlanmadı.** Kapı sabit değil, **iPhone'un sesi ne
+kadar hızlı başlarsa** o kadar hızlı açılıyor.
+
+**KURAL:**
+1. Bir gecikme hedefi için **en az 3 çağrı** ölç ve **dağılımı** yaz (min / ort / max).
+   Tek ölçümü "hedefi tuttum" diye raporlamak, 6.4'ün kardeşi bir hatadır.
+2. Çağrı **çok kısaysa** (konuşma penceresi < ~5 sn) devir teslim **sonrası** `RELAY_HEALTH`
+   satırı hiç yazılmaz → `underruns/dropped/silence` **ölçülemez** ve ses kalitesi maddesi
+   **kapanmaz**. "Ses geçti" ile "ses temiz" **ayrı** iki iddiadır; ikincisi için ≥5 sn konuşma
+   gerekir.
+3. **Kapsamayan tamponda yokluk kanıt değildir (3.1'in log hâli):** cihaz logcat tamponu bu
+   oturumda 15:33:55'te başlıyordu; 10:33 çağrısı tamponda **yoktu**. "Eski çağrıda bu satır
+   yoktu" demek için **tamponun o pencereyi kapsadığını** önce doğrula.
+
+---
+
 ## 7. OTOMASYON VE BAYAT YOLLAR — SESSİZ GERİ ALMA
 
 > Bu bölüm 16.10.2026'da, **mevcut tüm düzeltmeleri sessizce geri alabilecek** bir betiğin
@@ -497,42 +571,3 @@ Yani bozulan şey sadece gürültü değil — **teşhis edilebilirliğin kendis
 **rotasyonunu** hızlandırır ve **tanılamayı yok eder** — yani eklediğin şeyin amacını tersine
 çevirir.
 
-### 6.6 "Hızlandırma" değişikliği sesi tamamen kesebilir — sıfırdan başlayan örnekleme kilidi
-
-**Hata (16.10.2026, İKİNCİ kez ses kesildi):** Devir teslim kapısı **ömür boyu ortalama** hız
-kullanıyordu ve çalışıyordu (10:33'teki çağrı `AUDIO_OWNER=IPHONE` ile bitti). "Kapı 1431 ms
-bekliyor, son saniye zaten 53/s" gerekçesiyle **pencere tabanlı** örneklemeye geçildi
-(`GATE_SAMPLE_MS = 140L`). Kuruldu ve **ses bir daha iPhone'a geçmedi.**
-
-**Kök neden — saf kilitlenme:**
-```kotlin
-private var gateSampleAt = 0L                                    // sifirdan baslar
-val sampleMs = if (gateSampleAt == 0L) 0L else now - gateSampleAt // 0 iken ZORLA 0
-val recentRate = if (sampleMs >= GATE_SAMPLE_MS) ... else 0       // 0 >= 140 -> hep 0
-if (sampleMs >= GATE_SAMPLE_MS) {
-    gateSampleAt = now                                            // >>> HIC CALISMAZ <<<
-}
-```
-**`gateSampleAt`'ı atayan koşul, `gateSampleAt` sıfırken `sampleMs`'e bağlı. Ve `sampleMs`
-sıfırken koşul yanlış. Yani kendini besleyen bir kilit: hiç açılmaz.** Her `arm()` sıfırladığı
-için **her çağrıda** kilitleniyordu.
-
-**Belirti:** `GATE_OPEN` yok · `startMedia()` hiç çağrılmıyor · 8 sn sonra
-`iphone_audio_not_ready` · **log'da hiçbir sebep yok.**
-
-**KURAL:**
-1. **Zamanlayıcı/örnekleme durumu asla "sıfır = başlatılmadı" ile "sıfır = geçen süre"yi
-   karıştırmasın.** İlk geçişte origin'i **açıkça** ata:
-   ```kotlin
-   if (gateSampleAt == 0L) { gateSampleAt = now; gateSampleFrames = framesNow }
-   ```
-   ya da **hiç durum tutma** — ortalamayı kullan (bu, kanıtlanmış çalışan hâldi).
-2. **"Yavaş" bir yolu "hızlandırmak" ses yolunda en pahalı değişikliktir.** 6.1 zaten
-   söylüyor: gerçek çağrı olmadan gönderilmez. **Bu hata o kuralın çiğnenmesiyle oldu.**
-3. **Bir metrik "kötü" görünüyorsa önce ÖLÇ, sonra değiştir.** `gateMs=1431 ms` rahatsız
-   ediciydi ama **çalışıyordu**; değişiklik onu **sonsuza** çevirdi.
-4. **Belirti "hiç çalışmıyor" ise (ikili), sebep genellikle bir MANTIK kilididir** — ince
-   zamanlama değil. Kodu **okuyarak** bulunur: bir koşulun hiç doğru olamayacağını görmek
-   yeterliydi.
-5. **Geri alma kanıtı:** kurulu APK'da ölü sabitin **olmadığını** doğrula
-   (`b'GATE_SAMPLE_MS' in dex` → False).

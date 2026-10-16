@@ -1110,3 +1110,86 @@ tutulamaz.** — ve o değişiklik **CI'ya bağlı** ✗
 **`firstPcm = 592 ms`'in ne kadarı motor başlatma, ne kadarı mesaj gecikmesi** hâlâ ayrıştırılmadı.
 Çağrı testi bunu söyler. Ama **motor başlatma baskınsa**, Redmi tarafında yapılacak bir şey
 **yok** — çünkü iPhone erken başlatmayı reddediyor.
+
+---
+
+## 32. ✅ KAPANIŞ — kilit çözüldü ve GERÇEK ÇAĞRIYLA doğrulandı (16.10.2026 16:06)
+
+### Kök neden (bölüm 31'de bulundu, 16:04'te kuruldu)
+`CallAudioRelay.kt` içindeki devir teslim kapısı **saf kilitlenme** hâlindeydi:
+`gateSampleAt` sıfırdan başlıyor, `sampleMs` onu görünce zorla 0 yapılıyor, `recentRate` de
+0 kalıyordu; **`gateSampleAt`'ı atayan koşul hiç doğru olamıyordu.** Yani kapı hiç açılmıyor,
+`startMedia()` hiç çağrılmıyor, 8 sn sonra `iphone_audio_not_ready` yazılıyordu — ve **log
+hiçbir sebep göstermiyordu.**
+
+`1305f06` (10:38) getirdi, 10:39'daki kurulumla cihaza girdi; ses **10:33'ten sonra bir daha
+geçmedi.** Bu, `AGENTS.md` 6.1'in ("ses yoluna dokunan değişiklik gerçek çağrıyla doğrulanmadan
+gönderilmez") çiğnenmesiyle oldu.
+
+### Düzeltme
+Kapı, 10:33'te çalıştığı kanıtlanmış mantığa (**ömür boyu ortalama hız**) döndürüldü; ölü
+örnekleme durumu (`GATE_SAMPLE_MS`, `gateSampleFrames`, `gateSampleAt`) **tamamen silindi**.
+334 test, 0 failure. Kurulum 26 → **27** (dosyada `MY_PACKAGE_REPLACED` = 27).
+
+### CİHAZ KANITI — uygulamanın kendi tanılama dosyasından
+Çağrı: **outgoing**, 16:06:21 → 16:06:27 (iPhone'dan başlatıldı).
+
+```
+16:06:20.361  Call: iPhone connected (protocol 2)
+16:06:21.195  Call: Initiating outgoing GSM call
+16:06:21.360  Call: Call audio session armed
+16:06:21.361  Audio: AUDIO_OWNER=PREPARING_IPHONE reason=waiting_for_iphone_audio
+16:06:22.383  Call: Call audio media started; verifying before handing over (gate=431ms frames=21 rate=50/s)
+16:06:22.796  Audio: AUDIO_OWNER=IPHONE reason=iphone_confirmed
+16:06:22.797  Call: Call audio moved to iPhone (uplink=50/s downlink=43/s settle=473ms
+              firstWrite=78ms firstRead=153ms firstPcm=524ms startMedia=955ms gateMs=380 gateFrames=19 gateRate=50/s)
+16:06:25.232  Call: Call State Changed: State=active        <- karsi taraf cevapladi
+16:06:27.117  Call: Executing HANGUP / DISCONNECT
+16:06:27.226  Audio: AUDIO_OWNER=REDMI reason=call_ended
+```
+
+**Sonuç 1 — ses geri geldi (madde 3'ün "geçiş" kısmı):** `GATE_OPEN` üretildi, ses iPhone'a
+geçti. 10:39'dan sonra ilk kez. Kullanıcı da kendi deneyimiyle doğruladı.
+
+**Sonuç 2 — geçiş süresi hedefin ALTINDA (ilk kez):**
+
+| Çağrı | firstPcm | gate | **startMedia** |
+|---|---|---|---|
+| 08:34 (çalışıyordu) | 474 ms | — | 1474 ms |
+| 10:33 (son çalışan) | 592 ms | 1431 ms | **2023 ms** |
+| **16:06 (bu çağrı)** | 524 ms | 431 ms | **955 ms** |
+
+Aynı metrik, aynı tanım (kural 6.4 ihlali yok): `startMedia = firstPcm + gate` →
+592+1431 = 2023 ✓ ve 524+431 = 955 ✓.
+
+**Sonuç 3 — HAL tarafı temiz (madde 4'ün ön koşulu):**
+```
+16:06:22.332  audio_hw_primary: start_output_stream: usecase(51: incall_music_uplink2)
+              devices(0x10000) ... device voice-tx
+16:06:30.208  audio_hw_primary: out_standby: usecase(51: incall_music_uplink2)
+```
+Tek **kesintisiz** stream, ~7.9 sn. Ve logcat tamponunda **`pcm_prepare` eşleşmesi = 0** →
+6.5'te tarif edilen "saniyede ~14 kez yeniden başlatma" (helikopter/cızırtı) imzası **yok**.
+Vendor düzeltmesi (USECASE_INCALL_MUSIC_UPLINK2 → SIM 2) **çalışıyor**.
+
+### ⚠️ Bu çağrının KAPATMADIĞI şeyler (dürüst sınır)
+1. **Madde 4 (cızırtı) kapanmadı.** Konuşma penceresi ~1.9 sn (`active` 16:06:25.232 →
+   hangup 16:06:27.117). Devir teslim **sonrası** `RELAY_HEALTH` satırı hiç yazılmadı
+   (5 sn'de bir yazılıyor) → `underruns / dropped / silence / maxWriteMs` **ölçülemedi**.
+   "Ses geçti" ile "ses temiz" ayrı iddialardır; ikincisi için **≥5 sn konuşma** gerekir.
+2. **`<1 sn` hedefi n=1.** `gateMs` çağrıya göre değişiyor (10:33'te 1431 ms, çünkü iPhone
+   14/s ile başladı; 16:06'da 380-431 ms, çünkü 50/s ile başladı). Hedef **en az 3 çağrıyla**
+   ve dağılımla (min/ort/max) doğrulanmalı → `AGENTS.md` **6.7**.
+3. **Teardown'da bir `E` satırı:** `16:06:30.283 E audio_hw_primary: disable_snd_device:
+   Invalid sound device 0`. Logcat tamponu bu oturumda **15:33:55'te başlıyor** ve 10:33
+   çağrısını **kapsamıyor** → bu satırın yeni mi eski mi olduğu **bilinmiyor**. Kapsamayan
+   tamponda yokluk kanıt değildir (kural 3.1).
+4. **Madde 1 (arayüz) hâlâ ekran kilidine bağlı:** `mDreamingLockscreen=true`,
+   `mWakefulness=Dozing` → ekran görüntüsü alınamıyor.
+5. **Madde 2 (yanıtlama senkronu)** bu çağrıda ölçülmedi (çağrı iPhone'dan başlatıldı);
+   616 ms'lik kanıt 15:03'teki **incoming** çağrıdan geliyor ve **hâlâ geçerli**.
+
+### Kurulum disiplini
+- **26 → 27.** Bu kurulum kullanıcının açık talimatıyla yapıldı ("ses hiç iPhone'a geçmiyor;
+  ya düzelt ya da eski hâline getir") ve kural 0.4'ün beş sorusu yanıtlandı.
+- Sonrasında **hiçbir kurulum yapılmadı**; bu bölümdeki tüm kanıt **salt okuma** ile toplandı.
