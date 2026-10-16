@@ -104,11 +104,17 @@ Bunlar **motor ayrımı kaynaklı** sessizlik yollarıdır (geri alındı, ama t
 
 ## 3. İKİNCİ TEST: uyanma (asıl şikayet)
 
-Ölçüm betiği hazır:
+**Tek komut** — ön kontrolü kendi yapar, çağrıyı otomatik algılar, karar tablosu basar:
 ```
-C:\Users\ilkay.turna\Documents\GitHub\RedmiGateway-Archive\scripts\run-wake-test.ps1
+powershell -ExecutionPolicy Bypass -File "C:\Users\ilkay.turna\Documents\GitHub\RedmiGateway-Archive\scripts\run-wake-test.ps1"
 ```
-Betik logcat'i yakalar, çağrı sonrası özetler.
+Ne yapar:
+1. **Ön kontrol:** cihaz, **vendor ses düzeltmesi** (`/vendor`'dan okur), servis, varsayılan dialer, push kaydı
+   → **vendor düzeltmesi yoksa DURUR** ve `apply` komutunu söyler (kod sorunu değil)
+2. **Yakalama:** logcat temizlenir, arka planda yakalanır
+3. **Çağrı algılama:** otomatik (`arm` / `audio_start` / `Call audio moved` / `Silent wake push`),
+   Enter gerekmez. Gevşek desen kullanmaz — arka plan gürültüsüne takılmaz
+4. **Karar tablosu:** her metriği hedefiyle karşılaştırır → `[OK]` / `[XX]` / `[??]`
 
 **Ölçülecek üçlü:**
 
@@ -117,9 +123,16 @@ Betik logcat'i yakalar, çağrı sonrası özetler.
 | `silentPushesSent` | Redmi log | — | **≥1** (0 ise token kaydı eksik) |
 | `wakeToConnectMs` | Redmi log | **58 000 ms** | **1 000-3 000 ms** |
 | `Wake latency: silent push -> authenticated in N ms` | iPhone log | — | 1 000-3 000 ms |
+| `firstSend` (v2 dalı) | iPhone log | ~1000 ms | **≤500 ms** |
+| `localReady` (v2 dalı) | iPhone log | — | 400-600 ms |
 
 **Korunması gerekenler (bozulmamalı):**
 `silence` 0-1/s · `gap` 52 ms · `dropped` 0 · `maxWriteMs` ≤5 · DTMF · ack bekçisi · **FEC dormant**
+
+**Bekçi satırı çıkarsa korkma:** `Early audio start was never attached after 8 s; releasing the
+microphone` — bu **doğru davranış**. Mikrofon bırakıldı; geç gelen attach grafiği yeniden kurdu
+(`Attach found no running engine; building the graph now`) ve **ses yine aktı**. v1'de burada
+kalıcı sessizlik olurdu.
 
 ---
 
