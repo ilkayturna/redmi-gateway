@@ -62,9 +62,7 @@ object SmsSender {
     /** Returns an error code immediately for invalid input; otherwise reports through [callback]. */
     fun send(context: Context, recipientRaw: String, message: String, callback: Result): String? {
         val recipient = normalizeRecipient(recipientRaw)
-        if (!recipient.matches(Regex("^\\+?[0-9]{3,15}$"))) return "invalid_recipient"
-        if (message.isBlank()) return "empty_message"
-        if (message.length > MAX_LENGTH) return "message_too_long"
+        smsSendProblem(recipient, message)?.let { return it }
         ensureRegistered(context.applicationContext)
         return try {
             val smsManager: SmsManager = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -104,4 +102,25 @@ object SmsSender {
             registered = true
         }
     }
+}
+
+
+/**
+ * Why this message cannot be sent, or null when it can.
+ *
+ * The recipient is checked after normalising, so the punctuation an iPhone keyboard produces does
+ * not count against it. The shape allowed is an optional plus followed by three to fifteen digits,
+ * which is the E.164 limit: a shorter run is not a number, and a longer one cannot be dialled.
+ *
+ * The length cap is ten ordinary SMS parts. Sending is a paid action on the user's SIM, so the
+ * cheap checks happen before anything is handed to the system.
+ *
+ * @param recipient already normalised by [SmsSender.normalizeRecipient]
+ * @param message the text as typed
+ */
+internal fun smsSendProblem(recipient: String, message: String): String? = when {
+    !recipient.matches(Regex("^\\+?[0-9]{3,15}$")) -> "invalid_recipient"
+    message.isBlank() -> "empty_message"
+    message.length > SmsSender.MAX_LENGTH -> "message_too_long"
+    else -> null
 }
