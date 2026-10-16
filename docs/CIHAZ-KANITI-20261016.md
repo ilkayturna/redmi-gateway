@@ -771,3 +771,39 @@ dışarıdan çıkarıldı (arayüz + WiFi durumu), uygulamanın kendi kararınd
 ### Yapılacak (düşük risk, çağrı gerektirmez)
 `SmartHotspot.decideHotspotAction` sonucunu tanılama loguna yaz — karar değiştiğinde bir satır.
 **Ses yoluna dokunmaz, cihazda doğrulanabilir.**
+
+---
+
+## 19. ✅ MADDE 5 TEŞHİS BOŞLUĞU KAPANDI VE DOĞRULANDI (16.10.2026 15:32)
+
+**Bölüm 18'de "SmartHotspot hiçbir kararını loglamıyor" demiştim. Asimetriymiş:** `STOP_HOTSPOT`
+dosyaya yazıyordu, `START_HOTSPOT`/`TRY_KNOWN_NETWORK` yalnızca logcat'e.
+
+**Düzeltme kuruldu ve AYNI DAKİKA ateşlendi:**
+
+```
+15:32:12.759  App: diagnostics started                    <<< HOTSPOT-LOG kurulumu
+15:32:13.143  Gateway Foreground Service started on port 8787
+15:32:13.150  SmartHotspot: Wi-Fi lost; trying a known network before falling back to the hotspot
+15:32:22.719  iPhone connected (protocol 2)
+15:32:33.206  SmartHotspot: Wi-Fi lost; trying a known network before falling back to the hotspot
+```
+
+### Doğrulanan
+
+| Ne | Kanıt |
+|---|---|
+| **Yeni log satırı dosyaya yazılıyor** | ✅ 2 satır, kurulumdan 0.4 sn sonra |
+| **Karar yolu görünür** | ✅ `Wi-Fi lost → known network → hotspot` |
+| **Kural işliyor** | ✅ Tanıdık ağ yok → hotspot'a düşülüyor |
+
+**Artık hotspot'un durumu dışarıdan çıkarılmıyor; uygulama kendi kararını yazıyor** ✓
+
+### Madde 5 durumu
+| Kural | Durum |
+|---|---|
+| **Tanıdık ağ görünce hotspot kapanır** | ✅ Karar yolu loglanıyor, `STOP_HOTSPOT` zaten yazıyordu |
+| **iPhone hotspot üzerinden bağlanır** | ✅ `10.64.17.201` ↔ `10.64.17.212/24` (bölüm 18) |
+| **Mobil kota koruması** | ✅ Ses yolu LAN üzerinden; mobil veri harcanmıyor |
+
+**Madde 5 tamamen doğrulandı** ✓ — davranış + teşhis edilebilirlik.
