@@ -85,8 +85,18 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setShowWhenLocked(true)
-        setTurnScreenOn(true)
+        // setShowWhenLocked and setTurnScreenOn are API 27; this app declares minSdk 26, so on
+        // Android 8.0 they are a NoSuchMethodError and the incoming call screen would crash at
+        // the moment it is needed most. The window flags do the same job on 26 and still work
+        // afterwards, so they are set either way.
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+        )
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         // Edge-to-edge dark immersive system UI
