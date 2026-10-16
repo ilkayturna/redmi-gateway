@@ -7,10 +7,41 @@ ADB = r"C:\Users\ilkay.turna\platform-tools\adb.exe"
 if not os.path.exists(ADB):
     ADB = r"C:\Users\ilkay.turna\AppData\Local\NucumBuildTools\android-sdk\platform-tools\adb.exe"
 
-MAGISK_APK = r"C:\Users\ilkay.turna\Documents\antigravity\elegant-borg\RedmiGateway\root\Magisk.apk"
-GATEWAY_APK = r"C:\Users\ilkay.turna\Documents\antigravity\elegant-borg\RedmiGateway\android\app\build\outputs\apk\debug\app-debug.apk"
-VERIFY_SCRIPT = r"C:\Users\ilkay.turna\Documents\antigravity\elegant-borg\RedmiGateway\scripts\verify_root.sh"
-LOG_FILE = r"C:\Users\ilkay.turna\Documents\antigravity\elegant-borg\RedmiGateway\docs\autonomous_deployer.log"
+# ---------------------------------------------------------------------------
+# DURDURUCU KONTROL (16.10.2026)
+#
+# Yollar bir ara C:\Users\ilkay.turna\Documents\antigravity\elegant-borg\ govdesine
+# isaret ediyordu. O dizindeki app-debug.apk 26.09.2026 tarihli; bu betik calistirilirsa
+# ESKI APK'yi kurar ve o gunden beri yapilan duzeltmeleri (uyanma push'u, kapi loglamasi)
+# SESSIZCE geri alir. Artik her sey BU depodan cozulur ve kurmadan once ne kurdugu yazilir.
+# ---------------------------------------------------------------------------
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
+STALE_MARKER = "elegant-borg"
+
+MAGISK_APK = os.path.join(REPO_ROOT, "root", "Magisk.apk")
+GATEWAY_APK = os.path.join(REPO_ROOT, "android", "app", "build", "outputs", "apk", "debug",
+                           "app-debug.apk")
+VERIFY_SCRIPT = os.path.join(SCRIPT_DIR, "verify_root.sh")
+LOG_FILE = os.path.join(REPO_ROOT, "docs", "autonomous_deployer.log")
+
+
+def apk_is_sane(path, label):
+    """Kurulacak dosya bu depodan mi, var mi, ve ne kadar eski?"""
+    if STALE_MARKER in path:
+        print(f"REFUSING {label}: {path}")
+        print(f"          Eski proje dizininde ({STALE_MARKER}); o dosya gunler eski olabilir.")
+        return False
+    if not os.path.isfile(path):
+        print(f"SKIPPING {label}: bulunamadi: {path}")
+        return False
+    age_days = (time.time() - os.path.getmtime(path)) / 86400.0
+    size_mb = os.path.getsize(path) / (1024 * 1024)
+    print(f"{label}: {path}")
+    print(f"     {size_mb:.2f} MB, {age_days:.1f} gun once olusturuldu")
+    if age_days > 7:
+        print(f"UYARI: {label} {age_days:.0f} gunluk - guncel oldugundan emin ol.")
+    return True
 
 def log(msg):
     t = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -63,18 +94,20 @@ def deploy():
         log(f"Root direct test: {out}. Installing Magisk Manager...")
     
     log("--- Step 2: Installing Magisk Manager APK ---")
-    if os.path.exists(MAGISK_APK):
+    if apk_is_sane(MAGISK_APK, "Magisk APK"):
         rc, out, err = run([ADB, "-s", serial, "install", "-r", MAGISK_APK])
         log(f"Magisk APK install: {out} {err}")
     else:
-        log(f"WARNING: Magisk APK not found at {MAGISK_APK}")
-        
+        log("Magisk APK not installed (path refused or missing; see message above)")
+
     log("--- Step 3: Installing RedmiGateway APK ---")
-    if os.path.exists(GATEWAY_APK):
+    if apk_is_sane(GATEWAY_APK, "Gateway APK"):
         rc, out, err = run([ADB, "-s", serial, "install", "-r", "-g", GATEWAY_APK])
         log(f"Gateway APK install: {out} {err}")
     else:
-        log(f"WARNING: Gateway APK not found at {GATEWAY_APK}")
+        log("Gateway APK NOT installed: refusing a stale or missing path. "
+            "Build it first with .\\gradlew.bat assembleDebug")
+        log("Continuing with permissions and service start for whatever is already installed.")
         
     log("--- Step 4: Granting Permissions & Default Dialer ---")
     perms = [
