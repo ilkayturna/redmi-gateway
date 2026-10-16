@@ -242,8 +242,14 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
 
     override fun onClientCountChanged(authenticatedCount: Int) {
         IPhoneReachability.changed()
-        // A press the user made while the iPhone was asleep is replayed the moment it is back.
-        if (authenticatedCount > 0) CallAudioRelay.onControlClientAvailable()
+        // A press the user made while the iPhone was asleep is replayed the moment it is back, and
+        // the wake latency of the call beacon is measured to exactly this moment.
+        if (authenticatedCount > 0) {
+            BleServerManager.onControlLinkUp()
+            // The iPhone is reachable again, so nothing needs waking and the retry push is cancelled.
+            com.ilkay.redmigateway.push.CallWakePush.onControlLinkUp()
+            CallAudioRelay.onControlClientAvailable()
+        }
     }
 
     /** The ongoing notification: call audio on the iPhone, otherwise how the iPhone is reached. */
