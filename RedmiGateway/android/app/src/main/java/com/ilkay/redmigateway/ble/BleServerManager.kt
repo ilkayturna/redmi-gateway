@@ -372,15 +372,15 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
                     curr += chunk.value.size
                 }
 
-                var responseBytes: ByteArray? = null
                 if (characteristic.uuid == BleConstants.CHAR_CALL_CONTROL_UUID) {
-                    responseBytes = handleCallControlWrite(device, combined)
-                    if (responseBytes != null) {
-                        notifyCharacteristicToSubscribers(characteristic, responseBytes)
-                    }
-                } else if (characteristic.uuid == BleConstants.CHAR_HEARTBEAT_UUID) {
-                    responseBytes = combined
+                    // handleCallControlWrite always returns a reply, including for commands it
+                    // rejects, because the iPhone needs an answer either way. The previous
+                    // `if (responseBytes != null)` was therefore always true, which the compiler
+                    // said out loud; responseBytes was not read anywhere else.
+                    notifyCharacteristicToSubscribers(
+                        characteristic, handleCallControlWrite(device, combined))
                 }
+                // A heartbeat write carries no payload to answer with.
             }
 
             gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
