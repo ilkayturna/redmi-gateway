@@ -61,6 +61,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         private const val PULSE_MS = 10_000L
         /** How long an outgoing call asks the iPhone to wake before it stops advertising. */
         private const val OUTGOING_WAKE_MS = 30_000L
+        /** How long a manual "take the audio" press asks the iPhone to wake. */
+        private const val TRANSFER_WAKE_MS = 8_000L
         private val BLE_STATE_AAD = "phonebridge-ble-state".toByteArray(Charsets.UTF_8)
         private val BLE_CONTROL_AAD = "phonebridge-ble-control".toByteArray(Charsets.UTF_8)
         @Volatile private var current: BleServerManager? = null
@@ -75,11 +77,28 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
                 .put("sealed", PairingStore.pairedClient() != null)
                 .put("reconnectPulses", server.reconnectPulses)
                 .put("mtu", server.mtuByDevice.values.minOrNull() ?: ATT_DEFAULT_MTU)
+                .put("notificationRoom", server.reportedNotificationRoom)
                 .put("skippedNotifications", server.skippedNotifications)
+                .put("chunkedNotifications", server.chunkedNotifications)
         }
 
         /** Bluetooth links to this Redmi that still listen; in practice only the paired iPhone connects. */
         fun linkedCentrals(): Int = current?.listeningCentrals() ?: 0
+
+        /**
+         * The user asked the iPhone to take the call audio. An iPhone with its screen off may
+         * refuse the pickup, and only the region beacon brings the app forward, so the beacon is
+         * lit for a few seconds while the request is in flight. A Redmi with no beacon support
+         * simply does nothing here.
+         */
+        fun wakeForAudioTransfer() {
+            val server = current ?: return
+            server.mainHandler.post {
+                server.transferWakeUntil = android.os.SystemClock.elapsedRealtime() + TRANSFER_WAKE_MS
+                server.updateCallBeacon()
+                server.mainHandler.postDelayed({ server.updateCallBeacon() }, TRANSFER_WAKE_MS + 200)
+            }
+        }
     }
 
     private var lastControlSeq = 0L
@@ -107,6 +126,12 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
     private val mtuWarned = java.util.concurrent.ConcurrentHashMap<String, Int>()
     /** Notifications that could not fit the ATT MTU; visible in diagnostics. */
     @Volatile private var skippedNotifications = 0
+    /** Frames that were split into chunks instead of being dropped. */
+    @Volatile private var chunkedNotifications = 0
+    /** Bytes per notification the iPhone reported through its control channel, 0 until it does. */
+    @Volatile private var reportedNotificationRoom = 0
+    /** Until when a manual "take the audio" press keeps the wake beacon lit. */
+    @Volatile private var transferWakeUntil = 0L
     // A long read continues at an offset; it must see the same sealed bytes as its first part.
     @Volatile private var lastStateRead = ByteArray(0)
 
@@ -695,7 +720,12 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
             CallManager.addedAtMillis > 0 &&
             System.currentTimeMillis() - CallManager.addedAtMillis < OUTGOING_WAKE_MS
         val pulsing = android.os.SystemClock.elapsedRealtime() < pulseUntil
-        if ((ringingHere || outgoingHere || pulsing) && shouldBeRunning) {
+        // A manual "take the audio" press right now: an iPhone whose screen is off may refuse the
+        // pickup, and the region beacon is the only thing that brings the app forward. Bounded to
+        // a few seconds and non-urgent, so it never competes with a ringing call.
+        val transferring = android.os.SystemClock.elapsedRealtime() < transferWakeUntil &&
+            CallManager.currentCallState in setOf("dialing", "connecting", "active")
+        if ((ringingHere || outgoingHere || transferring || pulsing) && shouldBeRunning) {
             startCallBeacon(isUrgent = ringingHere)
         } else {
             stopCallBeacon()
@@ -901,6 +931,19 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
                 IncomingCallPresenter.onIPhonePresented(callId)
                 true
             }
+            // The iPhone reports how many bytes one notification may carry
+            // (maximumWriteValueLength without response). An older Redmi answers executed=false,
+            // which the iPhone ignores, so the feature stays backward compatible.
+            "mtu" -> {
+                val room = json.optInt("v", 0)
+                if (room in BleChunking.MIN_ROOM..BleChunking.MAX_ROOM) {
+                    reportedNotificationRoom = room
+                    Log.i(TAG, "iPhone accepts $room bytes per notification; longer frames are chunked")
+                    true
+                } else {
+                    false
+                }
+            }
             else -> false
         }
         Log.i(TAG, "BLE command $action executed=$executed")
@@ -961,7 +1004,6 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         bytes: ByteArray
     ) {
         if (!hasConnectPermission()) return
-        characteristic.value = bytes
         // Call state goes to every connected device. A link can outlive a restart of this app
         // (the Bluetooth stack keeps it); the iPhone then still listens on the same handle,
         // while this new server instance has no record of its subscription.
@@ -970,33 +1012,65 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         for (device in connectedDevices) {
             val subs = subscribedDevices[device]
             if (toAll || subs?.contains(characteristic.uuid) == true) {
-                val mtu = mtuByDevice[device.address] ?: ATT_DEFAULT_MTU
-                val limit = mtu - ATT_HEADER_BYTES
-                if (bytes.size > limit) {
+                val room = notificationRoom(device)
+                if (bytes.size <= room) {
+                    // Fits whole, and without a header, so an iPhone that never heard of chunking
+                    // still reads it as it always did.
+                    if (notifyValue(device, characteristic, bytes)) delivered++
+                    continue
+                }
+                val chunks = BleChunking.split(bytes, room)
+                if (chunks == null) {
                     // An ATT notification never carries more than MTU-3 bytes, and the MTU stays at
-                    // its 23 byte default until the iPhone asks for a larger one. The sealed state
-                    // frame is 110 bytes, so it cannot arrive: sending it anyway only spends radio
-                    // time on a link that already retries a quarter of its Wi-Fi frames. Reported
-                    // once per device and size; the iPhone reads the same characteristic on demand.
+                    // its 23 byte default until the iPhone reports a larger one. A frame that
+                    // cannot be sent is counted and reported once per device and size.
                     skippedNotifications++
                     if (mtuWarned.put(device.address, bytes.size) != bytes.size) {
-                        Log.w(TAG, "Skipped a ${bytes.size} byte notification: MTU $mtu allows $limit")
+                        Log.w(TAG, "Skipped a ${bytes.size} byte notification: MTU ${room + ATT_HEADER_BYTES} allows $room")
                     }
                     continue
                 }
-                val sent = try {
-                    gattServer?.notifyCharacteristicChanged(device, characteristic, false) == true
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to notify characteristic to ${device.address}: ${e.message}")
-                    false
+                var allSent = true
+                for (chunk in chunks) {
+                    if (!notifyValue(device, characteristic, chunk)) {
+                        allSent = false
+                        break
+                    }
                 }
-                if (sent) delivered++
+                if (allSent) {
+                    delivered++
+                    chunkedNotifications++
+                } else {
+                    skippedNotifications++
+                }
             }
         }
         // Only a real delivery counts: this line used to be printed before the size check, so a
         // skipped call-state frame looked like a delivered one in the log.
         if (characteristic.uuid == BleConstants.CHAR_STATE_UUID) {
             Log.i(TAG, "BLE call state delivered to $delivered of ${connectedDevices.size} device(s), ${bytes.size} bytes")
+        }
+    }
+
+    /** How many bytes one notification may carry: what the iPhone reported, else MTU minus header. */
+    private fun notificationRoom(device: BluetoothDevice): Int {
+        val reported = reportedNotificationRoom
+        if (reported > 0) return reported
+        return (mtuByDevice[device.address] ?: ATT_DEFAULT_MTU) - ATT_HEADER_BYTES
+    }
+
+    private fun notifyValue(
+        device: BluetoothDevice,
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray
+    ): Boolean {
+        if (!hasConnectPermission()) return false
+        characteristic.value = value
+        return try {
+            gattServer?.notifyCharacteristicChanged(device, characteristic, false) == true
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to notify characteristic to ${device.address}: ${e.message}")
+            false
         }
     }
 

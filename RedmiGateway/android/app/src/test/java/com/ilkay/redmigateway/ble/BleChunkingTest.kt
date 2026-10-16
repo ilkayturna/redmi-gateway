@@ -47,7 +47,8 @@ class BleChunkingTest {
         val chunks = BleChunking.split(frame(40), room = 20)!!
         chunks.dropLast(1).forEach { assertEquals(0, it[1].toInt() and BleChunking.FINAL_FLAG) }
         assertEquals(BleChunking.FINAL_FLAG, chunks.last()[1].toInt() and 0xFF)
-        assertEquals(0, chunks.last()[0].toInt() and 0xFF)
+        // Three chunks for forty bytes, so the last one carries sequence number two.
+        assertEquals(2, chunks.last()[0].toInt() and 0xFF)
     }
 
     // Catches a sequence number that does not start at zero or does not advance per chunk.

@@ -17,6 +17,15 @@ internal object BleChunking {
     const val FINAL_FLAG = 0x01
     /** The smallest room worth splitting into: one byte of payload plus the header. */
     const val MIN_ROOM = HEADER_BYTES + 1
+    /** The largest room worth accepting from the peer: one ATT notification cannot exceed this. */
+    const val MAX_ROOM = 512
+    /**
+     * The receiver tells a chunk from a whole frame by its length alone - a sealed frame is at
+     * least 29 bytes, a chunk at most this - so a chunk never grows past it, even on a link that
+     * allows more. Without this a mid sized MTU (21..109) would produce chunks the receiver reads
+     * as whole frames, and the state frame would silently never be reassembled.
+     */
+    const val MAX_CHUNK_BYTES = 20
 
     /**
      * The chunks for [frame], or null when [room] cannot even hold a header. An exact multiple of
@@ -25,7 +34,7 @@ internal object BleChunking {
      */
     fun split(frame: ByteArray, room: Int): List<ByteArray>? {
         if (room < MIN_ROOM) return null
-        val payloadPerChunk = room - HEADER_BYTES
+        val payloadPerChunk = minOf(room, MAX_CHUNK_BYTES) - HEADER_BYTES
         val chunks = ArrayList<ByteArray>(frame.size / payloadPerChunk + 1)
         var offset = 0
         var seq = 0
