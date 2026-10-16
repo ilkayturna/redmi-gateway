@@ -564,3 +564,65 @@ değilse **bir daha denenmiyor.**
 2. Tekrarlıyorsa: yeniden kurulum sonrası `arm()`/`audio_start` zincirini logdan izle
 3. **Bu, kullanıcının "iPhone'a hiç akmamaya başladı" şikayetinin kök nedeni olabilir** —
    çünkü her APK kurulumu (benim turlarım dahil) bu durumu yaratıyor olabilir
+
+---
+
+## 15. 🎯🎯 KESİN TEŞHİS: `startMedia` SESSİZCE BAŞARISIZ OLUYOR (16.10.2026)
+
+**Aynı filtreyle başarılı ve başarısız çağrıyı yan yana koydum. Fark tek satır.**
+
+### BAŞARILI (10:33)
+```
+10:33:31.187  Call audio session armed
+10:33:31.189  AUDIO_OWNER=PREPARING_IPHONE reason=waiting_for_iphone_audio
+10:33:31.201  Call audio session armed
+10:33:33.291  Call audio media started; verifying before handing over   <<<<<< VAR
+10:33:33.443  RELAY_HEALTH owner=PREPARING_IPHONE iphone=14/s uplink=0/s ...
+10:33:33.690  AUDIO_OWNER=IPHONE reason=iphone_confirmed                <<< BASARILI
+```
+
+### BAŞARISIZ (10:40 — yeniden kurulumdan sonra)
+```
+10:40:40.443  Call audio session armed
+10:40:40.443  AUDIO_OWNER=PREPARING_IPHONE reason=waiting_for_iphone_audio
+10:40:40.639  Call audio session armed
+                                                                        <<<<<< "media started" YOK
+                                                                        <<<<<< RELAY_HEALTH YOK
+10:40:48.495  AUDIO_OWNER=REDMI reason=iphone_audio_not_ready           <<< BASARISIZ
+```
+
+### Sonuç
+
+| | Başarılı | Başarısız |
+|---|---|---|
+| `Call audio session armed` | ✅ ×2 | ✅ ×2 |
+| **`Call audio media started`** | **✅** | **❌ YOK** |
+| `RELAY_HEALTH` | ✅ | ❌ YOK |
+| Sonuç | `iphone_confirmed` | `iphone_audio_not_ready` |
+
+**`startMedia()` hiç çalışmıyor.** Ve **log'da hiçbir hata satırı yok** — ne istisna ne gerekçe.
+
+### 🔴 Bu AGENTS.md 6.1'in yasakladığı sessiz yol
+
+> *"Sessiz çıkış yolu bırakma: `guard ... else { return }` log basmalı. Sessiz düşen bir guard,
+> 'ses yok'un tek açıklaması olur ve teşhis edilemez."*
+
+**Tam olarak bu durum.** `startMedia` başarısız oluyor, sebebini söylemiyor, ve 8 saniye sonra
+ses Redmi'ye dönüyor. **Kullanıcının "iPhone'a hiç akmamaya başladı" şikayeti bu.**
+
+### Hipotez (kanıtlanmadı)
+**Yeniden kurulumdan sonra `startMedia` başarısız oluyor.** 10:39:31'de `MY_PACKAGE_REPLACED`
+geldi, 10:40'tan itibaren her çağrıda `media started` satırı **yok**.
+
+**Olası sebep:** yeniden kurulum sonrası audio odak/oturum durumu (ör. `AudioManager` modu,
+Telecom ses rotası, ya da `CallAudioRelay`'in ilk kurulumu) bozuluyor ve `startMedia`
+sessizce düşüyor.
+
+### ✅ Sıradaki adım — net ve cihazda yapılabilir
+
+**`startMedia`'nın sessiz çıkış yollarına log eklemek.** Bu:
+- **Ses yoluna dokunur ama davranışı değiştirmez** (yalnızca log)
+- **Cihazda doğrulanabilir** (yeni APK kur → çağrı yap → hangi guard düştüğünü gör)
+- **Kök nedeni söyler** — şu an tek bilinmeyen bu
+
+**Ve asıl düzeltme o logdan sonra yazılır.**
