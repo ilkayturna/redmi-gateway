@@ -91,22 +91,60 @@ Tanılamada üç anahtar: `push.key` (APNs anahtarı), `push.iphoneRegistered` (
 `push.alertsRegistered` (**alert token** — sessiz push'un şartı).
 
 ### Redmi
-Üç APK hazır — **önce yıldızlı olanı kur**:
+**İki APK var — sırayla kur, çünkü aralarında doğrulanmamış bir protokol değişikliği var.**
 
-| Dosya | Test | Ne var | Ne zaman |
-|---|---|---|---|
-| **`apk\app-debug-LINT-FIXES.apk`** | 86 test | Uyanma + kapı tanılaması + **2 API çökme düzeltmesi** | **⭐ Önce bunu kur** |
-| `apk\app-debug-GATE-LOGGING.apk` | 86 test | Uyanma + kapı tanılaması | Lint düzeltmeleri istenmiyorsa |
-| `apk\app-debug-GATE-REVERTED.apk` | 84 test | Uyanma, kapı değişikliği YOK | Ses yine çalışmazsa yedek |
+| # | Dosya | Test | Ne var | Ne zaman |
+|---|---|---|---|---|
+| **1** | **`apk\app-debug-IDLE-WAKE.apk`** | 109 test | Uyanma + kapı tanılaması + **boşta uyandırma** (kullanıcının 1 no'lu şikayeti) | **⭐ ÖNCE BUNU KUR** |
+| 2 | `apk\app-debug-LATEST.apk` | 171 test | Yukarıdakiler + **Base64/protokol değişikliği** + saf çıkarma refactor'ları | 1 çalıştıktan **sonra** |
 
-**Üçünde de uyanma özelliği var.** Android 16'da **üçü de aynı davranır** — lint düzeltmeleri
-yalnızca API 26-28'de tetiklenen çökmeleri kapatır, yani **LINT-FIXES'ın dezavantajı yok.**
+**Sıra önemli:** LATEST içinde **doğrulanmamış bir protokol değişikliği** var (aşağıya bak).
+Önce IDLE-WAKE ile sesin ve bağlantının çalıştığını gör, **sonra** LATEST'i kur ve
+iPhone'un **hâlâ kimlik doğrulayabildiğini** doğrula.
 
 ```
-adb -s 17df6357 install -r "C:\Users\ilkay.turna\Documents\GitHub\RedmiGateway-Archive\apk\app-debug-LINT-FIXES.apk"
+adb -s 17df6357 install -r "...\apk\app-debug-IDLE-WAKE.apk"
 ```
 
-Detaylı karşılaştırma ve hash'ler: `artifacts\README.md` (repoda `docs\APK-ARSIVI.md`).
+**Eski/yedek APK'lar** (`GATE-LOGGING`, `GATE-REVERTED`, `LINT-FIXES`, `DISCONNECT-LOG`,
+`SOCKET-NUDGE`) arşivde duruyor ama **artık gerekmiyor** — IDLE-WAKE onların hepsini kapsıyor.
+`GATE-REVERTED` yalnızca "ses yine tamamen kesilirse" yedeği olarak kalsın.
+
+---
+
+## 1b. ⚠️ DOĞRULANMAMIŞ PROTOKOL DEĞİŞİKLİĞİ (LATEST APK'da)
+
+`BridgeCrypto`, `android.util.Base64` → **`java.util.Base64`** olarak değiştirildi.
+
+**Neden:** Android stub'ı birim testlerinde `null` dönüyordu → `SecureChannel.open()` **her zaman
+null** → replay ve yön koruması **hiç test edilemiyordu.**
+
+**Neden güvenli olduğunu düşünüyorum:**
+- İkisi de RFC 4648 standart alfabe, padding'li, satır sonu yok
+- `java.util.Base64` **API 26'dan** beri var (minSdk 26 ✓)
+- **RFC 4648 §10 vektörleriyle** sabitlendi (`Base64EncodingTest`)
+- **Bağımsız olarak Python'la** hesaplanan protokol zinciri değerleriyle birebir eşleşiyor
+  (`ProtocolChainTest`) — her değer Base64'ten geçiyor
+
+**Ama cihazda test EDİLMEDİ.** Protokole dokunduğu için iPhone kimlik doğrulaması
+bozulursa **ses/bağlantı tamamen durur.**
+
+**LATEST'i kurduktan sonra İLK kontrol:** log'da `CallManager: iPhone connected (protocol 2)`
+satırı **geliyor mu?** Gelmiyorsa `IDLE-WAKE`'e geri dön — Base64 geri alınmalı.
+
+---
+
+## 1c. 🎯 BOŞTA UYANDIRMA — kullanıcının 1 no'lu şikayeti (IDLE-WAKE'te)
+
+**Bulundu ve düzeltildi:** iPhone BLE linkini tutuyor ama soketi yok → Redmi hiçbir şey yapmıyordu.
+
+**Ölçüldü, 6 tekrar:** sessiz push → soket **0.6-1.5 sn**'de geri geliyor ✓
+(hedef `<1 sn`)
+
+**Telefon gelince doğrulanacak (tek eksik ölçüm):**
+log'da `Idle wake push sent (idle wake N, next in Xs)` satırında **N artıyor mu** ve
+aralıklar **60 → 120 → 300 → 900 sn**'ye çıkıyor mu? (İlk sürüm 15 sn'de bir atıyordu — hata,
+düzeltildi, testle sabitlendi ama **cihazda gözlenmedi.**)
 
 ---
 
