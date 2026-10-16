@@ -176,6 +176,8 @@ object CallAudioRelay : CallManager.CallListener {
     @Volatile private var firstPcmAt = 0L
     @Volatile private var firstCutoverWriteAt = 0L
     @Volatile private var firstCutoverReadAt = 0L
+    /** When the caller's path last delivered a frame: the cutover needs both paths live now. */
+    @Volatile private var lastCutoverReadAt = 0L
     /** True once the one-shot decision is queued for the moment both spans are long enough. */
     @Volatile private var verificationScheduled = false
     // Sealed sessions only: last time the iPhone reported that it is receiving downlink.
@@ -492,9 +494,22 @@ object CallAudioRelay : CallManager.CallListener {
                         (cutoverWrites.get() * 1000L / writeSpan).toInt() else 0
                     val readsRate = if (readSpan >= VERIFY_WINDOW_MS)
                         (cutoverReads.get() * 1000L / readSpan).toInt() else 0
-                    // A call that is not live (on hold, or being torn down) never takes the audio.
-                    val healthy = live && writesRate >= MIN_FRAMES_PER_SECOND &&
-                        readsRate >= MIN_FRAMES_PER_SECOND && iphoneFresh && iphoneHearing
+                    // A call that is not live (on hold, or being torn down) never takes the audio,
+                    // and both directions have to be flowing right now: a link that delivered a
+                    // burst and died keeps the counters up with concealed frames, and muting the
+                    // Redmi for it costs seconds of one-way silence before the fallback.
+                    val uplinkAgeMs = if (lastIPhonePcmAt == 0L) Long.MAX_VALUE else now - lastIPhonePcmAt
+                    val downlinkAgeMs = if (lastCutoverReadAt == 0L) Long.MAX_VALUE else now - lastCutoverReadAt
+                    val healthy = CutoverDecision.canHandOver(
+                        live = live,
+                        writesRate = writesRate,
+                        readsRate = readsRate,
+                        minFramesPerSecond = MIN_FRAMES_PER_SECOND,
+                        uplinkAgeMs = uplinkAgeMs,
+                        downlinkAgeMs = downlinkAgeMs,
+                        iphoneFresh = iphoneFresh,
+                        iphoneHearing = iphoneHearing
+                    )
                     if (healthy) {
                         if (applyIsolation()) {
                             setOwner(Owner.IPHONE, "iphone_confirmed")
@@ -505,12 +520,15 @@ object CallAudioRelay : CallManager.CallListener {
                                 "startMedia=${cutoverStartedAt - armedAt}ms " +
                                 "gateMs=${if (firstPcmAt == 0L) -1 else cutoverStartedAt - firstPcmAt}ms " +
                                 "gateFrames=${pcmSinceArm.get()})")
+                            Log.i(TAG, "Cutover freshness: pcmAge=${uplinkAgeMs}ms readAge=${downlinkAgeMs}ms")
                         } else {
                             releaseMediaAndKeepSession("isolation_failed")
                         }
                     } else if (elapsed > VERIFY_TIMEOUT_MS) {
                         val reason = when {
                             !live -> "call_not_live"
+                            uplinkAgeMs > CutoverDecision.FRESHNESS_MS -> "iphone_audio_stalled"
+                            downlinkAgeMs > CutoverDecision.FRESHNESS_MS -> "downlink_stalled"
                             writesRate < MIN_FRAMES_PER_SECOND -> "uplink_path_unavailable"
                             readsRate < MIN_FRAMES_PER_SECOND -> "downlink_unavailable"
                             !iphoneFresh -> "iphone_audio_lost"
@@ -724,6 +742,7 @@ object CallAudioRelay : CallManager.CallListener {
         cutoverReads.set(0)
         firstCutoverWriteAt = 0L
         firstCutoverReadAt = 0L
+        lastCutoverReadAt = 0L
         verificationScheduled = false
         badWindows = 0
         resetWindow()
@@ -876,8 +895,9 @@ object CallAudioRelay : CallManager.CallListener {
             }
             downlinkReads.incrementAndGet()
             cutoverReads.incrementAndGet()
+            lastCutoverReadAt = SystemClock.elapsedRealtime()
             if (firstCutoverReadAt == 0L) {
-                firstCutoverReadAt = SystemClock.elapsedRealtime()
+                firstCutoverReadAt = lastCutoverReadAt
                 scheduleVerificationDecision()
             }
             val target = peer ?: continue
