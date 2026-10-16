@@ -70,6 +70,35 @@ The string is missing the terminator: ".
    BOM'suz dosyada **yanlış sonuç** verir (0 hata diyebilir veya olmayan hata uydurabilir).
 5. Tarama: `BOM yok + ASCII-dışı var` → şüpheli. Özellikle **em dash** sayısına bak.
 
+### 1.8 `Set-Content -Encoding UTF8` Windows PowerShell 5.1'de **BOM EKLER** (ters yön)
+**Hata (16.10.2026):** iOS varlık kataloğu için `Contents.json` üretildi:
+```powershell
+Set-Content -Path "$set\Contents.json" -Value $contents -Encoding UTF8   # ❌ BOM ekler
+```
+Sonuç: dosya `EF BB BF` ile başlıyor → `json.load` **"Unexpected UTF-8 BOM"** ile reddediyor.
+Xcode'un varlık ayrıştırıcısı da takılabilir.
+
+**Referans:** aynı katalogdaki **çalışan** `AppIcon/Contents.json` **BOM'suz**. Yani doğru olan
+zaten projede vardı; sapma bendeydi.
+
+**KURAL:**
+1. **Veri dosyaları** (JSON, XML, plist, csv, .gitattributes) **BOM'suz** yazılır:
+   ```powershell
+   $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+   [IO.File]::WriteAllText($path, $text, $utf8NoBom)                        # ✅
+   ```
+2. **`Set-Content`/`Out-File` `-Encoding UTF8` KULLANMA** — 5.1'de BOM ekler. Ya `[IO.File]` ya
+   da `-Encoding utf8NoBOM` (yalnızca PS 7).
+3. `.ps1` betikleri ise **BOM'LU** olmalı (kural 1.7) — **iki yön ters**:
+   | Dosya | BOM |
+   |---|---|
+   | `.ps1` (betik) | **OLMALI** (Türkçe/ASCII-dışı varsa) |
+   | `.json` / `.plist` / `.xml` (veri) | **OLMAMALI** |
+4. **Referans kuralı:** bir dosyayı üretmeden önce **aynı projede çalışan eşdeğerini** aç ve
+   baytlarını karşılaştır (`[IO.File]::ReadAllBytes($f)[0..2]`). Çalışan örnek varsa **odur.**
+5. **Doğrulama:** `json.load` / `plistlib` gibi **gerçek ayrıştırıcıyla** aç. Ham metni gözle
+   okumak BOM'u göstermez.
+
 ---
 
 ## 2. SWIFT / iOS
