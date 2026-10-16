@@ -11,18 +11,29 @@
 
 | Dosya | Boyut | Tarih | `CallWakePush` | `WakePushThrottle` | Ne zaman |
 |---|---|---|---|---|---|
-| `apk\app-debug-GATE-LOGGING.apk` | 6,63 MB | 16.10 12:11 | ✅ | ✅ | **Önce bunu kur** |
+| **`apk\app-debug-LINT-FIXES.apk`** | 6,63 MB | 16.10 13:20 | ✅ | ✅ | **⭐ BUNU KUR** |
+| `apk\app-debug-GATE-LOGGING.apk` | 6,63 MB | 16.10 12:11 | ✅ | ✅ | Lint düzeltmeleri istenmiyorsa |
 | `apk\app-debug-GATE-REVERTED.apk` | 6,63 MB | 16.10 12:11 | ✅ | ✅ | Ses çalışmazsa yedek |
 
 ```
-SHA256 (GATE-LOGGING)  = 63120852B3BC336D...   (86 test)
-SHA256 (GATE-REVERTED) = 87B1C09DE090D10D...   (84 test, kapı değişikliği yok)
+SHA256 (LINT-FIXES)    = BFD66960A2D5302E42BE...   (86 test) ⭐
+SHA256 (GATE-LOGGING)  = 63120852B3BC336D936D...   (86 test)
+SHA256 (GATE-REVERTED) = 87B1C09DE090D10D4C58...   (84 test, kapı değişikliği yok)
 ```
 
-**Fark:** `GATE-LOGGING` içinde `GATE_WAIT`/`GATE_OPEN` kapı teşhisi var; `GATE-REVERTED`'ta yok
-(kapı değişikliği geri alınmış hâli). **İkisinde de uyanma özelliği var.**
+**Farklar:**
+| | LINT-FIXES | GATE-LOGGING | GATE-REVERTED |
+|---|---|---|---|
+| Uyanma özelliği | ✅ | ✅ | ✅ |
+| `GATE_WAIT`/`GATE_OPEN` kapı teşhisi | ✅ | ✅ | ❌ |
+| **API 27 çökmesi düzeltildi** (gelen çağrı ekranı) | ✅ | ❌ | ❌ |
+| **API 29 `RoleManager` çökmesi düzeltildi** (ayarlar butonu) | ✅ | ❌ | ❌ |
+
+> **Android 16'da üçü de aynı davranır** — düzeltmeler yalnızca API 26-28'de tetiklenen çökmeleri
+> kapatır. Yani LINT-FIXES'ın **dezavantajı yok**, kullanılmayan yollarda iki çökmeyi kapatıyor.
 
 ---
+
 
 ## GERİ DÖNÜŞ (rollback) — ⚠️ UYANMA YOK
 
