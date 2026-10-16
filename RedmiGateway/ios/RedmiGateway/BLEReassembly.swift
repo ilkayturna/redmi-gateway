@@ -70,8 +70,10 @@ struct BLEFrameAssembler {
     }
 
     /// Splits a sealed frame the way the Redmi does; used by tests and kept beside the parser so
-    /// both sides of the wire format stay in one file.
-    static func chunks(of frame: Data, payload: Int = maxChunkBytes - headerBytes) -> [Data] {
+    /// both sides of the wire format stay in one file. The payload never exceeds what a receiver
+    /// can tell apart from a whole frame, whatever the link's room is.
+    static func chunks(of frame: Data,
+                       payload: Int = BLEFrameAssembler.maxChunkBytes - BLEFrameAssembler.headerBytes) -> [Data] {
         precondition(payload > 0, "a chunk must carry at least one byte")
         var out: [Data] = []
         var index = frame.startIndex
@@ -80,7 +82,7 @@ struct BLEFrameAssembler {
             let end = min(index + payload, frame.endIndex)
             let body = frame[index..<end]
             let isLast = end == frame.endIndex
-            var chunk = Data([seq, isLast ? lastChunkFlag : 0])
+            var chunk = Data([seq, isLast ? BLEFrameAssembler.lastChunkFlag : 0])
             chunk.append(contentsOf: body)
             out.append(chunk)
             index = end

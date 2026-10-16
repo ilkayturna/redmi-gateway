@@ -11,7 +11,7 @@ struct BLEReassemblyTests {
     }
 
     /// A sealed frame as the Redmi sends it: 1 version byte + 12 nonce + ciphertext + 16 tag.
-    static func frame(payload: Int) -> Data {
+    static func sealedFrame(payload: Int) -> Data {
         var data = Data([2])
         data.append(contentsOf: (0..<(12 + payload + 16)).map { UInt8($0 % 251) })
         return data
@@ -32,7 +32,7 @@ struct BLEReassemblyTests {
 
     // Break caught: a 110 byte state frame stays unreadable because every chunk is dropped.
     static func reassemblesChunkedFrame() {
-        let frame = frame(payload: 81) // 110 bytes in total, as the Redmi's sealed state frame is
+        let frame = sealedFrame(payload: 81) // 110 bytes in total, as the Redmi's sealed state frame is
         expect(frame.count == 110, "test frame is the size of a real state frame")
         var assembler = BLEFrameAssembler()
         let chunks = BLEFrameAssembler.chunks(of: frame)
@@ -49,7 +49,7 @@ struct BLEReassemblyTests {
     // Break caught: a Redmi that terminates a frame whose length divides evenly into chunks with an
     // empty last chunk - the frame must still complete, and the empty chunk must not wipe it.
     static func handlesFrameThatEndsOnTheLastChunk() {
-        let frame = frame(payload: 61) // 90 bytes: five chunks of eighteen payload bytes
+        let frame = sealedFrame(payload: 61) // 90 bytes: five chunks of eighteen payload bytes
         var chunks: [Data] = []
         var index = frame.startIndex
         var seq: UInt8 = 0
@@ -76,7 +76,7 @@ struct BLEReassemblyTests {
     // Break caught: a link that negotiated a large MTU sends the frame whole and it is treated as
     // a chunk.
     static func passesAWholeFrameStraightThrough() {
-        let frame = frame(payload: 81)
+        let frame = sealedFrame(payload: 81)
         var assembler = BLEFrameAssembler()
         expect(assembler.push(frame) == frame, "a whole frame needs no reassembly")
         expect(assembler.push(frame) == frame, "a second whole frame passes too")
@@ -84,7 +84,7 @@ struct BLEReassemblyTests {
 
     // Break caught: a frame with a chunk missing is decoded as if the gap never happened.
     static func dropsFramesWithAMissingChunk() {
-        let frame = frame(payload: 81)
+        let frame = sealedFrame(payload: 81)
         let chunks = BLEFrameAssembler.chunks(of: frame)
         var assembler = BLEFrameAssembler()
         expect(assembler.push(chunks[0]) == nil, "first chunk starts the frame")
@@ -112,7 +112,7 @@ struct BLEReassemblyTests {
 
     // Break caught: a half-finished frame is held forever and later merged with new speech.
     static func discardsAHalfFrameAfterTheTimeout() {
-        let frame = frame(payload: 81)
+        let frame = sealedFrame(payload: 81)
         let chunks = BLEFrameAssembler.chunks(of: frame)
         var assembler = BLEFrameAssembler()
         let start = Date()
@@ -138,7 +138,7 @@ struct BLEReassemblyTests {
         expect(assembler.push(Data()) == nil, "an empty notification is noise")
         expect(assembler.push(Data([0x01])) == nil, "a one byte notification is noise")
         expect(assembler.push(Data([0x05, 0x00, 0xAA])) == nil, "a chunk without its frame is ignored")
-        let frame = frame(payload: 10)
+        let frame = sealedFrame(payload: 10)
         var rebuilt: Data?
         for chunk in BLEFrameAssembler.chunks(of: frame) { rebuilt = assembler.push(chunk) ?? rebuilt }
         expect(rebuilt == frame, "noise does not stop the next frame")
@@ -146,7 +146,7 @@ struct BLEReassemblyTests {
 
     // Break caught: a disconnect leaves half a frame that the next connection completes.
     static func resetClearsPartialFrames() {
-        let frame = frame(payload: 81)
+        let frame = sealedFrame(payload: 81)
         let chunks = BLEFrameAssembler.chunks(of: frame)
         var assembler = BLEFrameAssembler()
         _ = assembler.push(chunks[0])
