@@ -70,5 +70,28 @@ object PairingStore {
         com.ilkay.redmigateway.service.IPhoneReachability.changed()
     }
 
-    private fun newCode(): String = (1..6).map { CODE_ALPHABET[random.nextInt(CODE_ALPHABET.length)] }.joinToString("")
+    private fun newCode(): String = newPairingCode(CODE_ALPHABET, random)
+
+    /** The alphabet the code is drawn from. Exposed so a test can check it for duplicates. */
+    internal val alphabet: String get() = CODE_ALPHABET
 }
+
+/**
+ * One pairing code, drawn uniformly from the alphabet.
+ *
+ * The six character code on the Settings screen is what bootstraps the whole pairing, so two
+ * things about it matter and both are easy to break by accident.
+ *
+ * The alphabet deliberately leaves out I, O, 0 and 1, because the code is read off one screen and
+ * typed into another and those four are the pairs people confuse. It has to have no repeated
+ * character, or that character becomes twice as likely as the rest and the code is weaker than
+ * its length suggests. And the length is not decoration: six characters over a thirty two
+ * character alphabet is thirty bits, and a shorter code is simply fewer guesses.
+ *
+ * @param alphabet the characters to draw from; assumed non-empty, which the caller guarantees
+ */
+internal fun newPairingCode(alphabet: String, random: java.security.SecureRandom): String =
+    (1..PAIRING_CODE_LENGTH).map { alphabet[random.nextInt(alphabet.length)] }.joinToString("")
+
+/** How many characters a pairing code has. Also its only defence, so it is named. */
+internal const val PAIRING_CODE_LENGTH = 6
