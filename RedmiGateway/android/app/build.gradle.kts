@@ -60,6 +60,10 @@ android {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    // The unit tests run against the stubbed android.jar, where org.json returns default values,
+    // so JSONObject.put would hand back null and any assertion on the payload would be vacuous.
+    // This artifact supplies the real implementation on the test classpath instead.
+    testImplementation("org.json:json:20240303")
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
