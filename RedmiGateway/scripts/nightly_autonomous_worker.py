@@ -1,14 +1,19 @@
-﻿import subprocess
+import subprocess
 import time
 import os
 import sys
 
+# Read-only status probe: it lists devices and asks fastboot whether the bootloader is
+# unlocked. It does NOT unlock, flash or wipe anything.
+#
+# A MIFLASH_DIR / MIFLASH_EXE pair pointing at Documents\antigravity\elegant-borg was
+# removed on 16.10.2026. It was never used, but a bootloader unlock tool path sitting in a
+# script with "autonomous" in its name is not something to leave lying around; the stale
+# checkout it pointed at still exists.
 ADB = r"C:\Users\ilkay.turna\AppData\Local\NucumBuildTools\android-sdk\platform-tools\adb.exe"
 FASTBOOT = r"C:\Users\ilkay.turna\AppData\Local\NucumBuildTools\android-sdk\platform-tools\fastboot.exe"
-MIFLASH_DIR = r"C:\Users\ilkay.turna\Documents\antigravity\elegant-borg\miflash_unlock"
-MIFLASH_EXE = os.path.join(MIFLASH_DIR, "miflash_unlock.exe")
 
-LOG_FILE = r"C:\Users\ilkay.turna\Documents\antigravity\elegant-borg\RedmiGateway\docs\nightly_log.txt"
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "nightly_log.txt")
 
 def log(msg):
     t = time.strftime("%Y-%m-%d %H:%M:%S")
