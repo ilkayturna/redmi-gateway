@@ -453,3 +453,51 @@ AUDIO_OWNER=IPHONE                          <<< ses iPhone'a GECTI
 Bu bulgu **cihaz kanıtı** olarak kaydedildi. **Kod değişikliği YAPILMADI** — çünkü:
 - Cevaplanmış çağrı kanıtı yok
 - Ses yolu 6.1 kapsamında: cihazda gerçek çağrı testi olmadan dokunulmaz
+
+---
+
+## 13. ⚠️ BÖLÜM 12 DÜZELTMESİ — ses iPhone'a GEÇİYORDU (16.10.2026)
+
+**Bölüm 12'de "IPHONE sahibi log'da hiç görünmüyor" yazdım. YANLIŞ.**
+
+Sadece `tail -15`'e baktım; o 10:41-12:02 aralığını gösteriyordu. **Tüm dosyayı taradığımda
+`AUDIO_OWNER=IPHONE` 6 kez geçiyor.**
+
+### Ses iPhone'a 6 kez geçti — hepsi `iphone_confirmed`
+
+| Başlangıç | Geçiş | Süre |
+|---|---|---|
+| 00:31:05.650 | 00:31:07.913 | **2.26 sn** |
+| 00:32:12.165 | 00:32:14.693 | **2.53 sn** |
+| 01:08:17.731 | 01:08:19.963 | **2.23 sn** |
+| 08:33:23.363 | 08:33:25.583 | **2.22 sn** |
+| 08:34:05.184 | 08:34:07.357 | **2.17 sn** |
+| 10:33:31.189 | 10:33:33.690 | **2.50 sn** |
+
+**Ortalama: ~2.32 saniye**
+
+### 🔴 Ve 10:34'te kalıcı olarak bozuldu
+
+```
+10:33:33  AUDIO_OWNER=IPHONE   reason=iphone_confirmed      <<< SON BASARILI
+10:34:02  AUDIO_OWNER=REDMI    reason=manual_redmi          <<< elle mi alindi?
+10:34:07  AUDIO_OWNER=REDMI    reason=iphone_disconnected   <<< BAGLANTI KOPTU
+10:40:40  AUDIO_OWNER=PREPARING_IPHONE reason=waiting_for_iphone_audio
+10:40:48  AUDIO_OWNER=REDMI    reason=iphone_audio_not_ready   <<< ILK BASARISIZ
+10:56 / 11:48 / 11:52 ...      hep iphone_audio_not_ready
+```
+
+**Ses 10:34'ten sonra bir daha iPhone'a geçmedi.** Kullanıcının "iPhone'a hiç akmamaya başladı"
+şikayeti **10:34 civarında** başlamış olabilir.
+
+### İki gerçek bulgu
+
+**1. Geçiş süresi ~2.2-2.5 sn — hedefin (`<1 sn`) ÜSTÜNDE** ✗
+Çalıştığında bile hedefi tutmuyor. Madde 3 **ölçülmüş olarak karşılanmıyor.**
+
+**2. 10:34'teki olay sesi kalıcı kesti** — `manual_redmi` ardından `iphone_disconnected`.
+Sonraki her çağrıda `iphone_audio_not_ready`. **Sebebi bilinmiyor.**
+
+### Doğrulamak için
+`manual_redmi` neden oldu (kullanıcı mı sesi elle aldı?) ve sonrasında iPhone neden bir daha ses
+vermedi. 10:33-10:41 arası tüm log satırları okunmalı.
