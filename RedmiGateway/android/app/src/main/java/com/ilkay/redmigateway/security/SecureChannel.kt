@@ -41,7 +41,8 @@ class SecureChannel(private val key: ByteArray, private val isGateway: Boolean) 
     }
 
     companion object {
-        private val AAD = "phonebridge-ws-2".toByteArray(Charsets.UTF_8)
+        /** The additional data every frame is bound to. The iPhone uses the same string. */
+        internal val AAD = "phonebridge-ws-2".toByteArray(Charsets.UTF_8)
         val GATEWAY_TO_CLIENT = byteArrayOf('S'.code.toByte(), '2'.code.toByte(), 'C'.code.toByte(), 0)
         val CLIENT_TO_GATEWAY = byteArrayOf('C'.code.toByte(), '2'.code.toByte(), 'S'.code.toByte(), 0)
     }
