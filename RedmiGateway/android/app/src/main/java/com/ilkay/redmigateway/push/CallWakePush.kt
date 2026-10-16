@@ -108,12 +108,7 @@ object CallWakePush {
         val started = ApnsSender.sendBackground(payload) { problem ->
             if (problem != null) Log.w(TAG, "Idle wake push: $problem")
         }
-        val pause = when {
-            socketWakeCount < 3 -> 60_000L
-            socketWakeCount < 6 -> 120_000L
-            socketWakeCount < 10 -> 300_000L
-            else -> 900_000L
-        }
+        val pause = idleWakePauseMs(socketWakeCount)
         socketWakeNotBefore = now + pause
         if (started) {
             Log.i(TAG, "Idle wake push sent (idle wake $socketWakeCount, next in ${pause / 1000}s)")
@@ -152,4 +147,23 @@ object CallWakePush {
             Log.w(TAG, "Silent wake push not sent: the iPhone has registered no alert token yet")
         }
     }
+}
+
+/**
+ * How long to wait before the next idle wake, given how many have already gone out.
+ *
+ * Kept out of the class so it can be asserted on directly, because the first version of this
+ * cleared its backoff on every socket open instead. Measured on the device, the iPhone opens the
+ * socket, authenticates, and iOS suspends it about fifty milliseconds later, so "the socket came
+ * back" was true many times a minute and the idle wake became a push every fifteen seconds. The
+ * schedule is the thing that has to stay long, so a test pins it rather than a comment.
+ *
+ * @param sent how many idle wakes have gone out since a socket last stayed up
+ * @return milliseconds to wait before the next one
+ */
+internal fun idleWakePauseMs(sent: Int): Long = when {
+    sent < 3 -> 60_000L
+    sent < 6 -> 120_000L
+    sent < 10 -> 300_000L
+    else -> 900_000L
 }
