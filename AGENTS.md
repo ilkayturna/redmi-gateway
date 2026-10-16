@@ -40,6 +40,36 @@ git commit -F "$env:TEMP\rg-commit-msgN.txt"          # ✅
 Her `pwsh` çağrısı yeni süreç. Değişkenler taşınmaz.
 **KURAL:** İlgili adımlar (token al → push → build tetikle) **tek çağrıda** yapılmalı.
 
+### 1.7 BOM'suz UTF-8 PowerShell betiği Windows PowerShell 5.1'de **HİÇ ÇALIŞMAZ**
+**Hata (16.10.2026):** `capture-call-diagnostics.ps1` ve `analyze-call-diagnostics.ps1` **BOM'suz
+UTF-8** kaydedilmişti ve içlerinde Türkçe karakter + **em dash** (`—`) vardı.
+`powershell` (Windows PowerShell **5.1**) BOM'suz dosyaları **ANSI (CP1252)** okur:
+```
+em dash "—"  UTF-8: E2 80 94   →   CP1252: â € ”
+                                          ^^^ U+201D SAĞ AKILLI TIRNAK
+```
+PowerShell **akıllı tırnakları string sonlandırıcı sayar** → string erken kapanır →
+```
+The string is missing the terminator: ".
+```
+→ **betik hiç çalışmaz.** `pwsh` (PowerShell 7) aynı dosyayı UTF-8 okur ve **sorunsuz çalıştırır**
+→ **hata ortama bağlıdır ve yalnızca `pwsh` ile test edilirse görünmez.**
+
+**KURAL:**
+1. İçinde **ASCII-dışı karakter** (Türkçe, em dash, akıllı tırnak) olan her `.ps1`
+   **UTF-8 BOM ile** kaydedilir:
+   ```powershell
+   $t = [IO.File]::ReadAllText($f, [Text.Encoding]::UTF8)
+   [IO.File]::WriteAllText($f, $t, (New-Object System.Text.UTF8Encoding($true)))   # ✅ BOM ekler
+   ```
+2. Betik metninde **em dash `—`, en dash `–`, akıllı tırnak `“ ” ‘ ’` KULLANMA** —
+   düz `-` ve `"` kullan. Bozulduklarında **tırnak üretirler.**
+3. Betiği **`powershell` (5.1) ile de çalıştır**, sadece `pwsh` ile değil. Kullanıcı
+   `powershell -File ...` çağırıyor.
+4. `Parser::ParseFile` ile sözdizimi taraması yapıyorsan **BOM'lu kopyayla** doğrula —
+   BOM'suz dosyada **yanlış sonuç** verir (0 hata diyebilir veya olmayan hata uydurabilir).
+5. Tarama: `BOM yok + ASCII-dışı var` → şüpheli. Özellikle **em dash** sayısına bak.
+
 ---
 
 ## 2. SWIFT / iOS
