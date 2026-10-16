@@ -26,9 +26,21 @@ object DiagnosticsReport {
         "android.permission.CALL_AUDIO_INTERCEPTION", "android.permission.CAPTURE_AUDIO_OUTPUT"
     )
 
-    /** True when the SIM slot 2 in-call music mapping (scripts/device/vendor_audio_fix.py) is present. */
+    /**
+     * True only when both halves of the SIM slot 2 in-call music mapping are present.
+     *
+     * The script in scripts/device/vendor_audio_fix.py writes two files and requires both: the
+     * mixer mapping to MultiMedia9, and the USECASE_INCALL_MUSIC_UPLINK2 usecase. This used to
+     * check only the platform file, so a ROM update that restored the mixer alone would still be
+     * reported as fixed. That matters more than it looks, because this flag is the first thing
+     * anyone checks when the iPhone has no sound, and a false "present" sends the search into the
+     * code when the answer is in /vendor.
+     */
     fun vendorAudioFixPresent(): Boolean = runCatching {
-        File("/vendor/etc/audio_platform_info_intcodec.xml").readText().contains("USECASE_INCALL_MUSIC_UPLINK2")
+        vendorFixPresent(
+            platformInfo = File("/vendor/etc/audio_platform_info_intcodec.xml").readText(),
+            mixerPaths = File("/vendor/etc/mixer_paths_idp.xml").readText(),
+        )
     }.getOrDefault(false)
 
     fun build(context: Context): JSONObject {
@@ -67,3 +79,21 @@ object DiagnosticsReport {
             })
     }
 }
+
+/**
+ * Whether both halves of the vendor audio fix are in the given file contents.
+ *
+ * The fix is two edits in two files and neither works without the other: the platform file gains
+ * the USECASE_INCALL_MUSIC_UPLINK2 usecase, and the mixer file points Incall_Music_2 at
+ * MultiMedia9 instead of MultiMedia2. scripts/device/vendor_audio_fix.py requires both before it
+ * will apply anything, so the report has to require both before it will claim the fix is there.
+ *
+ * Kept as a function over two strings so it can be asserted on: reading /vendor is not something a
+ * unit test can do, and this flag is the first thing checked when the iPhone has no sound.
+ *
+ * @param platformInfo the contents of /vendor/etc/audio_platform_info_intcodec.xml
+ * @param mixerPaths the contents of /vendor/etc/mixer_paths_idp.xml
+ */
+internal fun vendorFixPresent(platformInfo: String, mixerPaths: String): Boolean =
+    platformInfo.contains("USECASE_INCALL_MUSIC_UPLINK2") &&
+        mixerPaths.contains("Incall_Music_2 Audio Mixer MultiMedia9")
