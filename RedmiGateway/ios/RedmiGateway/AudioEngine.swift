@@ -255,8 +255,6 @@ final class AudioEngine {
         firstSendLogged = false
         captureLock.lock()
         let generation = capturePacer.generation
-        // The Redmi is waiting for frames; do not hold the first one back for a reserve.
-        capturePacer.beginImmediately()
         captureLock.unlock()
         do {
             let input = engine.inputNode
@@ -380,7 +378,6 @@ final class AudioEngine {
         // replayed into the new stream; the first frame after the switch still leaves at once.
         captureLock.lock()
         capturePacer.discardPending()
-        capturePacer.beginImmediately()
         captureLock.unlock()
 
         networkQueue.async { [weak self] in
