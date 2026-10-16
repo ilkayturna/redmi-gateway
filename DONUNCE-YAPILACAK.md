@@ -371,3 +371,47 @@ Yani **soket hiç açılmadı**, kimlik doğrulamaya sıra gelmedi → **Base64 
 
 **Base64'ü doğrulamanın yolu:** iPhone o sırada **bağlanıyor olmalı.** Önce iPhone'un bağlandığını gör
 (`iPhone connected` satırı), **sonra** LATEST'i kur ve aynı satırın geldiğini doğrula.
+
+---
+
+## 3. ✅ CİHAZDA KANITLANANLAR (16.10.2026, telefon bağlıyken)
+
+| Ne | Kanıt | Durum |
+|---|---|---|
+| **Vendor ses düzeltmesi** | `MultiMedia9` + `UPLINK2` yerinde | ✅ |
+| **Boşta uyandırma geri çekilmesi** | `idle wake 2, next in 60s` → `3, next in 120s` | ✅ |
+| **Uyanma nudge/push ayrımı** | 15 sn ucuz BLE · 60→120→300→900 pahalı push | ✅ |
+| **Madde 2 — yanıtlama senkronu** | `Incoming call is showing on the iPhone`, **616 ms** | ✅ |
+| **Base64 protokol değişikliği** | kurulu build'de `java/util/Base64` + `iPhone connected (protocol 2)` | ✅ |
+
+## 4. 🔴 KURULU VE TEST BEKLEYEN: `AUDIO-STATE-REPEAT`
+
+**Kurulu (pid 29721).** `PREPARING_IPHONE` boyunca ses-durumu mesajını saniyede bir tekrarlıyor.
+
+**Neden:** cihazda ölçüldü — yeniden kurulumdan sonra iPhone **uplink sesi hiç göndermiyor**
+(`RELAY_HEALTH` yok, `iphone=N/s` yok, `startMedia()` hiç çağrılmıyor) → 8 sn sonra
+`iphone_audio_not_ready`. **Her çağrı 10:40'tan beri böyle.**
+
+**Gerçek çağrı gerekiyor. Çağrı yapılmadı** (`Repeated the preparing state` sayısı: **0**).
+
+### Çağrı yapılınca log'da aranacak
+```
+Repeated the preparing state (1..8)               <- duzeltme calisiyor mu
+RELAY_HEALTH owner=PREPARING_IPHONE iphone=N/s    <- N>0 ise SES GECTI
+AUDIO_OWNER=IPHONE reason=iphone_confirmed        <- basarili gecis
+```
+
+| Sonuç | Anlamı | Sıradaki |
+|---|---|---|
+| **`iphone=N/s` görünüyor** | Düzeltme tuttu | Geçiş süresini ölç (`startMedia=2023ms` baskın) |
+| **`Repeated...` var ama `iphone=0/s`** | Sorun iPhone tarafında | **CI düzelmeli** (iOS build) |
+| **`Repeated...` hiç yok** | Tekrar tetiklenmiyor | Kodu incele |
+
+### ⚠️ Geri dönüş
+`apk\app-debug-IDLE-WAKE.apk` — ses yolu değişikliği içermeyen bilinen-iyi sürüm.
+
+## 5. ⚠️ SES YOLU — açık risk
+
+`AUDIO-STATE-REPEAT` **AGENTS.md 6.1 kapsamında** ve **gerçek çağrıyla doğrulanmadı.**
+İzlenen iki risk: tekrarlanan mesaj **çift `audio_start`** tetikler mi, `startMedia` **iki kez**
+çalışır mı.
