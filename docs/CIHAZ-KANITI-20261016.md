@@ -626,3 +626,60 @@ sessizce düşüyor.
 - **Kök nedeni söyler** — şu an tek bilinmeyen bu
 
 **Ve asıl düzeltme o logdan sonra yazılır.**
+
+---
+
+## 16. 🎯 MEKANİZMA: iPhone `audio_start` GÖNDERMİYOR (16.10.2026)
+
+### Akışın gerçek yönü
+
+`GatewayWebSocketServer.kt:357`:
+```kotlin
+"audio_start" -> startAudio(peer)
+```
+
+**`audio_start`'ı iPhone GÖNDERİYOR.** Redmi onu **bekliyor**, göndermiyor.
+
+```
+1. Redmi: arm()                        -> "Call audio session armed" ×2
+2. Redmi: PREPARING_IPHONE             -> "waiting_for_iphone_audio"
+3. iPhone: audio_start + uplink göndermeli
+4. Redmi: kapıda iPhone çerçevesi bekler -> RELAY_HEALTH iphone=N/s
+5. Kapı açılır                          -> startMedia() -> iphone_confirmed
+```
+
+### Başarılı vs başarısız — 3. adımda ayrılıyor
+
+| Adım | Başarılı (10:33) | Başarısız (10:40) |
+|---|---|---|
+| 1. arm | ✅ ×2 | ✅ ×2 |
+| 2. PREPARING_IPHONE | ✅ | ✅ |
+| **3. iPhone uplink** | **✅ `iphone=14/s`** | **❌ HİÇ** |
+| 4. RELAY_HEALTH | ✅ | ❌ yok |
+| 5. `startMedia()` | ✅ | **❌ hiç çağrılmıyor** |
+
+**`startMedia()` çağrılmıyor çünkü kapı hiç iPhone çerçevesi görmüyor.** Suçlu Redmi değil —
+**iPhone ses göndermiyor.**
+
+### 🔴 Ve bu AGENTS.md 6.1'in tarif ettiği tam senaryo
+
+> *"`audio_start` **arm başına bir kez** geldiği için bir daha denenmiyor → **ses yok**."*
+
+Redmi iPhone'a "sıra sende" mesajını **yalnızca ses-durumu DEĞİŞTİĞİNDE** gönderiyor
+(`sendAudioState`). **iPhone o an yeniden bağlanıyorsa mesajı kaçırır ve bir daha hatırlatılmaz.**
+
+**Kanıt:** başarısız çağrıda `iPhone connected (protocol 2)` **10:40:11.890**'da geldi,
+`PREPARING_IPHONE` **10:40:40.443**'te. Yani bağlantı **29 saniye önce** kurulmuştu — ama
+ses-durumu mesajı **bir kez** gitti ve iPhone onu **işlemedi**.
+
+### ✅ Yapılabilecek düzeltme — **Android tarafında**
+
+**`PREPARING_IPHONE` durumundayken ses-durumu mesajını periyodik olarak TEKRARLA**
+(ör. 1 sn'de bir, 8 sn boyunca). Bu:
+- **Davranışı iyileştirir** — kaçırılan mesaj telafi edilir
+- **Ses yoluna dokunur** → AGENTS.md 6.1: **cihazda gerçek çağrı testi şart**
+- **Cihazda doğrulanabilir:** çağrı yap → `iphone=N/s` **geliyor mu**
+- **iOS build gerektirmez** ✓
+
+**Risk:** mesaj tekrarı iPhone'da çift `audio_start` tetiklerse... Hmm — `startMedia` zaten
+idempotent olmalı (`startMedia` tekrar çağrılırsa). **Cihazda test edilmeli.**
