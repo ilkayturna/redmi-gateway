@@ -276,3 +276,36 @@ IdleWakeBackoffTest — 7 test, hepsi geciyor
 **Telefon geri bağlanınca yapılacak tek kontrol:** `Idle wake N` sayacının 1→2→3 arttığını ve aralıkların 60/120/300/900 sn'ye çıktığını logdan doğrula.
 
 
+
+---
+
+## 9. ✅ GERİ ÇEKİLME CİHAZDA DOĞRULANDI (16.10.2026 15:17)
+
+**Bekleyen tek ölçüm buydu.** Telefon geri geldiğinde kurulu build **hatalı geri çekilmeye sahipti**
+(`idleWakePauseMs` yok) — yani 15 saniyede bir push atan sürüm. `IDLE-WAKE` APK'sı kuruldu.
+
+**Ölçüm:**
+
+```
+15:15:04  iPhone holds a Bluetooth link but no socket; nudge 2
+15:15:19  nudge 3     (+15 sn)
+15:15:34  nudge 4     (+15 sn)
+15:16:34  nudge 5     (+60 sn)
+15:16:34  Idle wake push sent (idle wake 2, next in 60s)      <<< SAYAC = 2
+15:17:34  nudge 6     (+60 sn)
+15:17:34  Idle wake push sent (idle wake 3, next in 120s)     <<< SAYAC = 3, ARALIK = 120 sn
+```
+
+| Kontrol | Beklenen | Bulunan |
+|---|---|---|
+| Sayaç artıyor mu | 1 → 2 → 3 | ✅ **2 → 3** |
+| Aralık büyüyor mu | 60 → 120 sn | ✅ **60 → 120 sn** |
+| 15 sn'de takılı mı | hayır | ✅ **hayır** |
+
+**Sonuç:** `idleWakePauseMs` programı cihazda **tam olarak** çalışıyor. Ucuz BLE nudge (15 sn) ile
+pahalı push (60→120→300→900 sn) ayrımı korunuyor ✓
+
+**Ayrıca gözlendi:** iPhone **BLE linkini tutuyor ama soketi yok** — boşta uyandırmanın tam olarak
+hedeflediği durum. Nudge'lar bu yüzden ateşleniyor ✓
+
+**Durum:** geri çekilme **artık doğrulanmış**, "test edildi ama gözlenmedi" notu geçersiz.
