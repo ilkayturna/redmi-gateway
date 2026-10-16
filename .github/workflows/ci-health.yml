@@ -1,0 +1,39 @@
+name: CI Health Check
+
+# Tiny job whose only purpose is to answer one question: can this repository get a
+# runner at all?
+#
+# On 16.10.2026 every workflow began failing in about five seconds with no steps
+# executed and runner_id zero, which means the job never started. GitHub reported all
+# systems operational, the repository was neither archived nor disabled, and both the
+# iOS and Android workflows were affected, so the remaining explanations were
+# account-level: an Actions spending limit or quota. The billing endpoints return 404
+# with the token available here, so that could not be confirmed from this machine.
+#
+# This workflow isolates the question from any particular build. If it fails the same
+# way, the problem is the account and no amount of workflow editing will help. If it
+# succeeds, the runners are fine and the fault is inside the other workflows.
+#
+# It deliberately runs on ubuntu-latest: the cheapest runner, and a different image
+# from the macOS jobs, so it also separates "no runners" from "no macOS runners".
+
+on:
+  workflow_dispatch:
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Runner identity
+        run: |
+          echo "runner os      : $RUNNER_OS"
+          echo "runner arch    : $RUNNER_ARCH"
+          echo "runner name    : $RUNNER_NAME"
+          echo "runner temp    : $RUNNER_TEMP"
+          echo "workflow       : $GITHUB_WORKFLOW"
+          echo "repository     : $GITHUB_REPOSITORY"
+          echo "ref            : $GITHUB_REF"
+          echo "sha            : $GITHUB_SHA"
+          echo "event          : $GITHUB_EVENT_NAME"
+          echo "runner image   : $ImageOS"
+          echo "HEALTH CHECK PASSED: a runner was assigned and steps executed"
