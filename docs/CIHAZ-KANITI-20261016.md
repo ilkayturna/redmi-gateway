@@ -1053,3 +1053,60 @@ demektir → **sessizlik**. Bu, 6.1'in doğduğu hatanın şekli. **Erken istek*
 3. İki `request_iphone_audio` → `takeCallOnIPhone()` iki kez → idempotent mi?
 
 **Sonuç: düzeltme net ve Android'de, ama riski 2 (gizlilik) yüzünden tasarım kararı gerekiyor.**
+
+---
+
+## 25. ✅ GİZLİLİK RİSKİ YOK · ✅ TEKRAR DÜZELTMESİ UYUMLU · ❌ ERKEN İSTEK İŞE YARAMAZ (16.10.2026)
+
+**`CallKitManager.swift:368` okundu.**
+
+```swift
+func takeCallOnIPhone() {
+    let connection = GatewayConnection.shared
+    guard let call = connection.currentCall, call.state == .active, connection.isAuthenticated else {
+        GatewayConnection.shared.log("Cannot take the call audio: no active call on the link")
+        return
+    }
+    ...
+    if audioRequested {
+        audioPathLog("audio already requested; duplicate request ignored")
+        return
+    }
+```
+
+### 1. ✅ Gizlilik riski (bölüm 24, risk 2) GERÇEK DEĞİL
+**iPhone, çağrı `active` olmadan motoru başlatmıyor.** `call.state == .active` guard'ı var →
+**cevaplanmadan önce dinleme mümkün değil** ✓ **Bu riski geri çekiyorum.**
+
+### 2. ❌ Ama "erken istek" düzeltmesi de İŞE YARAMAZ
+Aynı guard yüzünden: Redmi çalarken istese bile **iPhone reddeder** ve
+`"Cannot take the call audio: no active call on the link"` yazar.
+
+**Yani bölüm 24'teki düzeltme önerisi geçersiz.** Redmi tarafından motor ısıtılamaz —
+**iPhone bunu tasarım gereği engelliyor.**
+
+### 3. ✅ Tekrar düzeltmem (`AUDIO-STATE-REPEAT`) UYUMLU
+**iOS kodunun kendi yorumu:**
+> *"The request can arrive more than once (**the Redmi repeats it**, and the app's own button
+> sends the same one). … so sending it is idempotent here."*
+
+**iOS zaten tekrarı bekliyor ve çift isteği yok sayıyor** ✓
+- Bölüm 24'ün **3 numaralı riski (idempotency) kapandı** ✓
+- Kurulu düzeltme **güvenli** ✓
+
+### Sonuç — `<1 sn` için ne gerekiyor
+
+| Yol | Durum |
+|---|---|
+| Kapıyı gevşet | ❌ Sessizlik verir (6.1'in hatası) |
+| Redmi erken istesin | ❌ **iPhone reddediyor** (`state == .active` guard) |
+| **iOS motoru cevap öncesi ısıtsın** | ⚠️ **iOS değişikliği + tasarım kararı gerekir** |
+| Olduğu gibi kabul (2.32 sn) | ✅ Çalışıyor, hedefin üstünde |
+
+**Yani madde 3'ün `<1 sn` hedefi, iOS tarafında bir tasarım değişikliği olmadan
+tutulamaz.** — ve o değişiklik **CI'ya bağlı** ✗
+
+### Kalan belirsizlik (dürüstçe)
+**`firstPcm = 592 ms`'in ne kadarı motor başlatma, ne kadarı mesaj gecikmesi** hâlâ ayrıştırılmadı.
+Çağrı testi bunu söyler. Ama **motor başlatma baskınsa**, Redmi tarafında yapılacak bir şey
+**yok** — çünkü iPhone erken başlatmayı reddediyor.
