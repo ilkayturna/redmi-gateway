@@ -1,5 +1,6 @@
-package com.ilkay.redmigateway.audio
+﻿package com.ilkay.redmigateway.audio
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -111,4 +112,49 @@ class CutoverDecisionTest {
         minFrames = 12,
         minFramesPerSecond = 38
     )
+
+    // Names the single condition that waits, so a slow handover is never guessed at: an iPhone that
+    // ramps up slowly and a gate that is merely strict read the same in one total.
+    @Test fun theWaitingConditionIsNamedExactlyOnce() {
+        assertEquals("notLive", blocker(live = false))
+        assertEquals("stale", blocker(iphoneFresh = false))
+        assertEquals("tooShort", blocker(streamMs = 100))
+        assertEquals("tooFewFrames", blocker(streamFrames = 5))
+        assertEquals("rateLow", blocker(recentRate = 20))
+        assertEquals("ready", blocker())
+    }
+
+    // The named reason and the decision must never disagree, or the log would explain the opposite
+    // of what the code actually did.
+    @Test fun theNamedReasonAndTheDecisionAgree() {
+        val cases = listOf(
+            blocker() to true,
+            blocker(live = false) to false,
+            blocker(iphoneFresh = false) to false,
+            blocker(streamMs = 239) to false,
+            blocker(streamFrames = 11) to false,
+            blocker(recentRate = 37) to false
+        )
+        for ((reason, expected) in cases) {
+            assertEquals(expected, reason == CutoverDecision.READY)
+        }
+    }
+
+    private fun blocker(
+        live: Boolean = true,
+        iphoneFresh: Boolean = true,
+        streamMs: Long = 600,
+        streamFrames: Int = 30,
+        recentRate: Int = 50
+    ) = CutoverDecision.startMediaBlocker(
+        live = live,
+        iphoneFresh = iphoneFresh,
+        streamMs = streamMs,
+        streamFrames = streamFrames,
+        recentRate = recentRate,
+        minStreamMs = 240,
+        minFrames = 12,
+        minFramesPerSecond = 38
+    )
 }
+

@@ -56,9 +56,33 @@ internal object CutoverDecision {
         minStreamMs: Long,
         minFrames: Int,
         minFramesPerSecond: Int
-    ): Boolean = live &&
-        iphoneFresh &&
-        streamMs >= minStreamMs &&
-        streamFrames >= minFrames &&
-        recentRate >= minFramesPerSecond
+    ): Boolean = startMediaBlocker(
+        live, iphoneFresh, streamMs, streamFrames, recentRate,
+        minStreamMs, minFrames, minFramesPerSecond) == READY
+
+    const val READY = "ready"
+
+    /**
+     * The first condition that keeps the audio path closed, in the order the decision applies them.
+     * The log then names the condition that waited instead of leaving it to be guessed: an iPhone
+     * that ramps up slowly and a gate that is merely strict look identical in a single total, and
+     * they are fixed in different places.
+     */
+    fun startMediaBlocker(
+        live: Boolean,
+        iphoneFresh: Boolean,
+        streamMs: Long,
+        streamFrames: Int,
+        recentRate: Int,
+        minStreamMs: Long,
+        minFrames: Int,
+        minFramesPerSecond: Int
+    ): String = when {
+        !live -> "notLive"
+        !iphoneFresh -> "stale"
+        streamMs < minStreamMs -> "tooShort"
+        streamFrames < minFrames -> "tooFewFrames"
+        recentRate < minFramesPerSecond -> "rateLow"
+        else -> READY
+    }
 }
