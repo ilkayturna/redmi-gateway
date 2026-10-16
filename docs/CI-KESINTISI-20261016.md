@@ -47,6 +47,21 @@ Koşumlar **5 saniyede** bitiyor, **0 adım** çalışıyor, **runner atanmıyor
 | Actions kapalı | `actions/permissions` | `enabled=true allowed_actions=all` |
 | İş akışı YAML hatası | Android de aynı şekilde çöküyor | ❌ elendi |
 | Benim son değişikliğim | Ana dal da çöküyor | ❌ elendi |
+| macOS runner sorunu | Aşağıdaki sağlık kontrolü | ❌ elendi |
+
+## ✅ KESİN KANIT: Sağlık kontrolü (`ci-health.yml`)
+
+`ubuntu-latest` üzerinde **tek adımlık `echo`** — mümkün olan **en ucuz iş**, macOS'ten **farklı imaj**:
+
+```
+JOB health: failure
+  runner_id=0   runner_name=''   steps=0
+```
+
+**Sonuç:** Bu repo **hiçbir runner alamıyor.** Ne macOS ne Linux. Ne iOS ne Android.
+İş akışının içeriğiyle, dilinle veya maliyetiyle ilgisi yok — **hesap seviyesinde bir kısıt.**
+
+Bu, aşağıdaki "en olası neden"i **kanıta çevirir**: faturalama kotası/harcama limiti.
 
 ## EN OLASI NEDEN (kanıtlanamadı — token yetkisi)
 
@@ -55,6 +70,7 @@ Koşumlar **5 saniyede** bitiyor, **0 adım** çalışıyor, **runner atanmıyor
 - **`macos-latest` çarpanı 10×** → 1 dakika = 10 dakika kota
 - Bugün **~100 iOS build** koştu → kaba hesap **binlerce dakika**
 - Faturalama uçları (`/settings/billing/actions`) bu token'la **404** veriyor → kesin doğrulama yapılamadı
+- **Sağlık kontrolü** (tek adım, ubuntu) da runner alamıyor → **hesap seviyesi doğrulandı**
 
 **Doğrulama kullanıcıya ait:** GitHub → Settings → Billing → Actions dakikaları ve harcama limiti.
 
@@ -88,6 +104,27 @@ Koşumlar **5 saniyede** bitiyor, **0 adım** çalışıyor, **runner atanmıyor
 | 2 | Kota sıfırlanmasını bekle (aylık döngü) | — |
 | 3 | macOS kullanımını azalt: `release=false` ile yalnızca tip denetimi koştur | — |
 | 4 | Build'i **public** bir repoya taşı (public repolarda Actions ücretsiz) | Kullanıcı kararı |
+
+---
+
+## AYRI BULGU: Varsayılan dal (`main`) ÇOK BAYAT
+
+| | |
+|---|---|
+| **Varsayılan dal** | `main` |
+| **Konum** | `7553104` |
+| **Çalışılan dal** | `codex/audio-jitter-fix` (`12697b9`) |
+| **Fark** | **127 commit geride, 197 dosya farklı** |
+
+**Sonuçları:**
+1. **GitHub'da repoya bakan biri çok eski bir sürüm görür** — README, dokümanlar, tüm düzeltmeler yok
+2. `main`'deki `build-ios.yml`'de **`Typecheck app sources` adımı YOK** (tip denetimi düzeltmesi orada değil)
+3. `workflow_dispatch` yalnızca varsayılan daldaki iş akışlarını listeler → yeni iş akışları `main`'e girene kadar dispatch edilemez
+
+**`main`'e merge edilmedi** — `HANDOVER.md`: *"Merging to main is the owner's decision."* Bu bir **sahip kararı**;
+ama sonucu **görünür**: repo vitrini ile gerçek durum ayrışmış durumda.
+
+**Öneri (kullanıcıya):** CI düzeldikten ve cihaz testi geçtikten sonra `codex/audio-jitter-fix` → `main` merge edilmeli.
 
 ---
 
