@@ -82,7 +82,7 @@ if ($prep -and $iphone) {
 } else { "  (kayit yok)" }
 
 # Yeni bütçe satırı: "Call audio moved to iPhone (uplink=X/s downlink=Y/s settle=Ams firstWrite=Bms
-# firstRead=Cms firstPcm=Pms startMedia=Sms)" — 2.5 sn'nin nerede geçtiğini üçe ayırır:
+# firstRead=Cms firstPcm=Pms startMedia=Sms)" - 2.5 sn'nin nerede geçtiğini üçe ayırır:
 # firstPcm = iPhone'un ilk ses karesi, startMedia-firstPcm = bizim kapı, settle = doğrulama.
 $budget = $lines | Where-Object { $_ -match 'Call audio moved to iPhone \(' } | Select-Object -Last 1
 if ($budget) {
