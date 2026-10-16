@@ -78,7 +78,19 @@ final class AudioEngine {
     private var isInterrupted = false
     private var lastRecoveryRequest = Date.distantPast
     private(set) var isSessionPrepared = false
+    /// The generation the local graph was built with, and whether its network half is attached.
+    private var localGeneration: UInt64 = 0
+    private var attached = false
+    private var lastAttachedHost: String?
+    private var lastAttachedSession: UInt32?
+    /// Stamps that split the Redmi's firstPcm, and the end-to-end time the person waits.
+    private var engineStartRequestedAt = Date()
+    private var firstCaptureLogged = false
+    private var firstSendLogged = false
+    private var noSealerLogged = false
     var isRunning: Bool { running }
+    /// True once the socket half is running. A local engine built by `startLocal` still needs it.
+    var isAttached: Bool { attached }
 
     private init() {
         engine.attach(player)
@@ -201,19 +213,50 @@ final class AudioEngine {
     }
 
     /// Called after CallKit activated the audio session and the Redmi answered audio_start.
+    ///
+    /// The endpoint is validated before any of the graph is built (requirement 4): an unusable one
+    /// must never open the microphone and leave it open with no network behind it.
     func start(host: String, port: UInt16, session: UInt32, key: Data) {
+        guard endpointIsUsable(host: host, port: port, session: session, key: key) else {
+            log("Audio endpoint unusable (host empty=\(host.isEmpty), session=\(session), key=\(key.count) bytes); engine not started")
+            return
+        }
+        guard startLocal() else { return }
+        attachNetwork(host: host, port: port, session: session, key: key)
+    }
+
+    private func endpointIsUsable(host: String, port: UInt16, session: UInt32, key: Data) -> Bool {
+        !host.isEmpty && session != 0 && key.count == BridgeCrypto.keyBytes
+            && NWEndpoint.Port(rawValue: port) != nil
+    }
+
+    /// Builds and starts the audio graph with no network at all, and starts the downlink with it.
+    ///
+    /// A transfer calls this before `audio_start`, so the Redmi's clock starts when the graph is
+    /// already running instead of while it is being built. Nothing is sent until `attachNetwork`
+    /// runs (the timers do not exist and `sendPcm` has no sealer), but the downlink plays from here
+    /// on: tying it to the attach would turn one missed attach into total silence (M2).
+    ///
+    /// Nothing here stops the engine on a timer. A transfer that takes longer than expected must
+    /// still find its engine alive when `audio_ready` finally arrives (M1); the microphone is
+    /// released by `stop()`, which the call ending or the Redmi taking the audio back calls.
+    @discardableResult
+    func startLocal() -> Bool {
         stop(preservingControls: true)
         guard microphoneAllowed else {
             log("Microphone permission missing")
-            return
+            return false
         }
-        guard !host.isEmpty, session != 0, key.count == BridgeCrypto.keyBytes,
-              let endpointPort = NWEndpoint.Port(rawValue: port) else {
-            log("Invalid audio endpoint")
-            return
-        }
+        // The Redmi measures firstPcm from the moment it arms the relay, so these stamps add up to
+        // that number and say where the time went.
+        let startRequestedAt = Date()
+        engineStartRequestedAt = startRequestedAt
+        firstCaptureLogged = false
+        firstSendLogged = false
         captureLock.lock()
         let generation = capturePacer.generation
+        // The Redmi is waiting for frames; do not hold the first one back for a reserve.
+        capturePacer.beginImmediately()
         captureLock.unlock()
         do {
             let input = engine.inputNode
@@ -229,7 +272,7 @@ final class AudioEngine {
                                                  channels: 1, interleaved: false),
                   let converter = AVAudioConverter(from: inputFormat, to: monoFormat) else {
                 log("Audio format unavailable")
-                return
+                return false
             }
             if inputFormat.channelCount > 1 { converter.channelMap = [0 as NSNumber] }
             engine.connect(player, to: engine.mainMixerNode, format: monoFormat)
@@ -273,21 +316,72 @@ final class AudioEngine {
                 }
                 self.enqueueCapture(frames, capturedAt: capturedAt - Double(pending.count) / self.sampleRate,
                                     generation: generation, captureMute: captureMute)
+                if !frames.isEmpty, !self.firstCaptureLogged {
+                    self.firstCaptureLogged = true
+                    let ms = Int(Date().timeIntervalSince(startRequestedAt) * 1000)
+                    self.log("Audio path: firstCapture=\(ms) ms after start request")
+                }
             }
             tapInstalled = true
             engine.prepare()
             let startBegan = Date()
             try engine.start()
             let startMs = Int(Date().timeIntervalSince(startBegan) * 1000)
+            // The downlink starts with the graph, never with the attach (M2).
             player.play()
             running = true
-            log("Audio engine: vp=\(vpMs) ms start=\(startMs) ms")
+            let localMs = Int(Date().timeIntervalSince(startRequestedAt) * 1000)
+            log("Audio engine: vp=\(vpMs) ms start=\(startMs) ms localReady=\(localMs) ms")
             if isSpeakerEnabled { try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker) }
         } catch {
             log("Audio engine start failed: \(error.localizedDescription)")
             stop()
+            return false
+        }
+        localGeneration = generation
+        return true
+    }
+
+    /// The network half: sealer, socket, timers.
+    ///
+    /// Idempotent and repeatable (requirement 2). `audio_ready` arrives once per arm, so an attach
+    /// that silently dropped was permanent silence (M1): every path here logs, a repeat attach for
+    /// the same endpoint is a logged no-op, a new endpoint re-attaches, and an attach that arrives
+    /// when the engine is gone builds it again instead of giving up. An unusable endpoint closes
+    /// the graph instead of leaving the microphone open (M3).
+    func attachNetwork(host: String, port: UInt16, session: UInt32, key: Data) {
+        guard endpointIsUsable(host: host, port: port, session: session, key: key),
+              let endpointPort = NWEndpoint.Port(rawValue: port) else {
+            log("Attach refused: unusable endpoint (host empty=\(host.isEmpty), session=\(session), key=\(key.count) bytes); engine stopped")
+            stop(preservingControls: true)
             return
         }
+        if attached, lastAttachedHost == host, lastAttachedSession == session {
+            log("Attach ignored: already attached to \(host):\(port) session \(session)")
+            return
+        }
+        if attached {
+            log("Re-attaching: endpoint is now \(host):\(port) session \(session)")
+            detachNetwork()
+        }
+        if !running {
+            // The engine may have been stopped or never started; a late attach still gets audio up.
+            log("Attach found no running engine; building the graph now")
+            guard startLocal() else {
+                log("Attach failed: the graph could not be built (see the line above); no audio")
+                return
+            }
+        }
+        attached = true
+        lastAttachedHost = host
+        lastAttachedSession = session
+        let generation = localGeneration
+        // Speech captured before the switch belongs to the Redmi's side of the call, so it is not
+        // replayed into the new stream; the first frame after the switch still leaves at once.
+        captureLock.lock()
+        capturePacer.discardPending()
+        capturePacer.beginImmediately()
+        captureLock.unlock()
 
         networkQueue.async { [weak self] in
             guard let self else { return }
@@ -400,6 +494,14 @@ final class AudioEngine {
             engine.stop()
             running = false
         }
+        detachNetwork()
+    }
+
+    /// Tears the socket half down and leaves the local graph alone, so a re-attach can reuse it.
+    private func detachNetwork() {
+        attached = false
+        lastAttachedHost = nil
+        lastAttachedSession = nil
         networkQueue.async { [weak self] in
             guard let self else { return }
             self.heartbeat?.cancel()
@@ -452,10 +554,23 @@ final class AudioEngine {
     }
 
     private func sendPcm(_ samples: [Int16]) {
-        guard sealer != nil else { return }
+        guard sealer != nil else {
+            // One line, once: frames captured with no network attached is exactly the state that
+            // turned into total silence before, and it must be visible in the log.
+            if !noSealerLogged {
+                noSealerLogged = true
+                log("Audio path: captured audio has no network attached yet; frames are not sent")
+            }
+            return
+        }
+        noSealerLogged = false
         if !firstPcmLogged, let startedAt = engineStartedAt {
             firstPcmLogged = true
             log("Audio path: firstPcmOut=\(Int(Date().timeIntervalSince(startedAt) * 1000)) ms after start")
+        }
+        if !firstSendLogged {
+            firstSendLogged = true
+            log("Audio path: firstSend=\(Int(Date().timeIntervalSince(engineStartRequestedAt) * 1000)) ms after start request")
         }
         var pcm = Data(capacity: samples.count * 2)
         let muted = isMuted
