@@ -23,9 +23,9 @@ object DiagnosticsLog {
     private const val TAG = "DiagnosticsLog"
     private const val FILE_NAME = "call-diagnostics.log"
     /** Trim once the file passes this many lines, keeping the newest [TRIM_TO_LINES]. */
-    private const val MAX_LINES = 4000
-    private const val TRIM_TO_LINES = 2500
-    private const val TRIM_EVERY_WRITES = 200L
+    internal const val MAX_LINES = 4000
+    internal const val TRIM_TO_LINES = 2500
+    internal const val TRIM_EVERY_WRITES = 200L
 
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "DiagnosticsLog").apply { isDaemon = true }
@@ -53,7 +53,7 @@ object DiagnosticsLog {
                 runCatching {
                     target.parentFile?.mkdirs()
                     target.appendText(line + "\n")
-                    if (writes.incrementAndGet() % TRIM_EVERY_WRITES == 0L) trim(target)
+                    if (shouldTrimDiagnosticsLog(writes.incrementAndGet())) trim(target)
                 }.onFailure { Log.w(TAG, "Could not write diagnostics: ${it.message}") }
             }
         }
@@ -77,7 +77,31 @@ object DiagnosticsLog {
 
     private fun trim(target: File) {
         val all = target.readLines()
-        if (all.size <= MAX_LINES) return
-        target.writeText(all.takeLast(TRIM_TO_LINES).joinToString("\n") + "\n")
+        val keep = diagnosticsLogLinesToKeep(all.size) ?: return
+        target.writeText(all.takeLast(keep).joinToString("\n") + "\n")
     }
 }
+
+
+/**
+ * Whether this write is the one that triggers a trim.
+ *
+ * Trimming reads and rewrites the whole file, so it is not done on every line: the counter decides
+ * and this is the rule. Kept as a function because "every two hundred writes" turning into "every
+ * write" would make the log thread the bottleneck on a live call.
+ *
+ * @param writes how many lines have been written since the app started
+ */
+internal fun shouldTrimDiagnosticsLog(writes: Long): Boolean = writes % DiagnosticsLog.TRIM_EVERY_WRITES == 0L
+
+/**
+ * How many lines to keep when the diagnostics log has grown too large, or null to leave it alone.
+ *
+ * The newest lines are the ones kept, because the log is read to explain the call that just
+ * happened. The number kept must be smaller than the number that triggers the trim, or the file
+ * would be rewritten at the same size and grow without bound.
+ *
+ * @param lineCount how many lines the file currently has
+ */
+internal fun diagnosticsLogLinesToKeep(lineCount: Int): Int? =
+    if (lineCount <= DiagnosticsLog.MAX_LINES) null else DiagnosticsLog.TRIM_TO_LINES
