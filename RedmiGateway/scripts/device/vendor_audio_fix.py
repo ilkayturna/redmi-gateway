@@ -97,7 +97,11 @@ def main():
               f"[ -f {BACKUP_DIR}/mixer_paths_idp.xml ] || cp -p {MIXER} {BACKUP_DIR}/mixer_paths_idp.xml; "
               f"[ -f {BACKUP_DIR}/audio_platform_info_intcodec.xml ] || cp -p {PLATFORM} {BACKUP_DIR}/audio_platform_info_intcodec.xml")
         push(mixer.replace(MIXER_OLD, MIXER_NEW), MIXER)
-        indent = platform[:platform.index(PLATFORM_ANCHOR)].rsplit("\n", 1)[1]
+        # Copy the anchor's own indentation. If the anchor is the very first line there is no
+        # preceding newline, and taking rsplit(...)[1] would crash right when the user is waiting
+        # for their audio back; fall back to the anchor's own leading whitespace instead.
+        prefix = platform[:platform.index(PLATFORM_ANCHOR)]
+        indent = prefix.rsplit("\n", 1)[1] if "\n" in prefix else prefix
         push(platform.replace(PLATFORM_ANCHOR, PLATFORM_ANCHOR + "\n" + indent + PLATFORM_LINE), PLATFORM)
         shell("sync")
         restart_audio_hal()
