@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Typeface
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -316,6 +317,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestDialerRole() {
+        // RoleManager is API 29, and this app declares minSdk 26, so on Android 8 or 9 the class
+        // reference itself is a NoClassDefFoundError and the button would crash the settings
+        // screen. PhoneActivity.requestDialerRole has had this guard all along; this copy did
+        // not, which is the only difference between the two.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
         val roleManager = getSystemService(RoleManager::class.java) ?: return
         if (roleManager.isRoleAvailable(RoleManager.ROLE_DIALER) && !roleManager.isRoleHeld(RoleManager.ROLE_DIALER)) {
             @Suppress("DEPRECATION")
