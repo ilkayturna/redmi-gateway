@@ -75,7 +75,9 @@ Betik logcat'i yakalar, çağrı sonrası özetler.
 | Ses geçişi <1000 ms | ❌ **Karşılanmıyor** — optimizasyon geri alındı, ~2504 ms'ye döndü |
 | Cızırtı/ses kesilmesi | ✅ Önceki turlarda çözüldü (`silence` 11/s → 0-1/s) |
 | Arayüz | ✅ Canlı doğrulandı ("iPhone bağlı · uykuda") |
-| Hotspot/veri kuralları | ⏳ Koda dokunulmadı, teyit bekliyor |
+| Hotspot/veri kuralları | ✅ **7/7 kural korunuyor** (statik + bağımsız denetim) — kota ölçüldü: push **90 bayt**, çağrı başına **≤2** → `docs/TUR-109-KURALLAR-DOGRULAMA.md` |
+| Beacon pil etkisi | ⏳ **Ölçülmedi** — `dumpsys batterystats` ile ölçülecek |
+| Açık yarış (düşük) | ⏳ `tryKnownNetwork`:277 `inCall` ↔ `stopHotspot()` arası ms'lik pencere — **cihaz testi olmadan değiştirilmeyecek** |
 
 ---
 
