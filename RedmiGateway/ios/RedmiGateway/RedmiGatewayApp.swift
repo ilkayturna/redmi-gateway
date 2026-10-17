@@ -11,6 +11,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         _ = BLECentralManager.shared
         _ = CallKitManager.shared
         _ = Notifier.shared
+        // A crash on the seventeenth left nothing behind: the log is a memory ring and the phone
+        // this app talks to cannot read iOS logs. Capture the next one into a file that the
+        // existing "copy report" path shows, so a crash at hang-up is diagnosable next time.
+        CrashTrace.install()
+        CrashTrace.reportPreviousCrash()
         GatewayConnection.shared.start()
         VoipPush.shared.start()
         // SMS and missed-call notifications through Apple use the ordinary notification token
@@ -84,5 +89,42 @@ struct RedmiGatewayApp: App {
         WindowGroup {
             ContentView()
         }
+    }
+}
+
+/// Keeps the ending of the previous run on disk.
+///
+/// The app's log lives in memory only, so a crash at hang-up on 17.10.2026 left no trace at all,
+/// and the phone this app talks to cannot read iOS logs either. Two small pieces make the next one
+/// diagnosable from the report the app already copies: an uncaught exception writes its name,
+/// reason and symbols to a file, and the next launch puts that text into the log ring.
+///
+/// Only the exception path is covered. A watchdog kill or a hang leaves no exception, which is why
+/// the phone keeps its own diagnostics of the same call: the two sides together say whether this
+/// app died or merely stopped answering.
+enum CrashTrace {
+    private static var fileURL: URL {
+        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return directory.appendingPathComponent("last-crash.txt")
+    }
+
+    static func install() {
+        NSSetUncaughtExceptionHandler { exception in
+            let text = """
+            \(Date()) uncaught \(exception.name.rawValue)
+            reason: \(exception.reason ?? "none")
+            \(exception.callStackSymbols.joined(separator: "\n"))
+            """
+            try? text.write(to: CrashTrace.fileURL, atomically: true, encoding: .utf8)
+        }
+    }
+
+    @MainActor
+    static func reportPreviousCrash() {
+        let url = fileURL
+        guard let text = try? String(contentsOf: url, encoding: .utf8), !text.isEmpty else { return }
+        GatewayConnection.shared.log("Previous run crashed: " + text)
+        try? FileManager.default.removeItem(at: url)
     }
 }

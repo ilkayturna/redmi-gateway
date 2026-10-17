@@ -55,7 +55,19 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         private const val ATT_HEADER_BYTES = 3
         private const val MAX_CONTROL_AGE_MS = 60_000L
         private const val SUBSCRIBE_GRACE_MS = 10_000L
-        private const val RECONNECT_GRACE_MS = 20_000L
+        /**
+     * Grace before the first reconnect pulse when the iPhone's link simply dropped.
+     *
+     * Twenty seconds was the old value and it turned a normal iOS suspension into a wake loop: the
+     * iPhone connects, iOS suspends it about fifty milliseconds later (measured 14:21:05 "iPhone
+     * linked again" and 22 ms later "iPhone has no link"), that drop was read as "the phone is away",
+     * and the pulse woke it again - 15 connections and 8 pulses in one idle hour. iOS suspension is
+     * the normal resting state, not a fault, and it costs nothing to leave it alone: an incoming or
+     * outgoing call lights the call beacon immediately, and SMS/missed calls pulse at once through
+     * wakeForNews. A phone that is genuinely away (from across the room, a Bluetooth restart, a
+     * reboot) still comes back within five minutes.
+     */
+    private const val RECONNECT_GRACE_MS = 5 * 60_000L
         private const val SWIPED_AWAY_GRACE_MS = 3_000L
         private const val BEACON_MAJORS = 4
         private const val PULSE_MS = 10_000L
@@ -848,9 +860,20 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         Log.i(TAG, "iPhone has no link; reconnect pulse $reconnectPulses")
         pulseUntil = android.os.SystemClock.elapsedRealtime() + PULSE_MS
         updateCallBeacon()
-        // Pulses keep coming until a link returns: every 3 minutes, then every 10 once the
-        // iPhone has been gone for half an hour (probably away from home).
-        val pause = if (reconnectPulses < 10) 3 * 60_000L else 10 * 60_000L
+        // Pulses keep coming until a link returns, but idling costs battery on both phones: the
+        // iPhone connects, iOS suspends it about fifty milliseconds later, the next pulse wakes it
+        // again. Measured on 17.10.2026 while the phone simply sat there: 15 "iPhone connected" and
+        // 8 reconnect pulses in one hour, and the log shows the loop directly (14:21:05 "iPhone
+        // linked again", 22 ms later "iPhone has no link; BLE advertising on"). Nothing is lost by
+        // waiting longer: an incoming or outgoing call lights the beacon from updateCallBeacon at
+        // once, and new SMS/missed calls still pulse immediately through wakeForNews.
+        // So: a link that just blipped comes back in three minutes, a phone that is probably out of
+        // the room waits ten, and one that has been gone for half an hour waits thirty.
+        val pause = when {
+            reconnectPulses < 3 -> 3 * 60_000L
+            reconnectPulses < 10 -> 10 * 60_000L
+            else -> 30 * 60_000L
+        }
         schedulePulse(PULSE_MS + pause)
         mainHandler.postDelayed({ updateCallBeacon() }, PULSE_MS + 100)
     }
