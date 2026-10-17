@@ -202,6 +202,15 @@ final class AudioEngine {
 
     /// Called after CallKit activated the audio session and the Redmi answered audio_start.
     func start(host: String, port: UInt16, session: UInt32, key: Data) {
+        // A second start for the same session must not tear a working graph down and build it again.
+        // Measured on 17.10.2026 at 14:10: one call asked for the transfer three times, every copy
+        // ran the whole start again, and each restart cost an audio-route change plus seconds of
+        // silence - the 1.9 s handover the user waited for was three competing starts. The session
+        // id and key identify the same relay, so an identical request is a no-op.
+        if running, session == lastSession, key == lastKey {
+            log("Audio engine already running for this session; duplicate start ignored")
+            return
+        }
         stop(preservingControls: true)
         guard microphoneAllowed else {
             log("Microphone permission missing")
