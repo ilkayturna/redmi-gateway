@@ -1,10 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- The call screen used to be a three-stop navy gradient with glass panels. The charter replaces it
+     with one solid deep neutral: the gradient was the loudest thing in the app and read as decoration.
+     The token name stays so the layout needs no change. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android"
     android:shape="rectangle">
-    <gradient
-        android:type="linear"
-        android:angle="270"
-        android:startColor="#0B0F19"
-        android:centerColor="#101726"
-        android:endColor="#161F30" />
+    <solid android:color="@color/call_bg_start" />
 </shape>

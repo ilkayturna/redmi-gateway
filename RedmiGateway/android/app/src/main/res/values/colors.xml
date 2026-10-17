@@ -1,68 +1,79 @@
 <resources>
+    <!--
+      Redmi Gecidi — light theme.
+      One accent (jade), warm-neutral surfaces, hairline borders, no gradients and no glass.
+      The token names are the ones the layouts already use, so this file is the whole palette swap.
+      Charter: design-system/redmi-gateway/MASTER.md
+    -->
     <!-- Backgrounds -->
-    <color name="bg_void">#F5F7F8</color>
-    <color name="bg_surface">#0A101D</color>
+    <color name="bg_void">#F4F6F7</color>
+    <color name="bg_surface">#FFFFFF</color>
     <color name="bg_card">#FFFFFF</color>
-    <color name="bg_card_secondary">#131E35</color>
-    <color name="bg_terminal">#03060B</color>
+    <color name="bg_card_secondary">#EFF2F4</color>
+    <color name="bg_terminal">#141A1D</color>
 
     <!-- Borders & Dividers -->
-    <color name="border_subtle">#DDE3E7</color>
-    <color name="border_glow">#334155</color>
-    <color name="border_neon_emerald">#059669</color>
-    <color name="border_neon_cyan">#0284C7</color>
+    <color name="border_subtle">#DCE2E5</color>
+    <color name="border_glow">#C6D0D5</color>
+    <color name="border_neon_emerald">#0E6E5C</color>
+    <color name="border_neon_cyan">#0E6E5C</color>
 
-    <!-- Neon Accents -->
-    <color name="neon_emerald">#137A4D</color>
-    <color name="neon_cyan">#00F0FF</color>
-    <color name="neon_sky">#38BDF8</color>
-    <color name="neon_violet">#818CF8</color>
-    <color name="neon_amber">#FBBF24</color>
-    <color name="neon_crimson">#F43F5E</color>
+    <!-- Accents: one jade family plus earthy states. The old neon names are kept for the layouts. -->
+    <color name="neon_emerald">#0E6E5C</color>
+    <color name="neon_cyan">#0E6E5C</color>
+    <color name="neon_sky">#0E6E5C</color>
+    <color name="neon_violet">#5A6670</color>
+    <color name="neon_amber">#8A5A00</color>
+    <color name="neon_crimson">#B3261E</color>
 
     <!-- Typography -->
-    <color name="text_primary">#18232C</color>
-    <color name="text_secondary">#55636E</color>
-    <color name="text_muted">#64748B</color>
-    <color name="text_terminal">#38BDF8</color>
+    <color name="text_primary">#141A1D</color>
+    <color name="text_secondary">#5A6670</color>
+    <color name="text_muted">#7A858E</color>
+    <color name="text_terminal">#0E6E5C</color>
 
     <!-- Legacy Mappings for Compatibility -->
-    <color name="primary">#0F172A</color>
-    <color name="primary_dark">#040711</color>
-    <color name="accent">#2356A8</color>
-    <color name="background">#F5F7F8</color>
+    <color name="primary">#141A1D</color>
+    <color name="primary_dark">#0E1114</color>
+    <color name="accent">#0E6E5C</color>
+    <color name="background">#F4F6F7</color>
     <color name="card_bg">#FFFFFF</color>
-    <color name="status_good">#137A4D</color>
-    <color name="status_bad">#B42318</color>
-    <color name="status_attention">#945D00</color>
-    <color name="green_500">#00F59B</color>
-    <color name="red_500">#F43F5E</color>
-    <color name="amber_500">#FBBF24</color>
+    <color name="status_good">#2E7D32</color>
+    <color name="status_bad">#B3261E</color>
+    <color name="status_attention">#8A5A00</color>
+    <color name="green_500">#2E7D32</color>
+    <color name="red_500">#B3261E</color>
+    <color name="amber_500">#8A5A00</color>
     <!-- Phone screens -->
-    <color name="pb_surface_variant">#EDF0F3</color>
-    <color name="pb_call_green">#1E9E4F</color>
-    <color name="pb_ripple">#1F18232C</color>
+    <color name="pb_surface_variant">#EDF0F2</color>
+    <color name="pb_call_green">#12795F</color>
+    <color name="pb_ripple">#1F141A1D</color>
     <color name="pb_ripple_light">#33FFFFFF</color>
     <color name="pb_on_accent">#FFFFFF</color>
-    <color name="pb_attention_bg">#FFF6E5</color>
-    <color name="pb_attention_stroke">#F0D9A8</color>
+    <color name="pb_attention_bg">#FDF6E7</color>
+    <color name="pb_attention_stroke">#E8D8AE</color>
     <!-- Phone surface tokens: one step per surface, so rows can separate by elevation alone -->
-    <color name="pb_field_bg">#EEF1F4</color>
-    <color name="pb_field_stroke">#DFE5EA</color>
-    <color name="pb_key_bg">#F1F4F6</color>
-    <color name="pb_key_stroke">#DCE3E8</color>
-    <color name="pb_divider">#E6EAEE</color>
-    <color name="pb_empty_circle">#E9EDF0</color>
-    <color name="pb_bubble_in">#EDF0F3</color>
-    <color name="pb_row_selector">#1418232C</color>
+    <color name="pb_field_bg">#EEF1F3</color>
+    <color name="pb_field_stroke">#DCE2E5</color>
+    <color name="pb_key_bg">#F1F4F5</color>
+    <color name="pb_key_stroke">#DCE2E5</color>
+    <color name="pb_divider">#E4E9EC</color>
+    <color name="pb_empty_circle">#E9EDEF</color>
+    <color name="pb_bubble_in">#EDF0F2</color>
+    <color name="pb_row_selector">#14141A1D</color>
 
-    <!-- In-Call Screen Modern Palette -->
-    <color name="call_bg_start">#0B0F19</color>
-    <color name="call_bg_center">#101726</color>
-    <color name="call_bg_end">#161F30</color>
-    <color name="call_decline">#EF4444</color>
-    <color name="call_answer">#22C55E</color>
-    <color name="call_text_slate">#94A3B8</color>
-    <color name="call_glass_bg">#1AFFFFFF</color>
-    <color name="call_glass_stroke">#26FFFFFF</color>
+    <!-- In-call screen: a solid deep neutral, not a gradient. White text stays. -->
+    <color name="call_bg_start">#0E1114</color>
+    <color name="call_bg_center">#0E1114</color>
+    <color name="call_bg_end">#0E1114</color>
+    <color name="call_decline">#B3261E</color>
+    <color name="call_answer">#12795F</color>
+    <color name="call_text_slate">#9BA6B0</color>
+    <color name="call_glass_bg">#14FFFFFF</color>
+    <color name="call_glass_stroke">#24FFFFFF</color>
+    <!-- Call screen is always dark, in both themes, so its text and strokes are their own tokens. -->
+    <color name="call_text_primary">#ECEEF0</color>
+    <color name="call_surface_raised">#181E23</color>
+    <color name="call_stroke">#2A323A</color>
+    <color name="call_ripple">#24FFFFFF</color>
 </resources>

@@ -63,12 +63,17 @@ internal class PhoneViews(private val context: Context) {
     private val turkish = Locale("tr", "TR")
 
     /**
-     * Avatar colours. Chosen to sit on the dark phone surface without glowing, while
-     * still holding 4.5:1 contrast against the white initial letter on top of them.
+     * Avatar colours: one muted jade/earth family, not a rainbow.
+     *
+     * The old set was eight vivid hues (blue, purple, pink, orange) that read as decoration next to
+     * the jade accent and made the list feel like a different app. These keep the functional part -
+     * a contact's row is recognisable at a glance - by varying hue slightly and lightness more,
+     * while every tone stays dark enough to hold 4.5:1 against the white initial on top.
+     * Charter: design-system/redmi-gateway/MASTER.md
      */
     private val palette = intArrayOf(
-        0xFF3F6FD8.toInt(), 0xFF1B8A67.toInt(), 0xFF7A54C8.toInt(), 0xFFC2691F.toInt(),
-        0xFF4A8231.toInt(), 0xFFB94A62.toInt(), 0xFF227E96.toInt(), 0xFF8A6320.toInt()
+        0xFF2E6B5E.toInt(), 0xFF3F7A6B.toInt(), 0xFF4E6B57.toInt(), 0xFF5A6E64.toInt(),
+        0xFF3C6A73.toInt(), 0xFF6B6E5A.toInt(), 0xFF7A6752.toInt(), 0xFF4A5F6E.toInt()
     )
 
     private val medium = Typeface.create("sans-serif-medium", Typeface.NORMAL)

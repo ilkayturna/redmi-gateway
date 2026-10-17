@@ -1,28 +1,70 @@
 <resources>
-    <color name="bg_void">#10161B</color>
-    <color name="bg_card">#192127</color>
-    <color name="border_subtle">#34414A</color>
-    <color name="text_primary">#F0F3F4</color>
-    <color name="text_secondary">#B3BEC5</color>
-    <color name="accent">#91B8FA</color>
-    <color name="neon_emerald">#6FD9A7</color>
-    <color name="status_good">#6FD9A7</color>
-    <color name="status_bad">#FF9A8F</color>
-    <color name="status_attention">#F7C36B</color>
+    <!--
+      Redmi Gecidi — night theme. Same roles as the light theme, accent lifted to jade.
+      Charter: design-system/redmi-gateway/MASTER.md
+    -->
+    <color name="bg_void">#0E1114</color>
+    <color name="bg_surface">#171B1F</color>
+    <color name="bg_card">#171B1F</color>
+    <color name="bg_card_secondary">#1E242A</color>
+    <color name="bg_terminal">#0B0E10</color>
+
+    <color name="border_subtle">#2A323A</color>
+    <color name="border_glow">#3A454E</color>
+
+    <color name="neon_emerald">#4FD1B5</color>
+    <color name="neon_cyan">#4FD1B5</color>
+    <color name="neon_sky">#4FD1B5</color>
+    <color name="neon_violet">#9BA6B0</color>
+    <color name="neon_amber">#E0B252</color>
+    <color name="neon_crimson">#FF6B6B</color>
+
+    <color name="text_primary">#ECEEF0</color>
+    <color name="text_secondary">#9BA6B0</color>
     <color name="text_muted">#8C99A3</color>
+    <color name="text_terminal">#4FD1B5</color>
+
+    <color name="primary">#ECEEF0</color>
+    <color name="primary_dark">#0B0E10</color>
+    <color name="accent">#4FD1B5</color>
+    <color name="background">#0E1114</color>
+    <color name="card_bg">#171B1F</color>
+    <color name="status_good">#66BB6A</color>
+    <color name="status_bad">#FF6B6B</color>
+    <color name="status_attention">#E0B252</color>
+    <color name="green_500">#66BB6A</color>
+    <color name="red_500">#FF6B6B</color>
+    <color name="amber_500">#E0B252</color>
+
     <!-- Phone screens -->
-    <color name="pb_surface_variant">#243039</color>
+    <color name="pb_surface_variant">#1E242A</color>
+    <color name="pb_call_green">#2FA98A</color>
     <color name="pb_ripple">#33FFFFFF</color>
-    <color name="pb_on_accent">#10161B</color>
-    <color name="pb_attention_bg">#2B2517</color>
-    <color name="pb_attention_stroke">#5C4B25</color>
+    <color name="pb_on_accent">#0E1114</color>
+    <color name="pb_attention_bg">#221E14</color>
+    <color name="pb_attention_stroke">#4A3F22</color>
     <!-- Phone surface tokens: one step per surface, so rows can separate by elevation alone -->
-    <color name="pb_field_bg">#1E272E</color>
-    <color name="pb_field_stroke">#2E3A44</color>
-    <color name="pb_key_bg">#26323B</color>
-    <color name="pb_key_stroke">#33424D</color>
-    <color name="pb_divider">#2A353E</color>
-    <color name="pb_empty_circle">#1C242A</color>
-    <color name="pb_bubble_in">#243039</color>
+    <color name="pb_field_bg">#1C2329</color>
+    <color name="pb_field_stroke">#2A323A</color>
+    <color name="pb_key_bg">#222A31</color>
+    <color name="pb_key_stroke">#313B44</color>
+    <color name="pb_divider">#262F36</color>
+    <color name="pb_empty_circle">#1A2127</color>
+    <color name="pb_bubble_in">#1E242A</color>
     <color name="pb_row_selector">#1FFFFFFF</color>
+
+    <!-- In-call screen keeps its deep solid neutral in both themes. -->
+    <color name="call_bg_start">#0B0E10</color>
+    <color name="call_bg_center">#0B0E10</color>
+    <color name="call_bg_end">#0B0E10</color>
+    <color name="call_decline">#C0392B</color>
+    <color name="call_answer">#2FA98A</color>
+    <color name="call_text_slate">#9BA6B0</color>
+    <color name="call_glass_bg">#14FFFFFF</color>
+    <color name="call_glass_stroke">#24FFFFFF</color>
+    <!-- Call screen is always dark, in both themes, so its text and strokes are their own tokens. -->
+    <color name="call_text_primary">#ECEEF0</color>
+    <color name="call_surface_raised">#181E23</color>
+    <color name="call_stroke">#2A323A</color>
+    <color name="call_ripple">#24FFFFFF</color>
 </resources>

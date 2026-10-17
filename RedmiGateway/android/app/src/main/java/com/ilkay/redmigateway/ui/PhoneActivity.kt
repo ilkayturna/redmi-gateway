@@ -1087,7 +1087,9 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
             contentDescription = "Yeni mesaj"
             setOnClickListener { showNewMessage() }
         }, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END).apply {
-            setMargins(0, 0, views.dp(16), views.dp(16))
+            // 24dp, not 16: at 16 the compose button's edge and elevation touched the bottom bar,
+            // which read as one blurred block in the screenshot instead of a button floating above it.
+            setMargins(0, 0, views.dp(16), views.dp(24))
         })
         binding.phoneContent.addView(frame, FrameLayout.LayoutParams(-1, -1))
     }

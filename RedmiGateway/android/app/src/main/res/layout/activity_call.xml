@@ -40,7 +40,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Arama Bağlanıyor"
-                android:textColor="#E2E8F0"
+                android:textColor="@color/call_text_primary"
                 android:textSize="14sp"
                 android:textStyle="bold" />
 
@@ -64,7 +64,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
             android:visibility="gone"
-            app:cardBackgroundColor="#E61E293B"
+            app:cardBackgroundColor="@color/call_surface_raised"
             app:cardCornerRadius="18dp"
             app:cardElevation="6dp"
             app:strokeColor="@color/neon_amber"
@@ -82,7 +82,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:gravity="center"
-                    android:textColor="#F8FAFC"
+                    android:textColor="@color/call_text_primary"
                     android:textSize="14sp"
                     android:textStyle="bold" />
 
@@ -133,10 +133,10 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
             android:visibility="gone"
-            app:cardBackgroundColor="#D9162032"
+            app:cardBackgroundColor="@color/call_surface_raised"
             app:cardCornerRadius="22dp"
             app:cardElevation="4dp"
-            app:strokeColor="#3338BDF8"
+            app:strokeColor="@color/call_stroke"
             app:strokeWidth="1dp"
             tools:visibility="visible">
 
@@ -328,7 +328,7 @@
                         app:iconPadding="0dp"
                         app:iconSize="34dp"
                         app:iconTint="#FFFFFF"
-                        app:rippleColor="#40FFFFFF" />
+                        app:rippleColor="@color/call_ripple" />
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -367,7 +367,7 @@
                         app:iconPadding="0dp"
                         app:iconSize="34dp"
                         app:iconTint="#FFFFFF"
-                        app:rippleColor="#40FFFFFF" />
+                        app:rippleColor="@color/call_ripple" />
 
                     <TextView
                         android:layout_width="wrap_content"
@@ -968,7 +968,7 @@
                 app:iconPadding="0dp"
                 app:iconSize="34dp"
                 app:iconTint="#FFFFFF"
-                app:rippleColor="#40FFFFFF" />
+                app:rippleColor="@color/call_ripple" />
 
             <!-- Status / Transfer Help Subtitle -->
             <TextView
