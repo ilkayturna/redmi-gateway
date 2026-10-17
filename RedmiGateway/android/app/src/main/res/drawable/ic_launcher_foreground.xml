@@ -1,33 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  One flat white receiver on the jade background. The two drop-shadow layers were removed: at
+  launcher size they read as a smudge, and the charter keeps decoration off this surface.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-
-    <!-- Soft ambient drop shadow layer (Material 3 depth) -->
-    <group
-        android:scaleX="2.55"
-        android:scaleY="2.55"
-        android:translateX="23.4"
-        android:translateY="25.4">
-        <path
-            android:fillColor="#22000000"
-            android:pathData="M20.01,15.38c-1.23,0 -2.42,-0.2 -3.53,-0.56 -0.35,-0.12 -0.74,-0.03 -1.02,0.24l-2.2,2.2c-2.83,-1.44 -5.15,-3.75 -6.59,-6.59l2.2,-2.21c0.28,-0.26 0.36,-0.65 0.25,-1C8.75,6.35 8.55,5.16 8.55,3.93 8.55,3.42 8.12,3 7.61,3H4.14C3.63,3 3,3.39 3,3.93 3,13.37 10.63,21 20.07,21c0.55,0 0.93,-0.61 0.93,-1.14v-3.47c0,-0.52 -0.43,-0.95 -0.99,-1.01z" />
-    </group>
-
-    <!-- Key drop shadow layer -->
-    <group
-        android:scaleX="2.55"
-        android:scaleY="2.55"
-        android:translateX="23.4"
-        android:translateY="24.5">
-        <path
-            android:fillColor="#33000000"
-            android:pathData="M20.01,15.38c-1.23,0 -2.42,-0.2 -3.53,-0.56 -0.35,-0.12 -0.74,-0.03 -1.02,0.24l-2.2,2.2c-2.83,-1.44 -5.15,-3.75 -6.59,-6.59l2.2,-2.21c0.28,-0.26 0.36,-0.65 0.25,-1C8.75,6.35 8.55,5.16 8.55,3.93 8.55,3.42 8.12,3 7.61,3H4.14C3.63,3 3,3.39 3,3.93 3,13.37 10.63,21 20.07,21c0.55,0 0.93,-0.61 0.93,-1.14v-3.47c0,-0.52 -0.43,-0.95 -0.99,-1.01z" />
-    </group>
-
-    <!-- Crisp, iconic white telephone receiver -->
     <group
         android:scaleX="2.55"
         android:scaleY="2.55"
