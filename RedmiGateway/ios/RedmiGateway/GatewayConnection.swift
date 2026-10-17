@@ -107,6 +107,16 @@ public final class GatewayConnection: ObservableObject {
     private var pingTask: Task<Void, Never>?
     private var syncCallsHasMore = false
     private var smsTimeouts: [String: Task<Void, Never>] = [:]
+    /// When this iPhone last ran a "carry the call audio" request.
+    ///
+    /// The Redmi broadcasts the request on every authenticated socket, and this iPhone genuinely
+    /// holds more than one for a moment while it reconnects. Measured on 17.10.2026 at 14:10: the
+    /// single request the Redmi sent reached the app three times, and every copy ran the whole
+    /// transfer again - audio_start, engine start, an audio route change and dropped downlink
+    /// frames - so one 1.9 s handover was really three competing starts. An identical request that
+    /// arrives within two seconds of the last one is now ignored; the Redmi re-sends a kept
+    /// request only after a real reconnect, which takes longer than this window.
+    private var lastTransferRequestAt: Date?
     /// Call commands waiting for their ack, oldest first; see startControlWatchdog.
     private var controlWatchdogs: [(key: String, action: String, task: Task<Void, Never>)] = []
     private var lastPathSignature = ""
@@ -891,6 +901,12 @@ public final class GatewayConnection: ObservableObject {
         // change, so no new type, no new command and no protocol bump is needed: an older iPhone
         // reads it as "the audio stays on the Redmi" and behaves exactly as before.
         if audio.detail == "request_iphone_audio" {
+            let now = Date()
+            if let previous = lastTransferRequestAt, now.timeIntervalSince(previous) < 2.0 {
+                log("Ignoring a repeated take-the-audio request (\(Int(now.timeIntervalSince(previous) * 1000)) ms after the last one)")
+                return
+            }
+            lastTransferRequestAt = now
             log("The Redmi asked this iPhone to take the call audio")
             CallKitManager.shared.takeCallOnIPhone()
             return
