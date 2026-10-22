@@ -38,6 +38,8 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     private var audioActivated = false
     private var audioRequested = false
     private var audioCallUuid: UUID?
+    /// Repeats the audio request after an answer until the audio moves here; see startAudioRetry.
+    private var audioRetryTask: Task<Void, Never>?
     private var endpoint: (session: UInt32, port: UInt16, key: Data)?
     private var runningEndpoint: (host: String, session: UInt32, port: UInt16)?
     private var linkLostTask: Task<Void, Never>?
@@ -746,6 +748,11 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             // Answered over Bluetooth; audio follows as soon as the network link is back.
             connection.reconnectNow(reason: "answered on iPhone")
         }
+        // The answer is the one moment the socket is most likely down (iOS suspends the app while
+        // ringing), and on 22.10.2026 the person answered on the iPhone and the whole conversation
+        // stayed on the Redmi: the audio request was sent once, into a link that was not there, and
+        // never repeated. This keeps asking until the audio is actually here.
+        startAudioRetry(uuid: uuid)
         // After audio_start, never before: the Redmi's arm clock starts with that frame, and the
         // ring-time warm-up has long finished for a call that rang here, so this is a no-op on the
         // critical path. Starting the engine still waits for CallKit either way.
@@ -753,6 +760,36 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         AudioEngine.shared.warmUp()
         audioPathLog("warmUp finished")
         action.fulfill()
+    }
+
+    /// Repeats the audio request after an answer until the audio actually moves here.
+    ///
+    /// Bounded on purpose: six attempts two seconds apart covers the Redmi's eight second arm window
+    /// twice, and a call that never accepts the transfer must not leave a timer running for its whole
+    /// length. Every attempt is logged so the phone's own log answers "was it tried at all".
+    private func startAudioRetry(uuid: UUID) {
+        audioRetryTask?.cancel()
+        audioRetryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            for attempt in 1...6 {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if Task.isCancelled { return }
+                guard self.answeredHere.contains(uuid),
+                      self.states[uuid] != nil,
+                      GatewayConnection.shared.isAuthenticated,
+                      GatewayConnection.shared.audioLocation != .iphone,
+                      GatewayConnection.shared.currentCall != nil else { return }
+                GatewayConnection.shared.log("Audio is still on the Redmi; asking again (attempt \(attempt))")
+                self.audioRequested = true
+                GatewayConnection.shared.sendAudioStart()
+            }
+        }
+    }
+
+    /// The audio is confirmed on this iPhone: stop asking.
+    func audioMovedToIPhone() {
+        audioRetryTask?.cancel()
+        audioRetryTask = nil
     }
 
     func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
