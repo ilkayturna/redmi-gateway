@@ -332,9 +332,10 @@ Kapi 'gercek cagri (zil/ses)' 'UNVERIFIED' 'arayan bir hat gerektirir: Redmi ara
 # ---------------------------------------------------------------- ozet
 Write-Host ''
 Write-Host '=== OZET ===' -ForegroundColor Cyan
-$gecti = ($script:sonuclar | Where-Object { $_.Durum -eq 'GECTI' }).Count
-$kaldi = ($script:sonuclar | Where-Object { $_.Durum -eq 'KALDI' }).Count
-$belirsiz = ($script:sonuclar | Where-Object { $_.Durum -eq 'UNVERIFIED' }).Count
+# @() ile sarilir: tek sonuc dondugunde Where-Object tek nesne verir ve .Count bos gorunebilir.
+$gecti = @($script:sonuclar | Where-Object { $_.Durum -eq 'GECTI' }).Count
+$kaldi = @($script:sonuclar | Where-Object { $_.Durum -eq 'KALDI' }).Count
+$belirsiz = @($script:sonuclar | Where-Object { $_.Durum -eq 'UNVERIFIED' }).Count
 Write-Host ('  GECTI=' + $gecti + '  KALDI=' + $kaldi + '  UNVERIFIED=' + $belirsiz)
 if ($kaldi -gt 0) {
     Write-Host '  TESLIM EDILMEZ: kirmizi kapi var.' -ForegroundColor Red
