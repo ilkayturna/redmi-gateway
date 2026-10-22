@@ -843,6 +843,10 @@ public final class GatewayConnection: ObservableObject {
                 isIncoming: event.direction.map { $0 == "incoming" } ?? existing?.isIncoming ?? (callState == .ringing),
                 connectedAt: callState == .active ? (existing?.connectedAt ?? Date()) : existing?.connectedAt
             )
+            // A failure from an earlier step must not stay on screen once the call is up: after one
+            // late duplicate answer command the person saw "could not be answered" for the whole
+            // call even though it was connected.
+            if callState == .active { lastCallError = nil }
         }
         onCallEvent?(event)
     }
