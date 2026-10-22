@@ -244,13 +244,14 @@ final class AudioEngine {
         }
         // CallKit normally activates the session before it hands the call over; if it did not, the
         // input node reports no format at all and every start below fails.
+        // `AVAudioSession` has no `isActive` getter in the iOS SDK. Activating an already active
+        // session is a no-op, so this both covers CallKit not having activated it and keeps the
+        // recovery path deterministic after a route change.
         let audioSession = AVAudioSession.sharedInstance()
-        if !audioSession.isActive {
-            do {
-                try audioSession.setActive(true)
-            } catch {
-                log("Audio session could not be activated: \(error.localizedDescription)")
-            }
+        do {
+            try audioSession.setActive(true)
+        } catch {
+            log("Audio session could not be activated: \(error.localizedDescription)")
         }
         captureLock.lock()
         let generation = capturePacer.generation
@@ -276,7 +277,7 @@ final class AudioEngine {
                 let sessionInfo = AVAudioSession.sharedInstance()
                 log("Audio format unavailable (attempt \(attempt)/\(maxStartAttempts), " +
                     "inputSr=\(inputFormat.sampleRate), channels=\(inputFormat.channelCount), " +
-                    "sessionSr=\(sessionInfo.sampleRate), active=\(sessionInfo.isActive))")
+                    "sessionSr=\(sessionInfo.sampleRate))")
                 if attempt < maxStartAttempts, !running {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                         guard let self, !self.running else { return }
