@@ -1,3 +1,4 @@
+import AVFoundation
 import Combine
 import Foundation
 import Network
@@ -151,6 +152,7 @@ public final class GatewayConnection: ObservableObject {
         }
         pairing = PairingKeychain.load()
         link = pairing == nil ? .unpaired : .searching
+        installTelemetryObservers()
 
         discovery.onEndpointFound = { [weak self] host, port, deviceId in
             Task { @MainActor [weak self] in self?.endpointsFound([host], port: port, deviceId: deviceId, source: "Bonjour") }
@@ -398,6 +400,7 @@ public final class GatewayConnection: ObservableObject {
     }
 
     private func closeSocket() {
+        stopTelemetry()
         for attempt in attempts { attempt.task.cancel(with: .goingAway, reason: nil) }
         attempts.removeAll()
         pingTask?.cancel()
@@ -733,7 +736,11 @@ public final class GatewayConnection: ObservableObject {
             "protocol": BridgeProtocol.version,
             "clientId": pairing.clientId,
             "nonce": clientNonce.base64EncodedString(),
-            "proof": proof.base64EncodedString()
+            "proof": proof.base64EncodedString(),
+            // The Redmi records this. Without it a ring that failed cannot be tied to a build, and
+            // "the new one is installed" stays a guess made from the TestFlight screen.
+            "appVersion": appVersionNumber,
+            "appBuild": appBuildNumber
         ])
     }
 
@@ -788,6 +795,7 @@ public final class GatewayConnection: ObservableObject {
         CallKitManager.shared.handleGatewayLinkRestored()
         sendPushToken()
         startPing()
+        startTelemetry()
         send(["type": "get_state"])
         requestSync()
     }
@@ -1290,6 +1298,173 @@ public final class GatewayConnection: ObservableObject {
         logs.append(line)
         if logs.count > 200 { logs.removeFirst(logs.count - 200) }
         LogFile.append(line + "\n")
+        appendTelemetryLine(message)
+    }
+
+    // MARK: - Telemetry to the Redmi
+
+    /// The iPhone has no USB debugging, so its log has to travel to the Redmi or a failed ring leaves
+    /// no evidence at all: the in-memory ring dies with the app and nobody can cable the phone to a
+    /// computer. These lines are pushed over the same sealed socket and written to a file on the
+    /// Redmi, which adb can read. Bounded on purpose - the phone is a communication device first.
+    private var clientLogRing: [String] = []
+    /// How many entries of the ring have already reached the Redmi.
+    private var clientLogDelivered = 0
+    /// Lines dropped because the ring wrapped before they were sent.
+    private var clientLogDropped = 0
+    private var clientLogTimer: Timer?
+    private var clientStatusTimer: Timer?
+    private var lastClientLogSentAt = Date.distantPast
+    private var telemetryObserversInstalled = false
+    private static let clientLogRingLimit = 300
+    private static let clientLogBatchLimit = 40
+
+    private var appVersionNumber: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    }
+
+    private var appBuildNumber: String {
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+    }
+
+    /// Removes anything that could identify a person before a line leaves the phone.
+    static func sanitizeTelemetry(_ line: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: "\\+?\\d[\\d\\s]{6,}\\d") else { return line }
+        let range = NSRange(line.startIndex..., in: line)
+        return regex.stringByReplacingMatches(in: line, range: range, withTemplate: "<numara>")
+    }
+
+    private func appendTelemetryLine(_ message: String) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        clientLogRing.append("[\(formatter.string(from: Date()))] \(GatewayConnection.sanitizeTelemetry(message))")
+        let overflow = clientLogRing.count - GatewayConnection.clientLogRingLimit
+        if overflow > 0 {
+            clientLogRing.removeFirst(overflow)
+            clientLogDelivered = max(0, clientLogDelivered - overflow)
+            clientLogDropped += overflow
+        }
+    }
+
+    /// Sends the part of the ring the Redmi has not seen yet.
+    private func flushTelemetry(force: Bool = false) {
+        guard state == .authenticated else { return }
+        let pending = clientLogRing.count - clientLogDelivered
+        guard pending > 0 else { return }
+        let now = Date()
+        if !force, now.timeIntervalSince(lastClientLogSentAt) < 2 { return }
+        let start = clientLogDelivered
+        let end = min(clientLogRing.count, start + GatewayConnection.clientLogBatchLimit)
+        let batch = Array(clientLogRing[start..<end])
+        send([
+            "type": "client_log",
+            "appVersion": appVersionNumber,
+            "appBuild": appBuildNumber,
+            "dropped": clientLogDropped,
+            "lines": batch
+        ])
+        clientLogDelivered = end
+        clientLogDropped = 0
+        lastClientLogSentAt = now
+    }
+
+    private func sendClientStatus() {
+        guard state == .authenticated else { return }
+        send([
+            "type": "client_status",
+            "appVersion": appVersionNumber,
+            "appBuild": appBuildNumber,
+            "appState": GatewayConnection.appStateName(UIApplication.shared.applicationState),
+            "mic": GatewayConnection.microphonePermission,
+            "battery": GatewayConnection.batteryText,
+            "thermal": GatewayConnection.thermalText,
+            "lowPower": ProcessInfo.processInfo.isLowPowerModeEnabled
+        ])
+    }
+
+    private func startTelemetry() {
+        installTelemetryObservers()
+        // The first batch is the point of the whole channel: after a background wake it carries the
+        // lines written while the socket was down, including a ring the Redmi never heard about.
+        flushTelemetry(force: true)
+        sendClientStatus()
+        if clientLogTimer == nil {
+            clientLogTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.flushTelemetry() }
+            }
+        }
+        if clientStatusTimer == nil {
+            clientStatusTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.sendClientStatus() }
+            }
+        }
+    }
+
+    private func stopTelemetry() {
+        clientLogTimer?.invalidate()
+        clientLogTimer = nil
+        clientStatusTimer?.invalidate()
+        clientStatusTimer = nil
+    }
+
+    private func installTelemetryObservers() {
+        guard !telemetryObserversInstalled else { return }
+        telemetryObserversInstalled = true
+        let center = NotificationCenter.default
+        center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.flushTelemetry(force: true)
+                self?.sendClientStatus()
+            }
+        }
+        center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                // Last chance before iOS freezes the app and the socket closes: the ring may hold the
+                // only copy of the lines that explain a ring.
+                self?.flushTelemetry(force: true)
+                self?.sendClientStatus()
+            }
+        }
+    }
+
+    private static func appStateName(_ state: UIApplication.State) -> String {
+        switch state {
+        case .active: return "active"
+        case .inactive: return "inactive"
+        case .background: return "background"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private static var microphonePermission: String {
+        switch AVAudioSession.sharedInstance().recordPermission {
+        case .granted: return "granted"
+        case .denied: return "denied"
+        case .undetermined: return "undetermined"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private static var batteryText: String {
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        let level = UIDevice.current.batteryLevel
+        guard level >= 0 else { return "unknown" }
+        let percent = Int((level * 100).rounded())
+        switch UIDevice.current.batteryState {
+        case .charging, .full: return "\(percent)% charging"
+        case .unplugged: return "\(percent)%"
+        default: return "\(percent)% unknown"
+        }
+    }
+
+    private static var thermalText: String {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: return "nominal"
+        case .fair: return "fair"
+        case .serious: return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
+        }
     }
 }
 

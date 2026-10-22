@@ -24,7 +24,9 @@ param(
     [int]$BeklenenVersionCode = 205,
     [string]$AscKlasor = 'C:\Users\ilkay.turna\Documents\asc-cli',
     [string]$AscAppId = '6816340544',
-    [int]$HotspotButcesiSn = 8
+    [int]$HotspotButcesiSn = 8,
+    # iPhone build 114+ kendini Redmi'ye loglar; bos birakilirsa yalnizca "akis var mi" olculur.
+    [string]$BeklenenIphoneBuild = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -188,6 +190,34 @@ if ($Cihaz) {
                 }
             } else {
                 Kapi 'tanilama yazimi' 'KALDI' ('ls ciktisi okunamadi: ' + $satir)
+            }
+
+            # iPhone'un kendi log ve durum akisi (build 114+): iPhone'da USB hata ayiklama yok,
+            # bu yuzden tek kanit yolu Redmi'ye ittigi telemetri dosyasi.
+            $iphoneYolu = '/sdcard/Android/data/com.ilkay.redmigateway/files/diagnostics/iphone-diagnostics.log'
+            $iphoneSatir = (& $Adb shell ('ls -l ' + $iphoneYolu) 2>$null) | Out-String
+            $iphoneSatir = $iphoneSatir.Trim()
+            if ($iphoneSatir -match $desen) {
+                $iphoneBayt = [int]$matches[1]
+                $iphoneYazim = [datetime]::ParseExact($matches[2], 'yyyy-MM-dd HH:mm', $null)
+                $iphoneYas = [math]::Round(((Get-Date) - $iphoneYazim).TotalMinutes, 0)
+                if ($iphoneBayt -gt 0 -and $iphoneYas -le 180) {
+                    Kapi 'iPhone telemetrisi' 'GECTI' ($iphoneBayt.ToString() + ' bayt, son yazim ' + $iphoneYas + ' dk once')
+                } else {
+                    Kapi 'iPhone telemetrisi' 'KALDI' ($iphoneBayt.ToString() + ' bayt, son yazim ' + $iphoneYas + ' dk once')
+                }
+                if ($BeklenenIphoneBuild) {
+                    $bagliSatir = (& $Adb shell ('tail -400 ' + $iphoneYolu) 2>$null) | Out-String
+                    $bulunan = ''
+                    if ($bagliSatir -match 'linked app=\S+ build=(\d+)') { $bulunan = $matches[1] }
+                    if ($bulunan -eq $BeklenenIphoneBuild) {
+                        Kapi 'iPhone build' 'GECTI' ('bagli iPhone build ' + $bulunan)
+                    } else {
+                        Kapi 'iPhone build' 'KALDI' ('beklenen ' + $BeklenenIphoneBuild + ', dosyada: ' + ($bulunan -replace '^$', 'yok'))
+                    }
+                }
+            } else {
+                Kapi 'iPhone telemetrisi' 'UNVERIFIED' 'iphone-diagnostics.log yok (iPhone build 114+ kurulmali)'
             }
         }
     }
