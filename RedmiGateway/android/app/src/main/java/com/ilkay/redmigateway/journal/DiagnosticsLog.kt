@@ -34,19 +34,32 @@ object DiagnosticsLog {
     private val writes = AtomicLong()
 
     @Volatile private var file: File? = null
+    private var appContext: Context? = null
 
     /** Safe to call more than once; the first context wins. */
     fun init(context: Context) {
+        appContext = context.applicationContext
         if (file != null) return
-        file = runCatching {
-            val dir = context.getExternalFilesDir("diagnostics") ?: context.filesDir
-            File(dir, FILE_NAME)
-        }.getOrNull()
+        file = resolve(context)
+        if (file == null) Log.w(TAG, "No diagnostics file yet; will retry on the first record")
     }
+
+    /**
+     * Where the rolling file lives.
+     *
+     * Null when the app process starts before external storage is ready. That is a real state on
+     * this phone: the process that started at 21:03 on 21.10.2026, right after the package update,
+     * never wrote a single line again, so a whole day of calls had no on-device evidence at all.
+     * [record] therefore retries instead of trusting this one attempt.
+     */
+    private fun resolve(context: Context): File? = runCatching {
+        val dir = context.getExternalFilesDir("diagnostics") ?: context.filesDir
+        File(dir, FILE_NAME)
+    }.getOrNull()
 
     /** Appends one line. Never blocks the caller and never throws. */
     fun record(tag: String, message: String) {
-        val target = file ?: return
+        val target = file ?: lateInitFile() ?: return
         val line = "${stamp.format(Date())} $tag: $message"
         runCatching {
             executor.execute {
@@ -57,6 +70,21 @@ object DiagnosticsLog {
                 }.onFailure { Log.w(TAG, "Could not write diagnostics: ${it.message}") }
             }
         }
+    }
+
+    /**
+     * The file, or the result of one late attempt to find it.
+     *
+     * Called only while the path is still unknown, so a process that started before external
+     * storage was mounted recovers on its first record instead of staying blind for its whole
+     * life. The recovery is logged so it shows up in logcat rather than vanishing silently.
+     */
+    private fun lateInitFile(): File? {
+        val context = appContext ?: return null
+        val resolved = resolve(context) ?: return null
+        file = resolved
+        Log.i(TAG, "Diagnostics file ready at ${resolved.absolutePath} (late)")
+        return resolved
     }
 
     /** Where the file lives, for the settings screen and for support. */

@@ -16,6 +16,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // existing "copy report" path shows, so a crash at hang-up is diagnosable next time.
         CrashTrace.install()
         CrashTrace.reportPreviousCrash()
+        // The memory ring starts empty on every launch, and the call worth explaining usually ran in
+        // the previous one: iOS kills a backgrounded app, the person opens it to copy the report, and
+        // the failure is already out of memory. The file keeps it, so its tail is put back into the
+        // ring the copied report shows.
+        LogFile.replayTail()
         GatewayConnection.shared.start()
         VoipPush.shared.start()
         // SMS and missed-call notifications through Apple use the ordinary notification token
