@@ -39,8 +39,14 @@ internal object HotspotRestarter {
                 arrayOf(callbackType)
             ) { _, method, args ->
                 when (method.name) {
-                    "onTetheringStarted" -> Log.i(TAG, "Wi-Fi tethering started")
-                    "onTetheringFailed" -> Log.e(TAG, "Wi-Fi tethering failed: ${args?.firstOrNull()}")
+                    "onTetheringStarted" -> {
+                        Log.i(TAG, "Wi-Fi tethering started")
+                        record("Wi-Fi tethering started")
+                    }
+                    "onTetheringFailed" -> {
+                        Log.e(TAG, "Wi-Fi tethering failed: ${args?.firstOrNull()}")
+                        record("Wi-Fi tethering failed: ${args?.firstOrNull()}")
+                    }
                 }
                 null
             }
@@ -54,12 +60,24 @@ internal object HotspotRestarter {
             )
             method.invoke(manager, request, Executor { it.run() }, callback)
             Log.i(TAG, "Requested Wi-Fi tethering")
+            record("Requested Wi-Fi tethering")
         } catch (error: Exception) {
             Log.e(TAG, "Could not start Wi-Fi tethering", error)
+            record("Could not start Wi-Fi tethering: ${error.javaClass.simpleName}")
             val manager = context.getSystemService("tethering")
             Log.e(TAG, "Available start methods: " + manager?.javaClass?.methods
                 ?.filter { it.name.contains("Tether", ignoreCase = true) }
                 ?.joinToString { it.toString() })
         }
+    }
+
+    /**
+     * One line in the on-device diagnostics file.
+     *
+     * Without it "the hotspot never came on" cannot be told apart from "it came on and the iPhone
+     * did not join": logcat has the lines but the file is what survives a day on the phone.
+     */
+    private fun record(message: String) {
+        com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, message)
     }
 }
