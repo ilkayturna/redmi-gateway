@@ -31,6 +31,9 @@ final class AudioEngine {
 
     private let sampleRate: Double = 16_000
     private let frameSamples = 320
+    /// How many times a start is retried while the freshly activated session reports no input format.
+    /// 20 x 150 ms = 3 s, inside the Redmi's 8 s wait, so a retry that works still lands in time.
+    private let maxStartAttempts = 20
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let networkQueue = DispatchQueue(label: "com.ilkay.redmigateway.audio", qos: .userInteractive)
@@ -201,7 +204,9 @@ final class AudioEngine {
     }
 
     /// Called after CallKit activated the audio session and the Redmi answered audio_start.
-    func start(host: String, port: UInt16, session: UInt32, key: Data) {
+    ///
+    /// `attempt` only exists for the retry below; every caller uses the default.
+    func start(host: String, port: UInt16, session: UInt32, key: Data, attempt: Int = 1) {
         // A second start for the same session must not tear a working graph down and build it again.
         // Measured on 17.10.2026 at 14:10: one call asked for the transfer three times, every copy
         // ran the whole start again, and each restart cost an audio-route change plus seconds of
@@ -221,6 +226,16 @@ final class AudioEngine {
             log("Invalid audio endpoint")
             return
         }
+        // CallKit normally activates the session before it hands the call over; if it did not, the
+        // input node reports no format at all and every start below fails.
+        let audioSession = AVAudioSession.sharedInstance()
+        if !audioSession.isActive {
+            do {
+                try audioSession.setActive(true)
+            } catch {
+                log("Audio session could not be activated: \(error.localizedDescription)")
+            }
+        }
         captureLock.lock()
         let generation = capturePacer.generation
         captureLock.unlock()
@@ -237,7 +252,21 @@ final class AudioEngine {
                   let monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
                                                  channels: 1, interleaved: false),
                   let converter = AVAudioConverter(from: inputFormat, to: monoFormat) else {
-                log("Audio format unavailable")
+                // Measured on 22.10.2026 14:39: the person answered on the iPhone, CallKit handed the
+                // call over, and every start returned running=false with exactly this line. No PCM
+                // ever reached the Redmi, which took the audio back after eight seconds, so the whole
+                // conversation stayed on the Redmi. The input node can report no format for a moment
+                // right after the session is activated, and giving up at that instant loses the call.
+                let sessionInfo = AVAudioSession.sharedInstance()
+                log("Audio format unavailable (attempt \(attempt)/\(maxStartAttempts), " +
+                    "inputSr=\(inputFormat.sampleRate), channels=\(inputFormat.channelCount), " +
+                    "sessionSr=\(sessionInfo.sampleRate), active=\(sessionInfo.isActive))")
+                if attempt < maxStartAttempts, !running {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                        guard let self, !self.running else { return }
+                        self.start(host: host, port: port, session: session, key: key, attempt: attempt + 1)
+                    }
+                }
                 return
             }
             if inputFormat.channelCount > 1 { converter.channelMap = [0 as NSNumber] }
