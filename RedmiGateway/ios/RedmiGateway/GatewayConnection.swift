@@ -932,6 +932,8 @@ public final class GatewayConnection: ObservableObject {
         case "iphone":
             audioLocation = .iphone
             audioNotice = nil
+            // The audio is here: the post-answer retry loop can stop asking.
+            CallKitManager.shared.audioMovedToIPhone()
         case "preparing_iphone":
             audioLocation = .movingToIPhone
         default:
