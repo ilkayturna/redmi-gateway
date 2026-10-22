@@ -1,4 +1,4 @@
-# teslim-kapisi.ps1 - Teslim oncesi TEK komut: olculebilen her sey yesil mi?
+﻿# teslim-kapisi.ps1 - Teslim oncesi TEK komut: olculebilen her sey yesil mi?
 #
 # NEDEN VAR: Kullanici 22.10.2026'da hakli olarak sordu: "teslim etmeden once testi calistirip
 # hepsini yesil gordugun bir sey neden yok?". O gune kadar kanitlar tur tur elle toplaniyordu;
@@ -20,8 +20,8 @@ param(
     [switch]$Hotspot,
     [string]$Adb = 'C:\Users\ilkay.turna\platform-tools\adb.exe',
     [string]$Repo = 'C:\Users\ilkay.turna\source\repos\redmi-gateway',
-    [string]$BeklenenAndroidSurum = '2.0.5',
-    [int]$BeklenenVersionCode = 205,
+    [string]$BeklenenAndroidSurum = '2.0.6',
+    [int]$BeklenenVersionCode = 206,
     [string]$AscKlasor = 'C:\Users\ilkay.turna\Documents\asc-cli',
     [string]$AscAppId = '6816340544',
     [int]$HotspotButcesiSn = 8,
