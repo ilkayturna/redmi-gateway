@@ -121,10 +121,22 @@ object RedmiRinger {
         start("the answer was not confirmed")
     }
 
-    /** User pressed volume key or requested silencing ringer without ending the call. */
+    /**
+     * User pressed volume key or requested silencing ringer without ending the call.
+     *
+     * Recorded to the diagnostics file because this is the one path the person described from their
+     * own hand ("onumde arama ekrani varken ses tusuna bastigimda sesi kessin") and until now it left
+     * no trace anywhere: whether a key press actually reached the ringer could not be answered after
+     * the fact, so the behaviour could be neither proven nor debugged.
+     */
     fun silence() = handler.post {
         handler.removeCallbacks(ringNow)
+        val wasRinging = ringing
         stopSound()
+        com.ilkay.redmigateway.journal.DiagnosticsLog.record(
+            TAG,
+            "Redmi ringer silenced by the user (wasRinging=$wasRinging, callId=${if (callId != null) "set" else "none"})"
+        )
         runCatching {
             context.getSystemService(TelecomManager::class.java)?.silenceRinger()
         }.onFailure { Log.w(TAG, "Could not silence TelecomManager ringer: ${it.message}") }

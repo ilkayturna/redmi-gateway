@@ -554,7 +554,10 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         let rawId = callId ?? ""
         if !rawId.isEmpty, let existing = uuidByCallId[rawId] {
             // Bluetooth or the network showed it first. iOS still expects a report for every VoIP
-            // push; it answers "already exists" and the call stays as it is.
+            // push; it answers "already exists" and the call stays as it is. The ack is re-sent here
+            // on purpose: the Redmi is waiting for one, and without it the Redmi starts its fallback
+            // ring while this phone is already ringing - two phones ringing for one call.
+            GatewayConnection.shared.sendRingingAck(callId: rawId)
             provider.reportNewIncomingCall(with: existing, update: callUpdate(number: number ?? numbers[existing])) { _ in
                 completion()
             }
