@@ -38,8 +38,16 @@ object SmartHotspot {
     private const val CHECK_EVERY_MS = 20_000L
     /** How long a Wi-Fi network must hold before the hotspot is turned off again. */
     internal const val STABLE_MS = 15_000L
-    /** How long Wi-Fi must be gone before the hotspot is turned on. */
-    internal const val LOST_MS = 15_000L
+    /**
+     * How long Wi-Fi must be gone before the hotspot is turned on.
+     *
+     * Short on purpose. The wait only exists so a one-second drop does not tear the network down,
+     * and every second longer is a second the iPhone has no way back to this Redmi. Measured on
+     * 22.10.2026: with fifteen seconds here plus the twenty-second ticker, the hotspot came up 21 s
+     * after the Wi-Fi link dropped - the person had already concluded it was broken and turned the
+     * hotspot on by hand, which is exactly the work this rule is meant to remove.
+     */
+    internal const val LOST_MS = 5_000L
     private const val TRY_MS = 30_000L
     private const val SCAN_EVERY_MS = 60_000L
     /** The iPhone is on the hotspot: the same search continues, just on a slower cadence. */
@@ -149,6 +157,7 @@ object SmartHotspot {
         if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) return
         val ssid = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) (caps.transportInfo as? WifiInfo)?.ssid else null
         handler.post {
+            handler.removeCallbacks(startHotspotCheck)
             if (wifiNetwork != network) Log.i(TAG, "Wi-Fi with internet joined")
             wifiNetwork = network
             ssid?.let { remember(listOf(it)) }
@@ -161,10 +170,19 @@ object SmartHotspot {
             if (wifiNetwork == network) {
                 wifiNetwork = null
                 Log.i(TAG, "Wi-Fi lost")
+                // The ticker alone would leave the iPhone without a network for up to
+                // CHECK_EVERY_MS after the link is gone. One extra pass exactly at the threshold
+                // makes the hotspot appear as soon as the rule allows, instead of whenever the
+                // twenty-second tick happens to land.
+                handler.removeCallbacks(startHotspotCheck)
+                handler.postDelayed(startHotspotCheck, LOST_MS + 300)
             }
             evaluate()
         }
     }
+
+    /** Turns the hotspot on at the moment the rule allows it; see [wifiLost]. */
+    private val startHotspotCheck = Runnable { evaluate() }
 
     private val ticker = object : Runnable {
         override fun run() {
