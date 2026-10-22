@@ -81,7 +81,9 @@ final class AudioEngine {
     private var isInterrupted = false
     private var lastRecoveryRequest = Date.distantPast
     private(set) var isSessionPrepared = false
-    var isRunning: Bool { running }
+    /// The Swift flag can outlive the actual engine: an audio-route change stops AVAudioEngine
+    /// without touching `running`. Callers asking "is audio flowing?" must see the real state.
+    var isRunning: Bool { running && engine.isRunning }
 
     private init() {
         engine.attach(player)
@@ -110,12 +112,14 @@ final class AudioEngine {
             switch type {
             case .began:
                 self.isInterrupted = true
+                self.log("Audio interruption began (flag=\(self.running), engine=\(self.engine.isRunning))")
                 if self.running {
                     self.player.pause()
                     self.engine.pause()
                 }
             case .ended:
                 self.isInterrupted = false
+                self.log("Audio interruption ended (flag=\(self.running), engine=\(self.engine.isRunning))")
                 self.requestRecovery("interruption ended")
             @unknown default:
                 break
@@ -206,15 +210,27 @@ final class AudioEngine {
     /// Called after CallKit activated the audio session and the Redmi answered audio_start.
     ///
     /// `attempt` only exists for the retry below; every caller uses the default.
-    func start(host: String, port: UInt16, session: UInt32, key: Data, attempt: Int = 1) {
+    /// `force` is used only by recovery: a route or hardware change must rebuild the graph even
+    /// when the session id and key are unchanged.
+    func start(host: String, port: UInt16, session: UInt32, key: Data,
+               attempt: Int = 1, force: Bool = false) {
         // A second start for the same session must not tear a working graph down and build it again.
         // Measured on 17.10.2026 at 14:10: one call asked for the transfer three times, every copy
         // ran the whole start again, and each restart cost an audio-route change plus seconds of
         // silence - the 1.9 s handover the user waited for was three competing starts. The session
-        // id and key identify the same relay, so an identical request is a no-op.
-        if running, session == lastSession, key == lastKey {
+        // id and key identify the same relay, so an identical request is a no-op - but only while
+        // the engine is really running. On 22.10.2026 at 15:44 an audio-hardware change stopped
+        // the engine; recovery asked for a start, this guard saw the stale `running` flag, ignored
+        // it, and the call never got audio back. `force` (recovery) must always rebuild.
+        let wasRunning = running
+        let wasEngineRunning = engine.isRunning
+        if !force, wasRunning, wasEngineRunning, session == lastSession, key == lastKey {
             log("Audio engine already running for this session; duplicate start ignored")
             return
+        }
+        if force || wasRunning {
+            log("Audio engine rebuilding (force=\(force), flag=\(wasRunning), " +
+                "engine=\(wasEngineRunning), session=\(session))")
         }
         stop(preservingControls: true)
         guard microphoneAllowed else {
@@ -264,7 +280,8 @@ final class AudioEngine {
                 if attempt < maxStartAttempts, !running {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
                         guard let self, !self.running else { return }
-                        self.start(host: host, port: port, session: session, key: key, attempt: attempt + 1)
+                        self.start(host: host, port: port, session: session, key: key,
+                                   attempt: attempt + 1, force: force)
                     }
                 }
                 return
@@ -462,7 +479,7 @@ final class AudioEngine {
         let now = Date()
         guard now.timeIntervalSince(lastRecoveryRequest) > 1.5 else { return }
         lastRecoveryRequest = now
-        log("Rebuilding call audio: \(reason)")
+        log("Rebuilding call audio: \(reason) (flag=\(running), engine=\(engine.isRunning))")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.onNeedsRestart?() }
     }
 
