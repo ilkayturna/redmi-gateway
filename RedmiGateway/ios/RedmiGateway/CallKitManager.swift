@@ -284,8 +284,23 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     func recoverCallAudio() {
-        guard audioActivated, let uuid = audioCallUuid, isAudioEligible(uuid), let endpoint,
-              GatewayConnection.shared.isAuthenticated else { return }
+        guard audioActivated else {
+            audioPathLog("recover skipped: audio session not active")
+            return
+        }
+        guard let uuid = audioCallUuid, isAudioEligible(uuid) else {
+            audioPathLog("recover skipped: no eligible call")
+            return
+        }
+        guard let endpoint else {
+            audioPathLog("recover skipped: no audio endpoint")
+            return
+        }
+        guard GatewayConnection.shared.isAuthenticated else {
+            audioPathLog("recover skipped: link not authenticated")
+            return
+        }
+        audioPathLog("recover: restarting the audio engine")
         startEngine(endpoint, force: true)
     }
 
@@ -293,12 +308,14 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         let host = GatewayConnection.shared.connectedHost
         if !force, AudioEngine.shared.isRunning, let running = runningEndpoint,
            running.host == host, running.session == endpoint.session, running.port == endpoint.port {
+            audioPathLog("engine already running for this endpoint; duplicate start ignored")
             return
         }
         // The engine builds and starts synchronously here; its duration is the biggest single part
         // of the iPhone's firstPcm, so it is measured from the answer tap on both sides.
         audioPathLog("engine start called")
-        AudioEngine.shared.start(host: host, port: endpoint.port, session: endpoint.session, key: endpoint.key)
+        AudioEngine.shared.start(host: host, port: endpoint.port, session: endpoint.session,
+                                 key: endpoint.key, force: force)
         if AudioEngine.shared.isRunning {
             runningEndpoint = (host: host, session: endpoint.session, port: endpoint.port)
             audioPathLog("engine.start() returned (running=true)")
@@ -861,6 +878,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+        audioPathLog("didDeactivate received; stopping call audio")
         audioActivated = false
         stopAudio()
     }
