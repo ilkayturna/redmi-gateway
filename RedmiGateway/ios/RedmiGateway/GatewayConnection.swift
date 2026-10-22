@@ -852,7 +852,12 @@ public final class GatewayConnection: ObservableObject {
     /// learns about calls.
     private func applyBluetoothCallState(_ update: BLECallState) {
         log("Bluetooth call state: \(update.state)")
-        guard !(state == .authenticated && UIApplication.shared.applicationState == .active) else { return }
+        // The network link is authoritative in the foreground, but only while it is really carrying
+        // messages. A socket that merely looks authenticated after the network changed would hide a
+        // new incoming call, so a ringing call is applied from Bluetooth as well; the call id
+        // deduplicates the second copy when both transports deliver it.
+        let networkIsAuthoritative = state == .authenticated && UIApplication.shared.applicationState == .active
+        if networkIsAuthoritative && update.state != "ringing" { return }
         if (update.smsSeq ?? 0) > history.smsSeq || (update.callsSeq ?? 0) > history.callsSeq {
             catchUp(reason: "new messages or calls")
         }
@@ -1274,11 +1279,64 @@ public final class GatewayConnection: ObservableObject {
     }
 
     /// Technical log for Advanced > Diagnostics. Never contains numbers, message text or keys.
+    ///
+    /// Every line also goes to a file. The failure worth explaining happens while the app is in the
+    /// background, and iOS can kill it before anyone copies the memory ring: on 22.10.2026 a whole
+    /// failed incoming call left nothing readable behind.
     func log(_ message: String) {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
-        logs.append("[\(formatter.string(from: Date()))] \(message)")
+        let line = "[\(formatter.string(from: Date()))] \(message)"
+        logs.append(line)
         if logs.count > 200 { logs.removeFirst(logs.count - 200) }
+        LogFile.append(line + "\n")
+    }
+}
+
+/// The diagnostics log on disk, written off the main actor.
+///
+/// Kept outside the connection type on purpose: that type is main-actor isolated, and a file write
+/// from there would either block the interface or need an isolation hop per line. The file is
+/// capped and rotated once, so it cannot grow without bound on a phone that runs for weeks.
+enum LogFile {
+    private static let queue = DispatchQueue(label: "com.ilkay.redmigateway.logfile", qos: .utility)
+    private static let maxBytes = 512 * 1024
+
+    static var url: URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("app-log.txt")
+    }
+
+    static func append(_ text: String) {
+        queue.async { write(text) }
+    }
+
+    private static func write(_ text: String) {
+        guard let url else { return }
+        if let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber,
+           size.intValue > maxBytes {
+            let previous = url.deletingLastPathComponent().appendingPathComponent("app-log.1.txt")
+            try? FileManager.default.removeItem(at: previous)
+            try? FileManager.default.moveItem(at: url, to: previous)
+        }
+        let data = Data(text.utf8)
+        if let handle = try? FileHandle(forWritingTo: url) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    /// Puts the end of the previous run's file back into the memory ring at launch.
+    @MainActor
+    static func replayTail(_ lines: Int = 40) {
+        guard let url, let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+        let tail = text.split(separator: "\n").suffix(lines)
+        guard !tail.isEmpty else { return }
+        GatewayConnection.shared.log("Previous run (last \(tail.count) log lines)")
+        for line in tail { GatewayConnection.shared.log("  " + line) }
     }
 }
 

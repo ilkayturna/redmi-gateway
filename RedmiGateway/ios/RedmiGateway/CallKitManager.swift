@@ -97,8 +97,15 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             if !incoming.contains(uuid) && !outgoing.contains(uuid) {
                 incoming.insert(uuid)
                 reportIncoming(uuid: uuid, rawId: rawId, number: numbers[uuid])
-            } else if let number = event.number, !number.isEmpty, incoming.contains(uuid) {
-                provider.reportCall(with: uuid, updated: callUpdate(number: number))
+            } else if incoming.contains(uuid) {
+                // The Redmi repeats the live call state on every authentication. Sending the
+                // confirmation again here is what recovers a ringing_ack that died with the socket
+                // it travelled on: measured on 22.10.2026 the socket closed 1.3 s after it opened,
+                // so the Redmi never learned that this iPhone was already showing the call.
+                GatewayConnection.shared.sendRingingAck(callId: rawId)
+                if let number = event.number, !number.isEmpty {
+                    provider.reportCall(with: uuid, updated: callUpdate(number: number))
+                }
             }
             // Answered here, and the Redmi took that announcement back: the radio never confirmed,
             // so nobody is on the call and it is really ringing on the Redmi again. Close this
@@ -565,6 +572,11 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         provider.reportNewIncomingCall(with: uuid, update: callUpdate(number: number)) { error in
             Task { @MainActor in
                 let manager = CallKitManager.shared
+                if let error {
+                    // This was the silent branch: a refused push call left neither a ring nor a
+                    // line in the log, so a day of failed rings looked like "nothing arrived".
+                    GatewayConnection.shared.log("CallKit refused the pushed call: \((error as NSError).code)")
+                }
                 if error != nil || rawId.isEmpty {
                     // Unreadable push or a call that already ended: close it again.
                     manager.end(uuid, reason: .failed)
@@ -609,15 +621,9 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     private func reportIncoming(uuid: UUID, rawId: String, number: String?) {
-        AudioEngine.shared.prepareSession()
-        // The audio path starts here: the user still has to answer, so warming the graph now hides
-        // its cost completely (measured: the voice-processing setup is the biggest single part of
-        // the iPhone's firstPcm). Nothing captures audio yet - the engine stays stopped.
-        audioPathStartedAt = Date()
-        audioPathLog("call presented")
-        audioPathLog("warmUp called")
-        AudioEngine.shared.warmUp()
-        audioPathLog("warmUp finished")
+        // The CallKit report goes first. It is the ring the person sees and the confirmation the
+        // Redmi waits for, and a background wake has a short budget: anything slow in front of it
+        // (the voice-processing setup used to be here) can delay or swallow the ring itself.
         provider.reportNewIncomingCall(with: uuid, update: callUpdate(number: number)) { error in
             Task { @MainActor in
                 if let error {
@@ -627,8 +633,21 @@ final class CallKitManager: NSObject, CXProviderDelegate {
                     // The Redmi may now ring quietly: this iPhone is showing the call.
                     GatewayConnection.shared.sendRingingAck(callId: rawId)
                 }
+                // Nothing captures audio here; the engine only starts after CallKit activates the
+                // session. Warming now still hides the cost of answering the call.
+                CallKitManager.shared.warmIncomingAudio()
             }
         }
+    }
+
+    /// Builds the audio graph while the person is still deciding, so answering does not pay for it.
+    private func warmIncomingAudio() {
+        AudioEngine.shared.prepareSession()
+        audioPathStartedAt = Date()
+        audioPathLog("call presented")
+        audioPathLog("warmUp called")
+        AudioEngine.shared.warmUp()
+        audioPathLog("warmUp finished")
     }
 
     // MARK: - Starting calls from the iPhone

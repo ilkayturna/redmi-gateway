@@ -43,7 +43,16 @@ object IncomingCallPresenter {
             onChanged?.invoke()
             return
         }
-        if (CallManager.currentCallState != "ringing" || callId != CallManager.currentCallId) return
+        if (CallManager.currentCallState != "ringing" || callId != CallManager.currentCallId) {
+            // The iPhone says it shows the call, but this Redmi cannot match that confirmation to
+            // the call it is ringing. Without this line the ack was dropped in silence and the log
+            // could not tell "the iPhone never answered" apart from "the answer did not match".
+            CallManager.log(
+                "iPhone ringing_ack ignored: callId=${callId.ifEmpty { "<empty>" }}, " +
+                    "current=${CallManager.currentCallId ?: "<none>"}, state=${CallManager.currentCallState}"
+            )
+            return
+        }
         presentedOnIPhoneCallId = callId
         CallManager.log("Incoming call is showing on the iPhone")
         onChanged?.invoke()
