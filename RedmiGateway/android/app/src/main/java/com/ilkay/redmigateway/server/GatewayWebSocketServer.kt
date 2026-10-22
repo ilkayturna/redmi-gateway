@@ -11,6 +11,7 @@ import com.ilkay.redmigateway.RedmiGatewayApp
 import com.ilkay.redmigateway.audio.CallAudioLab
 import com.ilkay.redmigateway.audio.CallAudioRelay
 import com.ilkay.redmigateway.journal.CallJournal
+import com.ilkay.redmigateway.journal.IphoneDiagnostics
 import com.ilkay.redmigateway.journal.SmsJournal
 import com.ilkay.redmigateway.security.BridgeCrypto
 import com.ilkay.redmigateway.security.PairingStore
@@ -49,6 +50,11 @@ class GatewayWebSocketServer(
         const val MIN_PROTOCOL = 1
         private const val MAX_FAILURES = 5
         private const val LOCKOUT_MS = 60_000L
+        /** Keys the iPhone reports in its `client_status` snapshot, written in this order. */
+        private val STATUS_KEYS = listOf(
+            "appVersion", "appBuild", "appState", "callkit", "audio", "mic", "notify",
+            "ble", "battery", "thermal", "lowPower", "network"
+        )
 
         @Volatile var current: GatewayWebSocketServer? = null
             private set
@@ -79,6 +85,10 @@ class GatewayWebSocketServer(
         val connectedAt = SystemClock.elapsedRealtime()
         @Volatile var lastMessageAt = connectedAt
         @Volatile var authenticatedAt = 0L
+        // Which iPhone build is on the other end. Without it a ring that failed cannot be tied to a
+        // build, and "the new one is installed" stays a guess made from the TestFlight screen.
+        @Volatile var appVersion = ""
+        @Volatile var appBuild = ""
     }
 
     private data class Failures(var count: Int, var lockedUntil: Long)
@@ -132,13 +142,22 @@ class GatewayWebSocketServer(
         if (peer != null) {
             val sessionMs = SystemClock.elapsedRealtime() - peer.connectedAt
             val sinceLastMessageMs = SystemClock.elapsedRealtime() - peer.lastMessageAt
+            val verdict = classifyClose(peer.authenticated, code, remote, sinceLastMessageMs)
             Log.i(
                 TAG,
                 "WebSocket closed code=$code remote=$remote authenticated=${peer.authenticated} " +
                     "protocol=${peer.protocol} sessionMs=$sessionMs " +
                     "sinceLastMessageMs=$sinceLastMessageMs " +
-                    "verdict=${classifyClose(peer.authenticated, code, remote, sinceLastMessageMs)} " +
+                    "verdict=$verdict " +
                     "reason=${reason?.take(120) ?: "none"}"
+            )
+            // The same line into the persistent file: the iPhone drops and re-opens this socket
+            // constantly, and logcat is gone by the time the day's calls are reviewed.
+            IphoneDiagnostics.record(
+                "iPhone-link",
+                "closed code=$code remote=$remote verdict=$verdict sessionMs=$sessionMs " +
+                    "sinceLastMessageMs=$sinceLastMessageMs authenticated=${peer.authenticated} " +
+                    "app=${peer.appVersion.ifBlank { "?" }}/${peer.appBuild.ifBlank { "?" }}"
             )
         } else {
             Log.i(TAG, "WebSocket closed code=$code remote=$remote peer=unknown")
@@ -290,6 +309,8 @@ class GatewayWebSocketServer(
             // Every later frame in both directions is sealed.
             peer.channel = SecureChannel(BridgeCrypto.derive(sessionKey, "ws"), isGateway = true)
             peer.authenticated = true
+            peer.appVersion = json.optString("appVersion")
+            peer.appBuild = json.optString("appBuild")
             onAuthenticated(peer)
             return
         }
@@ -303,6 +324,8 @@ class GatewayWebSocketServer(
             failures.remove(remoteIp(peer))
             peer.protocol = 1
             peer.authenticated = true
+            peer.appVersion = json.optString("appVersion")
+            peer.appBuild = json.optString("appBuild")
             sendPlain(conn, result.put("success", true).put("message", "Authenticated successfully"))
             onAuthenticated(peer)
         } else {
@@ -313,7 +336,16 @@ class GatewayWebSocketServer(
 
     private fun onAuthenticated(peer: Peer) {
         peer.authenticatedAt = SystemClock.elapsedRealtime()
-        CallManager.log("iPhone connected (protocol ${peer.protocol})")
+        // The prefix is kept exactly so existing log greps keep matching; the build is appended
+        // inside the parenthesis because "which iPhone is connected" has to be answerable from the
+        // device, not from the TestFlight screen.
+        val version = if (peer.appVersion.isBlank()) "" else ", app ${peer.appVersion}/${peer.appBuild}"
+        CallManager.log("iPhone connected (protocol ${peer.protocol}$version)")
+        IphoneDiagnostics.record(
+            "iPhone",
+            "linked app=${peer.appVersion.ifBlank { "?" }} build=${peer.appBuild.ifBlank { "?" }} " +
+                "protocol=${peer.protocol}"
+        )
         serverListener?.onClientCountChanged(authenticatedCount())
         val state = CallManager.currentCallState
         if (state != "idle") send(peer, callEvent(CallManager.currentCallId ?: "", state, CallManager.currentPhoneNumber))
@@ -374,6 +406,33 @@ class GatewayWebSocketServer(
             "sync" -> sync(peer, json.optLong("callsAfter", 0), json.optLong("smsAfter", 0))
             "get_sms_history" -> legacySmsHistory(peer, json.optLong("afterId", 0))
             "diagnostics" -> send(peer, DiagnosticsReport.build(context).put("type", "diagnostics_result"))
+            // Telemetry the iPhone pushes about itself. It has no USB debugging, so these two
+            // frames are the only way its own log and state become readable: they land in
+            // iphone-diagnostics.log next to the call log and are pulled with adb. No reply is
+            // sent on purpose - an ack would double the traffic for every batch.
+            "client_log" -> runCatching {
+                val app = json.optString("appVersion").ifBlank { "?" }
+                val build = json.optString("appBuild").ifBlank { "?" }
+                val label = "iPhone[$app/$build]"
+                val dropped = json.optInt("dropped", 0)
+                if (dropped > 0) {
+                    IphoneDiagnostics.record(label, "telemetry dropped $dropped lines before this batch")
+                }
+                val lines = json.optJSONArray("lines") ?: JSONArray()
+                val limit = minOf(lines.length(), IphoneDiagnostics.MAX_LINES_PER_FRAME)
+                for (index in 0 until limit) {
+                    val text = lines.optString(index)
+                    if (text.isNotBlank()) IphoneDiagnostics.record(label, text)
+                }
+            }.onFailure { Log.w(TAG, "client_log could not be stored", it) }
+            "client_status" -> runCatching {
+                val parts = ArrayList<String>(STATUS_KEYS.size)
+                for (key in STATUS_KEYS) {
+                    val value = json.opt(key)
+                    if (value != null && value.toString().isNotBlank()) parts.add("$key=$value")
+                }
+                IphoneDiagnostics.record("iPhone-status", parts.joinToString(" "))
+            }.onFailure { Log.w(TAG, "client_status could not be stored", it) }
             "push_token" -> {
                 // For calls and messages while the iPhone is away (Apple push); protocol 2 only.
                 if (peer.protocol >= 2) com.ilkay.redmigateway.push.ApnsSender.setDeviceToken(json.optString("token"))

@@ -44,6 +44,9 @@ class RedmiGatewayApp : Application() {
         // Call events are also written to a file the phone can hand over without a cable.
         com.ilkay.redmigateway.journal.DiagnosticsLog.init(this)
         com.ilkay.redmigateway.journal.DiagnosticsLog.record("App", "diagnostics started")
+        // The iPhone cannot be cabled to a computer; its own log arrives over the sealed socket and
+        // is written to a second file so adb can read it without anyone copying a report by hand.
+        com.ilkay.redmigateway.journal.IphoneDiagnostics.init(this)
     }
 }
 
