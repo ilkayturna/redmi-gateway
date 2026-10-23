@@ -113,7 +113,10 @@ class UplinkJitterBufferTest {
         buffer.offer(frame(8), 460)
         assertNull(buffer.poll(460))
         buffer.offer(frame(9), 480)
-        assertEquals(5, buffer.poll(480)!![0].toInt())
+        buffer.offer(frame(10), 500)
+        buffer.offer(frame(11), 520)
+        buffer.offer(frame(12), 540)
+        assertEquals(5, buffer.poll(540)!![0].toInt())
     }
 
     // Catches dropped/reordered speech or false underflows on a paced, lossless stream.
@@ -196,11 +199,14 @@ class UplinkJitterBufferTest {
         buffer.offer(frame(4), 130L)
         assertNull(buffer.poll(140L))
 
-        // Once 4 frames accumulate, buffer re-primes and plays
+        // The 130 ms gap raised the target to seven frames, so the reserve is six; once six
+        // frames accumulate, the buffer re-primes and plays.
         buffer.offer(frame(5), 150L)
         buffer.offer(frame(6), 170L)
-        buffer.offer(frame(7), 190L) // 4th queued frame triggers priming
-        assertEquals(4, buffer.poll(190L)!![0].toInt())
+        buffer.offer(frame(7), 190L)
+        buffer.offer(frame(8), 210L)
+        buffer.offer(frame(9), 230L)
+        assertEquals(4, buffer.poll(230L)!![0].toInt())
     }
 
     // Catches a hard limit that lets the queue sit above the documented ceiling: a burst must never
