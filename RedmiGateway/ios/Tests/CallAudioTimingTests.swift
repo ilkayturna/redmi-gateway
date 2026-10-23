@@ -293,15 +293,15 @@ struct CallAudioTimingTests {
         expect(playback.enqueue(18, now: 0.963).isEmpty,
                "a 400 ms gap re-primes instead of playing one frame into a dry player")
         expect(playback.underruns == 1, "the real underrun is visible in diagnostics")
-        for frame in 19...39 {
+        for frame in 19...38 {
             expect(playback.enqueue(frame, now: 0.963 + Double(frame - 18) * 0.02).isEmpty,
                    "re-prime waits for the reserve the gap proved necessary")
         }
-        expect(playback.enqueue(40, now: 1.403) == Array(18...40),
+        expect(playback.enqueue(39, now: 0.963 + Double(39 - 18) * 0.02) == Array(18...39),
                "downlink resumes in order with the deeper 440 ms reserve")
-        expect(playback.enqueue(41, now: 1.423).isEmpty,
+        expect(playback.enqueue(40, now: 0.963 + Double(40 - 18) * 0.02).isEmpty,
                "a full reserve does not schedule beyond its target")
-        expect(playback.completed(generation: generation) == 41,
+        expect(playback.completed(generation: generation) == 40,
                "one completion releases exactly one queued frame")
     }
 

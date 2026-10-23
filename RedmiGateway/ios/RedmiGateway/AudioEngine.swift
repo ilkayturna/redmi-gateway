@@ -393,8 +393,8 @@ final class AudioEngine {
             socket.start(queue: self.networkQueue)
 
             // Each one-shot uses the pacer's nominal deadline, accounting for handler
-            // cost. A real stall starts a new phase; a measured backlog drains at catch-up
-            // pace so it cannot grow into the overflow that lost speech in build 126.
+            // cost. A measured backlog drains at catch-up pace so it cannot grow into the
+            // overflow that lost speech in build 126; an empty queue waits for microphone data.
             let captureTimer = DispatchSource.makeTimerSource(queue: self.networkQueue)
             captureTimer.schedule(deadline: .now() + .milliseconds(20), leeway: .milliseconds(1))
             captureTimer.setEventHandler { [weak self, weak socket] in

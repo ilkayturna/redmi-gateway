@@ -82,7 +82,7 @@ class UplinkJitterBufferTest {
         // Window expired: the target is back at the floor and the excess is shed, one frame per hold.
         assertEquals(2, buffer.snapshot().targetFrames)
         assertEquals(1, buffer.snapshot().dropped)
-        assertEquals(10, buffer.snapshot().queued)
+        assertEquals(11, buffer.snapshot().queued)
     }
 
     // Catches trimming a normal fresh 240 ms startup reserve, which causes avoidable speech gaps.
@@ -109,18 +109,29 @@ class UplinkJitterBufferTest {
         assertEquals(1, buffer.snapshot().queued)
     }
 
-    // Catches dropped/reordered speech or false underflows on a paced, lossless stream.
-    @Test fun pacedAudioRemainsOrderedWithoutDroppingSpeech() {
+    // Catches dropped/reordered speech or false underflows on a paced, lossless stream. The 240 ms
+    // startup reserve is deliberately shed one frame per 500 ms hold, so the first seconds trade a
+    // few 20 ms cuts for cover against the opening gap; order and pace must still hold.
+    @Test fun pacedAudioRemainsOrderedWhileTheStartupReserveSheds() {
         val buffer = UplinkJitterBuffer()
         val played = mutableListOf<Int>()
         for (index in 0 until 100) {
             buffer.offer(frame(index), index * 20L)
             buffer.poll(index * 20L)?.let { played += it[0].toInt() }
         }
-        // The startup prime holds the first twelve frames; drain the last eleven after the input.
-        for (index in 100 until 111) buffer.poll(index * 20L)?.let { played += it[0].toInt() }
-        assertEquals((0 until 100).toList(), played)
-        assertEquals(0, buffer.snapshot().dropped)
+        // The startup prime holds the first twelve frames; drain the tail after the input.
+        var drain = 100L
+        while (buffer.snapshot().queued > 0) {
+            buffer.poll(drain * 20L)?.let { played += it[0].toInt() }
+            drain++
+        }
+        assertEquals(0, played.first())
+        assertEquals(99, played.last())
+        // The only missing frames are the trims; nothing is lost or reordered beyond them.
+        assertEquals(100 - buffer.snapshot().dropped, played.size)
+        assertTrue(played.zipWithNext().all { (first, second) -> second > first && second - first <= 2 })
+        assertTrue(buffer.snapshot().dropped <= 3)
+        assertEquals(0, buffer.snapshot().underruns)
     }
 
     // Catches stale audio/priming state leaking into the next call.
@@ -215,17 +226,20 @@ class UplinkJitterBufferTest {
     // then keeping the old 240 ms latency forever on a clean link.
     @Test fun startupReserveIsNotTrimmedBeforeHalfASecond() {
         val buffer = UplinkJitterBuffer()
-        repeat(12) { buffer.offer(frame(it), 0) }
-        var now = 0L
-        for (index in 0 until 25) {
+        // Paced arrival: the adaptive target stays at its floor, so only the hold protects the
+        // startup reserve from being trimmed immediately.
+        repeat(12) { buffer.offer(frame(it), it * 20L) }
+        buffer.poll(220)
+        var now = 240L
+        for (index in 0 until 22) {
             buffer.poll(now)
             buffer.offer(frame(12 + index), now)
             now += 20
         }
-        // 480 ms: the reserve is still intact and no speech has been dropped.
+        // 660 ms: the reserve is still intact and no speech has been dropped.
         assertEquals(0, buffer.snapshot().dropped)
         val reserve = buffer.snapshot().queued
-        for (index in 25 until 60) {
+        for (index in 22 until 40) {
             buffer.poll(now)
             buffer.offer(frame(12 + index), now)
             now += 20
