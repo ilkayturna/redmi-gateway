@@ -24,7 +24,7 @@ struct CallAudioTimingTests {
         delayedCallbackCannotReplayMutedInterval()
         staleAndOverflowingCaptureIsDiscarded()
         staleCaptureCannotEnterRestartedStream()
-        playbackResumesWithoutRebufferingShortGaps()
+        playbackStartsWithJitterReserveAndReprimesAfterAGap()
         oldPlaybackCompletionCannotDrainNewStream()
         playbackCapacityStaysBounded()
         if failures != 0 { print("\(failures) audio timing regression(s)"); exit(1) }
@@ -254,36 +254,56 @@ struct CallAudioTimingTests {
         expect(pacer.next(now: 0.3) == 7, "new stream accepts its own capture")
     }
 
-    // Break caught (the same defect on the receiving side): completed() re-armed the three-frame
-    // reserve every time the device finished the last scheduled frame, so a steady downlink was
-    // handed to the player in clumps with holes. A caught-up downlink resumes with the next frame;
-    // only a real outage (over half a second without frames) rebuilds the reserve.
-    static func playbackResumesWithoutRebufferingShortGaps() {
+    // Break caught: the measured hotspot delivered 160 ms gaps after a 20 ms cadence. A three-frame
+    // (60 ms) reserve could not cover one, so every stall reached the speaker as a hole. Eight
+    // frames (160 ms) cover the gap; after the player really runs dry, four frames resume it without
+    // adding a second full-length pause.
+    static func playbackStartsWithJitterReserveAndReprimesAfterAGap() {
         var playback = CallAudioPlaybackBuffer<Int>()
-        expect(playback.enqueue(1, now: 0).isEmpty, "first downlink frame waits")
-        expect(playback.enqueue(2, now: 0.02).isEmpty, "second downlink frame waits")
-        expect(playback.enqueue(3, now: 0.04) == [1, 2, 3], "downlink starts with reserve")
+        for frame in 1...7 {
+            expect(playback.enqueue(frame, now: Double(frame - 1) * 0.02).isEmpty,
+                   "downlink keeps building the jitter reserve")
+        }
+        expect(playback.enqueue(8, now: 0.14) == Array(1...8),
+               "downlink starts with the measured 160 ms reserve")
         let generation = playback.generation
-        for _ in 0..<3 { playback.completed(generation: generation) }
-        expect(playback.enqueue(4, now: 0.2) == [4], "a caught-up downlink resumes with the next frame")
-        expect(playback.enqueue(5, now: 0.22) == [5], "steady downlink keeps flowing without a new reserve")
-        expect(playback.enqueue(6, now: 0.9).isEmpty, "a real outage restores the downlink reserve")
-        expect(playback.enqueue(7, now: 0.92).isEmpty, "the reserve rebuilds")
-        expect(playback.enqueue(8, now: 0.94) == [6, 7, 8], "the downlink restarts in order")
+        for _ in 0..<8 { playback.completed(generation: generation) }
+        expect(playback.enqueue(9, now: 0.30).isEmpty,
+               "a 160 ms gap re-primes instead of playing one frame into a dry player")
+        expect(playback.enqueue(10, now: 0.32).isEmpty, "re-prime waits for four frames")
+        expect(playback.enqueue(11, now: 0.34).isEmpty, "third re-prime frame")
+        expect(playback.enqueue(12, now: 0.36) == [9, 10, 11, 12],
+               "downlink resumes in order with a short reserve")
+        expect(playback.underruns == 1, "the real underrun is visible in diagnostics")
+        expect(playback.maxArrivalGapMs >= 160, "the arrival gap is visible in diagnostics")
+        expect(playback.enqueue(13, now: 0.38) == [13], "steady downlink keeps flowing")
+        for _ in 0..<5 { playback.completed(generation: generation) }
+        expect(playback.enqueue(14, now: 0.90).isEmpty,
+               "a half-second outage restores the startup reserve")
+        for frame in 15...20 {
+            expect(playback.enqueue(frame, now: 0.90 + Double(frame - 14) * 0.02).isEmpty,
+                   "outage reserve rebuilds")
+        }
+        expect(playback.enqueue(21, now: 1.04) == Array(14...21),
+               "post-outage downlink restarts with the full reserve")
+        expect(playback.enqueue(22, now: 1.06) == [22],
+               "downlink keeps flowing after the outage reserve")
     }
 
     // Break caught: an AVAudioPlayerNode completion from before stop mutating a new stream.
     static func oldPlaybackCompletionCannotDrainNewStream() {
         var playback = CallAudioPlaybackBuffer<Int>()
         let old = playback.generation
-        _ = playback.enqueue(1, now: 0); _ = playback.enqueue(2, now: 0.02)
-        _ = playback.enqueue(3, now: 0.04)
+        for frame in 1...8 { _ = playback.enqueue(frame, now: Double(frame - 1) * 0.02) }
         playback.reset()
-        _ = playback.enqueue(4, now: 0.1); _ = playback.enqueue(5, now: 0.12)
-        expect(playback.enqueue(6, now: 0.14) == [4, 5, 6], "new playback starts")
-        for _ in 0..<3 { playback.completed(generation: old) }
-        expect(playback.scheduledFrames == 3, "old completions leave new playback untouched")
-        expect(playback.enqueue(7, now: 0.16) == [7], "old completions cannot force false rebuffer")
+        for frame in 4...11 {
+            _ = playback.enqueue(frame, now: 0.1 + Double(frame - 4) * 0.02)
+        }
+        expect(playback.enqueue(12, now: 0.26) == Array(4...12), "new playback starts")
+        for _ in 0..<8 { playback.completed(generation: old) }
+        expect(playback.scheduledFrames == 9, "old completions leave new playback untouched")
+        expect(playback.enqueue(13, now: 0.28) == [13],
+               "old completions cannot force false rebuffer")
     }
 
     // Break caught: scheduling an unbounded amount of stale playback into AVAudioPlayerNode.

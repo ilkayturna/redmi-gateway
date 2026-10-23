@@ -21,14 +21,19 @@ class UplinkJitterBufferTest {
         assertEquals(0, buffer.snapshot().underruns)
     }
 
-    // Catches premature restart after a gap, which leaves only 20 ms of jitter headroom. A paced
-    // link keeps the adaptive target at its two frame floor, so two frames are the reserve.
-    @Test fun speechStartsOnlyAfterTwoFramesOnAPacedLink() {
+    // Catches premature restart after a gap, which leaves only 40-60 ms of jitter headroom. A paced
+    // link keeps the adaptive target at its two frame floor, but the startup reserve is four frames
+    // (80 ms), enough for the measured link's ordinary scheduling jitter.
+    @Test fun speechStartsOnlyAfterFourFramesOnAPacedLink() {
         val buffer = UplinkJitterBuffer()
         buffer.offer(frame(0), 0)
         assertNull(buffer.poll(0))
         buffer.offer(frame(1), 20)
-        assertEquals(0, buffer.poll(20)!![0].toInt())
+        assertNull(buffer.poll(20))
+        buffer.offer(frame(2), 40)
+        assertNull(buffer.poll(40))
+        buffer.offer(frame(3), 60)
+        assertEquals(0, buffer.poll(60)!![0].toInt())
     }
 
     // Catches an unbounded backlog replaying stale speech after a long network burst.
@@ -54,22 +59,23 @@ class UplinkJitterBufferTest {
 
     // Catches the two failures of an adaptive target: keeping a one-off burst's latency forever,
     // and shedding the depth a bursty link just proved it needs before that link was idle long
-    // enough to forget the burst.
-    @Test fun burstRaisesTheTargetAndFourQuietSecondsLetItDecay() {
+    // enough to forget the burst. The measured link repeats a 160 ms stall well after four seconds,
+    // so the window is ten seconds.
+    @Test fun burstRaisesTheTargetAndTenQuietSecondsLetItDecay() {
         val buffer = UplinkJitterBuffer()
         repeat(10) { buffer.offer(frame(it), 0) }
         assertEquals(11, buffer.snapshot().targetFrames)
         var next = 10
         var now = 20L
-        while (now < 4_000) {
+        while (now < 10_000) {
             assertTrue(buffer.poll(now) != null)
             buffer.offer(frame(next++), now)
             now += 20
         }
-        // The burst is still inside the four second window: the depth it asked for is kept.
+        // The burst is still inside the ten second window: the depth it asked for is kept.
         assertEquals(11, buffer.snapshot().targetFrames)
         assertEquals(0, buffer.snapshot().dropped)
-        while (now <= 5_000) {
+        while (now <= 10_560) {
             assertTrue(buffer.poll(now) != null)
             buffer.offer(frame(next++), now)
             now += 20
@@ -105,7 +111,9 @@ class UplinkJitterBufferTest {
         buffer.offer(frame(7), 440)
         assertNull(buffer.poll(440))
         buffer.offer(frame(8), 460)
-        assertEquals(5, buffer.poll(460)!![0].toInt())
+        assertNull(buffer.poll(460))
+        buffer.offer(frame(9), 480)
+        assertEquals(5, buffer.poll(480)!![0].toInt())
     }
 
     // Catches dropped/reordered speech or false underflows on a paced, lossless stream.
@@ -255,9 +263,9 @@ class UplinkJitterBufferTest {
         assertEquals(2, buffer.snapshot().targetFrames)
     }
 
-    // Catches a memory ring too small to hold a full four second window of this link's traffic.
+    // Catches a memory ring too small to hold a full ten second window of this link's traffic.
     // The clumped link records about one observation per frame, so a 32 slot ring forgot the spike
-    // after ~1.3 s while the window promises four; the target then fell back to the clump's need -
+    // after ~1.3 s while the window promises ten; the target then fell back to the clump's need -
     // the measured "gap=338 ms but targetFrames=6".
     @Test fun theMemoryRingHoldsAFullWindowOfClumpedTraffic() {
         val buffer = UplinkJitterBuffer()
@@ -267,10 +275,10 @@ class UplinkJitterBufferTest {
         assertEquals(12, buffer.snapshot().targetFrames)
 
         // Clumped traffic for the rest of the window: four frames every 100 ms, which is four
-        // qualifying observations per clump and ~136 of them inside the four second window.
+        // qualifying observations per clump and ~340 of them inside the ten second window.
         var index = 3
         var now = 438L
-        while (now <= 3_800) {
+        while (now <= 9_800) {
             repeat(4) { buffer.offer(frame(index++), now) }
             repeat(4) { buffer.poll(now + it * 20L) }
             now += 100
@@ -296,12 +304,12 @@ class UplinkJitterBufferTest {
         // Three seconds of paced audio later the silence is still remembered.
         assertEquals(12, buffer.snapshot().targetFrames)
 
-        while (now < 338 + 4_500) {
+        while (now < 338 + 10_500) {
             buffer.offer(frame(index++), now)
             buffer.poll(now)
             now += 20
         }
-        // Past the four second window it is not, and the target is back at the floor.
+        // Past the ten second window it is not, and the target is back at the floor.
         assertEquals(2, buffer.snapshot().targetFrames)
     }
 

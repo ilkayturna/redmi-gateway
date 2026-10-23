@@ -566,6 +566,9 @@ final class AudioEngine {
         lastSentFrames = sentFrames
         log("CAPTURE_HEALTH produced=\(producedPerSecond)/s sent=\(sentPerSecond)/s " +
             "expired=\(expired) overflow=\(overflow) pending=\(pendingSends)")
+        log("DOWNLINK_HEALTH maxGap=\(playbackBuffer.maxArrivalGapMs)ms " +
+            "underruns=\(playbackBuffer.underruns) dropped=\(playbackBuffer.droppedFrames) " +
+            "scheduled=\(playbackBuffer.scheduledFrames)")
     }
 
     @discardableResult

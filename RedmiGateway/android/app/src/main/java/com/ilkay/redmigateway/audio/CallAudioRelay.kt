@@ -1156,6 +1156,11 @@ object CallAudioRelay : CallManager.CallListener {
     private fun sendLoop(record: AudioRecord) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val pcm = ByteArray(FRAME_BYTES)
+        // The extraction record can hand over a backlog (cutover, HAL re-route) in one burst.
+        // Forwarding that burst unchanged filled the iPhone's 240 ms playback budget and dropped
+        // the tail as an audible hole. Pace the downlink at the same 20 ms cadence the iPhone
+        // consumes; a real stall starts a new phase instead of a catch-up burst.
+        var nextSendAt = 0L
         while (mediaRunning && downlink === record) {
             val read = record.read(pcm, 0, FRAME_BYTES)
             if (read <= 0) {
@@ -1171,6 +1176,10 @@ object CallAudioRelay : CallManager.CallListener {
             }
             val target = peer ?: continue
             val datagram = socket ?: break
+            val now = SystemClock.elapsedRealtime()
+            if (nextSendAt == 0L || now - nextSendAt > 200L) nextSendAt = now
+            val wait = nextSendAt - now
+            if (wait > 0) SystemClock.sleep(wait)
             // Session, key and counter are taken together so a re-arm cannot mix them.
             val bytes = synchronized(this) { packDownlink(pcm, read) }
             try {
@@ -1178,6 +1187,7 @@ object CallAudioRelay : CallManager.CallListener {
             } catch (error: Exception) {
                 if (!datagram.isClosed) Log.w(TAG, "Downlink send failed: ${error.javaClass.simpleName}")
             }
+            nextSendAt += FRAME_MS
         }
     }
 

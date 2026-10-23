@@ -11,11 +11,13 @@ import java.util.ArrayDeque
  * depth therefore fails twice over: it drops the tail of a burst that arrives above the ceiling and
  * it runs dry during the silence that follows a burst it did absorb.
  *
- * The target depth is the worst recent need over a four second window, so a burst raises the depth
- * immediately (fast attack) and four clean seconds let it fall back to the floor (slow decay).
- * Ceilings stay inside the walkie-talkie budget: 240 ms on a local link, 480 ms on a remote/VPN link
- * whose stalls are longer. The hard queue limit is only a memory guard; the trim keeps latency at
- * the target.
+ * The target depth is the worst recent need over a ten second window, so a burst raises the depth
+ * immediately (fast attack) and ten clean seconds let it fall back to the floor (slow decay). The
+ * measured local link produced a 160 ms gap and then stayed mostly paced; a four second window
+ * forgot that spike long before the next one, so the target fell to six frames and the writer
+ * underran again. Ten seconds keep the reserve through the gap's repeat pattern. Ceilings stay
+ * inside the walkie-talkie budget: 240 ms on a local link, 480 ms on a remote/VPN link whose stalls
+ * are longer. The hard queue limit is only a memory guard; the trim keeps latency at the target.
  */
 class UplinkJitterBuffer {
     data class Snapshot(
@@ -33,24 +35,28 @@ class UplinkJitterBuffer {
 
     private companion object {
         const val FRAME_MS = 20
-        /** Arrival observations are kept this long: fast attack, four second decay. */
-        const val HISTORY_WINDOW_MS = 4_000L
+        /** Arrival observations are kept this long: fast attack, ten second decay. */
+        const val HISTORY_WINDOW_MS = 10_000L
         /**
          * Room for those observations. The ring counts arrivals, not seconds, and a burst records
          * one observation per frame (a ten frame clump writes about nine), so a small ring forgets
          * a spike long before the window ends: 32 slots covered roughly 1.3 s of this link's
          * clumped traffic, which is why one measured call showed a 338 ms gap and a target of 6 in
-         * the same health line. 256 slots cover 5-10 s of that traffic, comfortably past the four
-         * second window, for about 3 KB. The test that pins this is
+         * the same health line. 512 slots cover ten seconds of that traffic, comfortably past the
+         * ten second window, for about 6 KB. The test that pins this is
          * UplinkJitterBufferTest.theMemoryRingHoldsAFullWindowOfClumpedTraffic.
          */
-        const val HISTORY_SAMPLES = 256
+        const val HISTORY_SAMPLES = 512
         const val TRIM_HOLD_MS = 500L
         /** Trimming only starts two frames above the target, so a short spike is not cut away. */
         const val TRIM_SLACK_FRAMES = 2
-        /** A paced link resumes on a two frame reserve; a bursty one waits for up to four. */
-        const val PRIME_FRAMES_MIN = 2
-        const val PRIME_FRAMES_MAX = 4
+        /**
+         * A paced link resumes on an 80 ms reserve; a link that just proved it can stall for
+         * 160 ms waits for up to 160 ms. The measured 160 ms gap drained a two frame (40 ms)
+         * reserve before the next frame arrived, so the writer counted underruns and played PLC.
+         */
+        const val PRIME_FRAMES_MIN = 4
+        const val PRIME_FRAMES_MAX = 8
         /** Three starved polls (60 ms) mean the gap is real: wait for the reserve again. */
         const val UNPRIME_AFTER_UNDERRUNS = 3
         const val LOCAL_TARGET_FLOOR = 2
@@ -177,10 +183,13 @@ class UplinkJitterBuffer {
     private fun ceiling() = if (remoteLink) REMOTE_TARGET_CEILING else LOCAL_TARGET_CEILING
 
     /**
-     * How much reserve playback waits for after a starvation. A paced link needs two frames; one
-     * that just bursted waits for four, because that link is the one that will starve again.
+     * How much reserve playback waits for after a starvation. The target includes one frame of
+     * slack over the measured need, so the reserve is one less. A paced link gets 80 ms; a link
+     * that just proved a 160 ms gap waits up to 160 ms, because that is the one that will starve
+     * again.
      */
-    private fun primeFrames() = targetFrames.coerceIn(PRIME_FRAMES_MIN, PRIME_FRAMES_MAX)
+    private fun primeFrames() =
+        (targetFrames - 1).coerceIn(PRIME_FRAMES_MIN, PRIME_FRAMES_MAX)
 
     @Synchronized fun poll(nowMs: Long): ByteArray? {
         val wasPrimed = primed
