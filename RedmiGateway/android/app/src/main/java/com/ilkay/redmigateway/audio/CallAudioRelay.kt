@@ -7,6 +7,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
+import android.net.wifi.WifiManager
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
@@ -150,6 +151,11 @@ object CallAudioRelay : CallManager.CallListener {
     private val rxSealedKeepalive = ByteArray(BridgeCrypto.NONCE_BYTES + BridgeCrypto.TAG_BYTES)
     private val txHeader = ByteArray(SEALED_HEADER_BYTES)
     private val txNonce = ByteArray(BridgeCrypto.NONCE_BYTES)
+    // The iPhone asked for the downlink copy; only a local link may pay for it.
+    @Volatile private var downlinkRedundancy = false
+    private val previousDownlinkFrame = ByteArray(FRAME_BYTES)
+    private val downlinkRedundantPlain = ByteArray(2 * FRAME_BYTES)
+    private var previousDownlinkValid = false
     private var plcConsecutiveFrames = 0
     private var hasValidPcmHistory = false
 
@@ -159,6 +165,13 @@ object CallAudioRelay : CallManager.CallListener {
     private val handler = Handler(worker.looper)
 
     private var appContext: Context? = null
+    /**
+     * Held only while media is running. Without it the Wi-Fi firmware enters power save as soon as
+     * the screen is off; the measured link then delivered 100-298 ms gaps against a 20 ms cadence
+     * (retriedTxPackets=9948, lostTxPackets=226) and the iPhone's playback reserve underran every
+     * few seconds. A high-performance lock keeps the radio awake for the whole call.
+     */
+    private var wifiLock: WifiManager.WifiLock? = null
     @Volatile var owner: Owner = Owner.REDMI
         private set
     @Volatile var lastReason: String = "idle"
@@ -270,6 +283,8 @@ object CallAudioRelay : CallManager.CallListener {
     private val insertedSilenceWrites = AtomicInteger()
     private val partialUplinkWrites = AtomicInteger()
     private val downlinkReads = AtomicInteger()
+    /** Reads that returned less than one 20 ms frame; a high rate means the HAL is chopping. */
+    private val downlinkShortReads = AtomicInteger()
     // Counters since the cutover began. The per second window above is reset on every roll, so it
     // cannot measure the first partial window; these two make the handover decision at
     // VERIFY_WINDOW_MS instead of at the next one second boundary.
@@ -285,18 +300,20 @@ object CallAudioRelay : CallManager.CallListener {
     private var windowSilenceWrites = 0
     private var windowPartialWrites = 0
     private var windowReads = 0
+    private var windowShortReads = 0
     private var windowStartedAt = 0L
 
     val isIPhoneOwner: Boolean get() = owner == Owner.IPHONE
     val isStreaming: Boolean get() = mediaRunning
 
     /**
-     * Off until the receiver is proven in the field: while it is off the gateway advertises 0 and
-     * the iPhone keeps sending one frame per packet. Once on, it is offered to local links only
-     * (hotspot, home Wi-Fi) because the copy doubles the audio bitrate and a mobile data link must
-     * not pay for it - the user's data rule.
+     * Offered to the iPhone over a local link. The measured Wi-Fi lost 226 of about 9000 packets
+     * (2.5%) in a three minute call, which drains any fixed playback reserve at about one frame
+     * per second; repeating the previous frame lets the receiver rebuild a single loss instead of
+     * playing a hole. A remote link stays plain: the copy doubles the audio bitrate and the user's
+     * mobile-data rule does not allow that.
      */
-    @Volatile var redundancyEnabled = false
+    @Volatile var redundancyEnabled = true
 
     /** 1 when this link may carry a repeated frame, 0 otherwise. */
     fun redundancyCapability(): Int = if (redundancyEnabled && !remoteLink) 1 else 0
@@ -324,6 +341,7 @@ object CallAudioRelay : CallManager.CallListener {
             "insertedSilenceFramesPerSecond" to windowSilenceWrites,
             "partialUplinkWritesPerSecond" to windowPartialWrites,
             "downlinkFramesPerSecond" to windowReads,
+            "downlinkShortReadsPerSecond" to windowShortReads,
             "droppedFrames" to queue.dropped,
             "expiredFrames" to queue.expired,
             "maxAuthenticatedArrivalGapMs" to queue.maxAuthenticatedArrivalGapMs,
@@ -357,11 +375,14 @@ object CallAudioRelay : CallManager.CallListener {
      * and the iPhone drops those packets.
      */
     fun arm(context: Context, clientAddress: InetAddress?, sessionMediaKey: ByteArray? = null,
-            localAddress: InetAddress? = null): Int {
+            localAddress: InetAddress? = null, wantsDownlinkRedundancy: Boolean = false): Int {
         synchronized(this) {
             appContext = context.applicationContext
             expectedClientAddress = clientAddress
             remoteLink = isRemoteAddress(clientAddress)
+            // The iPhone advertises in audio_start that it understands type 2. Only a local link
+            // gets the copy; a remote one must not pay double data for it.
+            downlinkRedundancy = wantsDownlinkRedundancy && !remoteLink
             if (remoteLink) Log.i(TAG, "iPhone is on a remote link; wider audio limits")
             if (session == 0 || !sameKey(mediaKey, sessionMediaKey)) {
                 if (session != 0) {
@@ -378,6 +399,7 @@ object CallAudioRelay : CallManager.CallListener {
                 rejectedPackets.set(0)
                 peer = null
                 lastIPhonePcmAt = 0L
+                previousDownlinkValid = false
                 openSocket(localAddress)
             }
         }
@@ -559,6 +581,7 @@ object CallAudioRelay : CallManager.CallListener {
     private fun resetWindow() {
         windowStartedAt = SystemClock.elapsedRealtime()
         iphoneFrames.set(0); uplinkWrites.set(0); downlinkReads.set(0)
+        downlinkShortReads.set(0)
         uplinkPcmWrites.set(0); insertedSilenceWrites.set(0); partialUplinkWrites.set(0)
     }
 
@@ -573,6 +596,7 @@ object CallAudioRelay : CallManager.CallListener {
             windowSilenceWrites = insertedSilenceWrites.getAndSet(0)
             windowPartialWrites = partialUplinkWrites.getAndSet(0)
             windowReads = downlinkReads.getAndSet(0)
+            windowShortReads = downlinkShortReads.getAndSet(0)
             windowStartedAt = now
             windowFresh = true
         }
@@ -586,7 +610,7 @@ object CallAudioRelay : CallManager.CallListener {
             windowMaxWriteMs = 0
             val health = "RELAY_HEALTH owner=$owner iphone=$windowIPhone/s uplink=$windowWrites/s " +
                 "pcm=$windowPcmWrites/s silence=$windowSilenceWrites/s partial=$windowPartialWrites/s " +
-                "downlink=$windowReads/s queued=${queue.queued} targetFrames=${queue.targetFrames} " +
+                "downlink=$windowReads/s shortReads=$windowShortReads/s queued=${queue.queued} targetFrames=${queue.targetFrames} " +
                 "dropped=${queue.dropped} " +
                 "expired=${queue.expired} underruns=${queue.underruns} maxWriteMs=$maxWriteMs " +
                 "windowMaxWriteMs=$windowWriteMs " +
@@ -981,6 +1005,31 @@ object CallAudioRelay : CallManager.CallListener {
     private fun sameKey(a: ByteArray?, b: ByteArray?): Boolean =
         if (a == null || b == null) a === b else a.contentEquals(b)
 
+    private fun acquireCallWifiLock(context: Context) {
+        if (wifiLock?.isHeld == true) return
+        val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        if (wifi == null) {
+            Log.w(TAG, "Call audio Wi-Fi lock unavailable: no Wi-Fi service")
+            return
+        }
+        val lock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "RedmiGateway:CallAudio")
+        lock.setReferenceCounted(false)
+        try {
+            lock.acquire()
+            wifiLock = lock
+            Log.i(TAG, "Call audio Wi-Fi lock held (high performance)")
+        } catch (error: Exception) {
+            Log.w(TAG, "Call audio Wi-Fi lock could not be held: ${describe(error)}")
+        }
+    }
+
+    private fun releaseCallWifiLock() {
+        val lock = wifiLock ?: return
+        wifiLock = null
+        runCatching { if (lock.isHeld) lock.release() }
+            .onFailure { Log.w(TAG, "Call audio Wi-Fi lock release failed: ${describe(it)}") }
+    }
+
     private fun startMedia() {
         val context = appContext ?: return
         val audioManager = context.getSystemService(AudioManager::class.java)
@@ -994,6 +1043,10 @@ object CallAudioRelay : CallManager.CallListener {
         }
         downlink = record
         uplink = track
+        // The screen goes off behind the proximity sensor during a call. Without a high-performance
+        // lock the Wi-Fi firmware saves power between packets, and the measured link then delivered
+        // 100-298 ms gaps (retriedTxPackets=9948): the iPhone's player underran every few seconds.
+        acquireCallWifiLock(context)
         lastIPhoneHearingAt = 0L
         plcConsecutiveFrames = 0
         hasValidPcmHistory = false
@@ -1155,17 +1208,35 @@ object CallAudioRelay : CallManager.CallListener {
 
     private fun sendLoop(record: AudioRecord) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-        val pcm = ByteArray(FRAME_BYTES)
+        val scratch = ByteArray(FRAME_BYTES)
+        val assembler = PcmFrameAssembler(FRAME_BYTES)
+        var reportedShortReads = 0
         // The extraction record can hand over a backlog (cutover, HAL re-route) in one burst.
         // Forwarding that burst unchanged filled the iPhone's bounded playback queue and dropped
         // the tail as an audible hole. Pace the downlink at the same 20 ms cadence the iPhone
         // consumes; a real stall starts a new phase instead of a catch-up burst.
         var nextSendAt = 0L
         while (mediaRunning && downlink === record) {
-            val read = record.read(pcm, 0, FRAME_BYTES)
+            val read = record.read(scratch, 0, scratch.size)
             if (read <= 0) {
                 if (read < 0) SystemClock.sleep(10)
                 continue
+            }
+            // The HAL returns ~19 ms per read on this device. Sending every short read as one
+            // packet made the iPhone count 52 "frames" per second while only 1000 ms of audio
+            // existed, so its playback reserve drained and underran every few seconds. Send only
+            // complete 640-byte frames: 50 per second, exactly what the receiver consumes.
+            if (!assembler.feed(scratch, 0, read)) {
+                val total = assembler.shortReads
+                if (total != reportedShortReads) {
+                    downlinkShortReads.addAndGet(total - reportedShortReads)
+                    reportedShortReads = total
+                }
+                continue
+            }
+            if (assembler.shortReads != reportedShortReads) {
+                downlinkShortReads.addAndGet(assembler.shortReads - reportedShortReads)
+                reportedShortReads = assembler.shortReads
             }
             downlinkReads.incrementAndGet()
             cutoverReads.incrementAndGet()
@@ -1181,7 +1252,7 @@ object CallAudioRelay : CallManager.CallListener {
             val wait = nextSendAt - now
             if (wait > 0) SystemClock.sleep(wait)
             // Session, key and counter are taken together so a re-arm cannot mix them.
-            val bytes = synchronized(this) { packDownlink(pcm, read) }
+            val bytes = synchronized(this) { packDownlink(assembler.frame) }
             try {
                 datagram.send(DatagramPacket(bytes, bytes.size, target))
             } catch (error: Exception) {
@@ -1191,22 +1262,42 @@ object CallAudioRelay : CallManager.CallListener {
         }
     }
 
-    private fun packDownlink(pcm: ByteArray, read: Int): ByteArray {
+    private fun packDownlink(pcm: ByteArray): ByteArray {
         val sessionId = session
         val counter = txCounter.incrementAndGet()
-        val key = mediaKey ?: return ByteBuffer.allocate(HEADER_BYTES + read).order(ByteOrder.BIG_ENDIAN)
-            .putInt(sessionId).putShort(counter.toShort()).put(PAYLOAD_PCM16).put(0)
-            .put(pcm, 0, read).array()
+        val key = mediaKey
+        val repeatPrevious = downlinkRedundancy && previousDownlinkValid
+        val type = if (repeatPrevious) PAYLOAD_PCM16_REDUNDANT else PAYLOAD_PCM16
+        if (key == null) {
+            val buffer = ByteBuffer.allocate(HEADER_BYTES + (if (repeatPrevious) 2 else 1) * pcm.size)
+                .order(ByteOrder.BIG_ENDIAN)
+                .putInt(sessionId).putShort(counter.toShort()).put(type).put(0)
+            if (repeatPrevious) buffer.put(previousDownlinkFrame)
+            buffer.put(pcm)
+            rememberDownlinkFrame(pcm)
+            return buffer.array()
+        }
         val header = txHeader
         writeInt(header, 0, sessionId)
         writeInt(header, 4, counter.toInt())
-        header[8] = PAYLOAD_PCM16
+        header[8] = type
         header[9] = 0
         writeNonce(txNonce, DOWNLINK_TAG, counter, sessionId)
-        // seal() only reads its plaintext, so a short read is the one case that needs a copy.
-        val plaintext = if (read == pcm.size) pcm else pcm.copyOf(read)
+        val plaintext = if (repeatPrevious) {
+            System.arraycopy(previousDownlinkFrame, 0, downlinkRedundantPlain, 0, pcm.size)
+            System.arraycopy(pcm, 0, downlinkRedundantPlain, pcm.size, pcm.size)
+            downlinkRedundantPlain
+        } else {
+            pcm
+        }
         val sealed = BridgeCrypto.seal(key, plaintext, header, txNonce)
+        rememberDownlinkFrame(pcm)
         return header + sealed.copyOfRange(BridgeCrypto.NONCE_BYTES, sealed.size)
+    }
+
+    private fun rememberDownlinkFrame(pcm: ByteArray) {
+        System.arraycopy(pcm, 0, previousDownlinkFrame, 0, FRAME_BYTES)
+        previousDownlinkValid = true
     }
 
     private fun pcmFormat(rate: Int, channelMask: Int) = AudioFormat.Builder()
@@ -1294,6 +1385,7 @@ object CallAudioRelay : CallManager.CallListener {
     private fun stopMedia() {
         if (!mediaRunning && downlink == null && uplink == null) return
         mediaRunning = false
+        releaseCallWifiLock()
         writerThread?.interrupt()
         writerThread?.join(300)
         writerThread = null
@@ -1325,6 +1417,8 @@ object CallAudioRelay : CallManager.CallListener {
             socket?.close()
             socket = null
             boundAddress = null
+            downlinkRedundancy = false
+            previousDownlinkValid = false
         }
         receiveThread?.join(300)
         receiveThread = null

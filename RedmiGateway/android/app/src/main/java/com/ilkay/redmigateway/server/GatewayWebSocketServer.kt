@@ -390,7 +390,7 @@ class GatewayWebSocketServer(
                 IncomingCallPresenter.onIPhonePresented(json.optString("callId"))
                 sendAck(peer, "ringing_ack", true)
             }
-            "audio_start" -> startAudio(peer)
+            "audio_start" -> startAudio(peer, json)
             "audio_stop" -> {
                 if (audioOwner === conn) {
                     audioOwner = null
@@ -474,7 +474,7 @@ class GatewayWebSocketServer(
         }
     }
 
-    private fun startAudio(peer: Peer) {
+    private fun startAudio(peer: Peer, json: JSONObject) {
         val conn = peer.conn
         // Telecom creates an outgoing call asynchronously, so a request that follows this
         // client's own dial by a few seconds is accepted and waits for the call.
@@ -487,8 +487,12 @@ class GatewayWebSocketServer(
             send(peer, JSONObject().put("type", "error").put("code", "audio_busy").put("message", "Another client owns call audio"))
             return
         }
+        // The iPhone advertises that it can rebuild a downlink frame from the copy in the next
+        // packet. Only a build that sends this field gets type 2; an older iPhone would ignore the
+        // whole packet and lose all downlink audio.
+        val wantsDownlinkRedundancy = json.optInt("rxRedundancy", 0) > 0
         val session = CallAudioRelay.arm(context, conn.remoteSocketAddress?.address, peer.mediaKey,
-            conn.localSocketAddress?.address)
+            conn.localSocketAddress?.address, wantsDownlinkRedundancy)
         audioOwner = conn
         send(peer, JSONObject()
             .put("type", "audio_ready")

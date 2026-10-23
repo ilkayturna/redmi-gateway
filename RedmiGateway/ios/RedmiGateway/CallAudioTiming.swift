@@ -173,6 +173,17 @@ struct CallAudioCaptureMute {
     }
 }
 
+/// Whether the copy inside a redundant downlink packet is a frame the receiver never played.
+///
+/// A type 2 packet carries [previous frame][current frame]. The copy is new exactly when the
+/// packet before this one carried a frame that never arrived, which is a counter gap above one.
+/// The first PCM packet is always type 1, so a last counter of zero still follows the same rule.
+enum RedundantFramePolicy {
+    static func copyIsNew(counter: UInt32, lastPcmCounter: UInt32) -> Bool {
+        counter > lastPcmCounter &+ 1
+    }
+}
+
 struct CallAudioPlaybackBuffer<Frame> {
     private var frames: [Frame] = []
     private var primed = false
@@ -186,18 +197,21 @@ struct CallAudioPlaybackBuffer<Frame> {
     /// reserve was enough. This is the number of real underruns, not every empty player instant.
     private(set) var underruns = 0
     private(set) var maxArrivalGapMs = 0
-    /// The measured downlink delivered 263 ms arrival gaps against a nominal 20 ms cadence, and the
-    /// player drained before the next burst arrived. Sixteen frames (320 ms) cover that gap, and
-    /// the player is kept this far ahead for the whole call: scheduling every arriving frame
-    /// immediately let the reserve drain at each gap and produced 2-10 underruns per call.
-    private let initialReserveFrames = 16
-    /// 26 * 20 ms = 520 ms. The larger bound is required for the 26-frame Wi-Fi burst measured on
-    /// the Redmi uplink; a 240 ms ceiling dropped the tail of every such burst.
-    private let maximumScheduledFrames = 26
+    /// The measured downlink delivered 243-298 ms arrival gaps against a nominal 20 ms cadence, and
+    /// the player drained before the next burst arrived. Sixteen frames (320 ms) were only just
+    /// enough and the reserve ratcheted down at every gap until the player underran every few
+    /// seconds. Twenty frames (400 ms) leave room for the next gap, and the player is kept this
+    /// far ahead for the whole call: scheduling every arriving frame immediately let the reserve
+    /// drain at each gap and produced 2-10 underruns per call.
+    private let initialReserveFrames = 20
+    /// 28 * 20 ms = 560 ms. The larger bound is required for the deeper re-prime after a real
+    /// outage and for the burst measured on the Redmi uplink; a 240 ms ceiling dropped the tail
+    /// of every such burst.
+    private let maximumScheduledFrames = 28
     /// Three frame periods without a scheduled buffer means the player, not merely the network,
     /// has run dry. A single late frame is normal and must not force a re-prime.
     private let starvation: TimeInterval = 0.06
-    private var targetFrames = 16
+    private var targetFrames = 20
 
     mutating func reset() {
         frames.removeAll()

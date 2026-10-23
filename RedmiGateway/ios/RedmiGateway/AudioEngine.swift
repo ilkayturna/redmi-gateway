@@ -55,6 +55,18 @@ final class AudioEngine {
     private var rxLastCounter: UInt32 = 0
     private var playbackBuffer = CallAudioPlaybackBuffer<Data>()
     private var lastDownlink: Date?
+    /// Counter of the last downlink packet that carried PCM, used to decide whether the copy in a
+    /// redundant (type 2) packet is a frame that never arrived.
+    private var lastPcmRxCounter: UInt32 = 0
+    /// Downlink receive health: what actually arrived, versus what the Redmi sent.
+    private var receivedFrames = 0
+    private var recoveredFrames = 0
+    private var missingPackets = 0
+    private var shortPackets = 0
+    private var lastReceivedFrames = 0
+    private var lastRecoveredFrames = 0
+    private var lastMissingPackets = 0
+    private var pcmFrameBytes: Int { frameSamples * 2 }
     private var lastPcmSentAt: Date?
     private var recoveryRequested = false
     /// Playback budget drops are silent; the diagnostics log has to show them to be fixable.
@@ -357,6 +369,14 @@ final class AudioEngine {
             if self.lastSession != session || self.lastKey != key {
                 self.txCounter = 0
                 self.rxLastCounter = 0
+                self.lastPcmRxCounter = 0
+                self.receivedFrames = 0
+                self.recoveredFrames = 0
+                self.missingPackets = 0
+                self.shortPackets = 0
+                self.lastReceivedFrames = 0
+                self.lastRecoveredFrames = 0
+                self.lastMissingPackets = 0
             }
             self.lastSession = session
             self.lastKey = key
@@ -572,11 +592,19 @@ final class AudioEngine {
         let sentPerSecond = Int(Double(sentFrames - lastSentFrames) / elapsed)
         lastProducedFrames = produced
         lastSentFrames = sentFrames
+        let receivedPerSecond = Int(Double(receivedFrames - lastReceivedFrames) / elapsed)
+        let recoveredPerSecond = Int(Double(recoveredFrames - lastRecoveredFrames) / elapsed)
+        let missingPerSecond = Int(Double(missingPackets - lastMissingPackets) / elapsed)
+        lastReceivedFrames = receivedFrames
+        lastRecoveredFrames = recoveredFrames
+        lastMissingPackets = missingPackets
         log("CAPTURE_HEALTH produced=\(producedPerSecond)/s sent=\(sentPerSecond)/s " +
             "expired=\(expired) overflow=\(overflow) pending=\(pendingSends)")
         log("DOWNLINK_HEALTH maxGap=\(playbackBuffer.maxArrivalGapMs)ms " +
             "underruns=\(playbackBuffer.underruns) dropped=\(playbackBuffer.droppedFrames) " +
-            "scheduled=\(playbackBuffer.scheduledFrames)")
+            "scheduled=\(playbackBuffer.scheduledFrames) rx=\(receivedPerSecond)/s " +
+            "recovered=\(recoveredPerSecond)/s missing=\(missingPerSecond)/s " +
+            "short=\(shortPackets)")
     }
 
     @discardableResult
@@ -603,10 +631,41 @@ final class AudioEngine {
     private func receive(on socket: NWConnection) {
         socket.receiveMessage { [weak self, weak socket] data, _, _, error in
             guard let self, let socket, self.connection === socket else { return }
-            if let data, let sealer = self.sealer, let opened = sealer.open(data), opened.counter > self.rxLastCounter {
+            if let data, let sealer = self.sealer, let opened = sealer.open(data),
+               opened.counter > self.rxLastCounter {
+                let previous = self.rxLastCounter
                 self.rxLastCounter = opened.counter
-                if opened.type == 1, !opened.payload.isEmpty, opened.payload.count % 2 == 0 {
+                if previous != 0 {
+                    // Counter gaps are packets the network never delivered; the diagnostics need
+                    // this number to tell loss from jitter.
+                    self.missingPackets += Int(opened.counter &- previous &- 1)
+                }
+                switch opened.type {
+                case 1:
+                    guard opened.payload.count == self.pcmFrameBytes else {
+                        self.shortPackets += 1
+                        break
+                    }
+                    self.lastPcmRxCounter = opened.counter
+                    self.receivedFrames += 1
                     self.enqueuePlayback(opened.payload)
+                case 2:
+                    // [previous frame][current frame]. The copy is new only when the packet before
+                    // this one carried a frame that never arrived, exactly the Redmi's rule.
+                    guard opened.payload.count == 2 * self.pcmFrameBytes else {
+                        self.shortPackets += 1
+                        break
+                    }
+                    if RedundantFramePolicy.copyIsNew(counter: opened.counter,
+                                                      lastPcmCounter: self.lastPcmRxCounter) {
+                        self.recoveredFrames += 1
+                        self.enqueuePlayback(Data(opened.payload.prefix(self.pcmFrameBytes)))
+                    }
+                    self.lastPcmRxCounter = opened.counter
+                    self.receivedFrames += 1
+                    self.enqueuePlayback(Data(opened.payload.suffix(self.pcmFrameBytes)))
+                default:
+                    break
                 }
             }
             if error == nil { self.receive(on: socket) }

@@ -27,8 +27,9 @@ struct CallAudioTimingTests {
         playbackMaintainsReserveAndReprimesAfterAGap()
         oldPlaybackCompletionCannotDrainNewStream()
         playbackCapacityStaysBounded()
+        redundantCopyIsUsedOnlyWhenItsOriginalWasLost()
         if failures != 0 { print("\(failures) audio timing regression(s)"); exit(1) }
-        print("PASS: 16 call audio timing regressions")
+        print("PASS: 17 call audio timing regressions")
     }
 
     // Break caught: emitting every frame from one tap callback at the same instant.
@@ -264,44 +265,44 @@ struct CallAudioTimingTests {
 
     // Break caught: scheduling every arriving frame immediately. That let the player drain at the
     // first 263 ms arrival gap (measured: underruns=2,5,7,10 in one 30 s call) because the 320 ms
-    // startup reserve was never maintained. The player now stays sixteen frames ahead and refills
+    // startup reserve was never maintained. The player now stays twenty frames ahead and refills
     // on every completion; a gap deeper than the reserve rebuilds a reserve that covers it.
     static func playbackMaintainsReserveAndReprimesAfterAGap() {
         var playback = CallAudioPlaybackBuffer<Int>()
-        for frame in 1...15 {
+        for frame in 1...19 {
             expect(playback.enqueue(frame, now: Double(frame - 1) * 0.02).isEmpty,
                    "downlink keeps building the jitter reserve")
         }
-        expect(playback.enqueue(16, now: 0.30) == Array(1...16),
-               "downlink starts with the measured 320 ms reserve")
+        expect(playback.enqueue(20, now: 0.38) == Array(1...20),
+               "downlink starts with the measured 400 ms reserve")
         let generation = playback.generation
 
-        // A 263 ms arrival gap consumes thirteen buffers but leaves three: the player is still
+        // A 300 ms arrival gap consumes fifteen buffers but leaves five: the player is still
         // ahead and the next frame refills the reserve instead of starting a silence.
-        for _ in 0..<13 { expect(playback.completed(generation: generation) == nil,
+        for _ in 0..<15 { expect(playback.completed(generation: generation) == nil,
                                  "the reserve is not refilled without an arrival") }
-        expect(playback.scheduledFrames == 3, "263 ms gap leaves the player ahead")
-        expect(playback.enqueue(17, now: 0.563) == [17],
+        expect(playback.scheduledFrames == 5, "300 ms gap leaves the player ahead")
+        expect(playback.enqueue(21, now: 0.68) == [21],
                "the next arrival refills the maintained reserve")
-        expect(playback.underruns == 0, "the measured 263 ms gap does not underrun")
-        expect(playback.maxArrivalGapMs >= 263, "the arrival gap is visible in diagnostics")
+        expect(playback.underruns == 0, "the measured 300 ms gap does not underrun")
+        expect(playback.maxArrivalGapMs >= 300, "the arrival gap is visible in diagnostics")
 
         // A real outage drains the player. The re-prime reserve covers the 400 ms gap that caused
         // it, so the same outage cannot repeat immediately.
-        for _ in 0..<4 { playback.completed(generation: generation) }
+        for _ in 0..<6 { playback.completed(generation: generation) }
         expect(playback.scheduledFrames == 0, "the outage drained the player")
-        expect(playback.enqueue(18, now: 0.963).isEmpty,
+        expect(playback.enqueue(22, now: 1.08).isEmpty,
                "a 400 ms gap re-primes instead of playing one frame into a dry player")
         expect(playback.underruns == 1, "the real underrun is visible in diagnostics")
-        for frame in 19...38 {
-            expect(playback.enqueue(frame, now: 0.963 + Double(frame - 18) * 0.02).isEmpty,
+        for frame in 23...42 {
+            expect(playback.enqueue(frame, now: 1.08 + Double(frame - 22) * 0.02).isEmpty,
                    "re-prime waits for the reserve the gap proved necessary")
         }
-        expect(playback.enqueue(39, now: 0.963 + Double(39 - 18) * 0.02) == Array(18...39),
+        expect(playback.enqueue(43, now: 1.08 + Double(43 - 22) * 0.02) == Array(22...43),
                "downlink resumes in order with the deeper 440 ms reserve")
-        expect(playback.enqueue(40, now: 0.963 + Double(40 - 18) * 0.02).isEmpty,
+        expect(playback.enqueue(44, now: 1.08 + Double(44 - 22) * 0.02).isEmpty,
                "a full reserve does not schedule beyond its target")
-        expect(playback.completed(generation: generation) == 40,
+        expect(playback.completed(generation: generation) == 44,
                "one completion releases exactly one queued frame")
     }
 
@@ -309,19 +310,19 @@ struct CallAudioTimingTests {
     static func oldPlaybackCompletionCannotDrainNewStream() {
         var playback = CallAudioPlaybackBuffer<Int>()
         let old = playback.generation
-        for frame in 1...15 { _ = playback.enqueue(frame, now: Double(frame - 1) * 0.02) }
+        for frame in 1...19 { _ = playback.enqueue(frame, now: Double(frame - 1) * 0.02) }
         playback.reset()
-        for frame in 4...18 {
+        for frame in 4...22 {
             expect(playback.enqueue(frame, now: 0.1 + Double(frame - 4) * 0.02).isEmpty,
                    "new playback builds its reserve")
         }
-        expect(playback.enqueue(19, now: 0.40) == Array(4...19), "new playback starts")
-        expect(playback.enqueue(20, now: 0.42) == [], "new playback keeps its reserve")
-        for _ in 0..<16 { playback.completed(generation: old) }
-        expect(playback.scheduledFrames == 16, "old completions leave new playback untouched")
-        expect(playback.enqueue(21, now: 0.44) == [],
+        expect(playback.enqueue(23, now: 0.48) == Array(4...23), "new playback starts")
+        expect(playback.enqueue(24, now: 0.50) == [], "new playback keeps its reserve")
+        for _ in 0..<20 { playback.completed(generation: old) }
+        expect(playback.scheduledFrames == 20, "old completions leave new playback untouched")
+        expect(playback.enqueue(25, now: 0.52) == [],
                "old completions cannot force false rebuffer")
-        expect(playback.completed(generation: playback.generation) == 20,
+        expect(playback.completed(generation: playback.generation) == 24,
                "the new stream still releases its queued speech in order")
     }
 
@@ -330,8 +331,24 @@ struct CallAudioTimingTests {
         var playback = CallAudioPlaybackBuffer<Int>()
         var scheduled: [Int] = []
         for frame in 1...30 { scheduled += playback.enqueue(frame, now: 0) }
-        expect(scheduled == Array(1...16), "the player is fed only up to its reserve")
-        expect(playback.droppedFrames == 4, "downlink overflow is observable in counters")
-        expect(playback.scheduledFrames == 16, "scheduled audio stays at the reserve target")
+        expect(scheduled == Array(1...20), "the player is fed only up to its reserve")
+        expect(playback.droppedFrames == 2, "downlink overflow is observable in counters")
+        expect(playback.scheduledFrames == 20, "scheduled audio stays at the reserve target")
+    }
+
+    // Break caught: replaying the redundant copy even when its original arrived (an audible 20 ms
+    // repeat), or ignoring the copy when the previous packet was lost (a 20 ms hole the copy was
+    // meant to remove). The measured downlink loses about 2.5% of packets; the copy heals one loss.
+    static func redundantCopyIsUsedOnlyWhenItsOriginalWasLost() {
+        expect(!RedundantFramePolicy.copyIsNew(counter: 1, lastPcmCounter: 0),
+               "the first plain packet has no copy")
+        expect(!RedundantFramePolicy.copyIsNew(counter: 6, lastPcmCounter: 5),
+               "an arrived previous frame is not replayed")
+        expect(RedundantFramePolicy.copyIsNew(counter: 7, lastPcmCounter: 5),
+               "a missing previous packet makes the copy new")
+        expect(RedundantFramePolicy.copyIsNew(counter: 2, lastPcmCounter: 0),
+               "a lost first packet is rebuilt from the next copy")
+        expect(!RedundantFramePolicy.copyIsNew(counter: 1, lastPcmCounter: 1),
+               "a same-counter copy is never new")
     }
 }

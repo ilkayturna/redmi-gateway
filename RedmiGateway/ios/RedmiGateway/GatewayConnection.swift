@@ -1059,7 +1059,10 @@ public final class GatewayConnection: ObservableObject {
     func sendAudioStart() {
         guard state == .authenticated else { return }
         audioNotice = nil
-        send(["type": "audio_start"])
+        // rxRedundancy asks the Redmi to repeat the previous downlink frame in the next packet.
+        // Without this field an older Redmi keeps sending type 1; a new one must never send type 2
+        // to a build that would ignore the whole packet.
+        send(["type": "audio_start", "rxRedundancy": 1])
     }
 
     func sendAudioStop() {
