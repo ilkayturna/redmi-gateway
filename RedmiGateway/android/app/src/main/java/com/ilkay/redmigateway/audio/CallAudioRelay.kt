@@ -1157,7 +1157,7 @@ object CallAudioRelay : CallManager.CallListener {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         val pcm = ByteArray(FRAME_BYTES)
         // The extraction record can hand over a backlog (cutover, HAL re-route) in one burst.
-        // Forwarding that burst unchanged filled the iPhone's 240 ms playback budget and dropped
+        // Forwarding that burst unchanged filled the iPhone's bounded playback queue and dropped
         // the tail as an audible hole. Pace the downlink at the same 20 ms cadence the iPhone
         // consumes; a real stall starts a new phase instead of a catch-up burst.
         var nextSendAt = 0L

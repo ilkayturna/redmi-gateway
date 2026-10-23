@@ -5,19 +5,20 @@ import java.util.ArrayDeque
 /**
  * Single bounded queue shared by the UDP receiver and the blocking audio writer.
  *
- * The depth is adaptive because this link delivers 20 ms frames in bursts: a measured call showed
- * `maxAuthenticatedArrivalGapMs=240` (nominal 20 ms) followed by `maxAuthenticatedArrivalBurstFrames=10`
- * â€” the Wi-Fi retry storm releases ten frames at once after a quarter second of silence. A fixed
- * depth therefore fails twice over: it drops the tail of a burst that arrives above the ceiling and
- * it runs dry during the silence that follows a burst it did absorb.
+ * The depth is adaptive because this link delivers 20 ms frames in bursts: the latest measured call
+ * showed `maxAuthenticatedArrivalGapMs=439` (nominal 20 ms) followed by
+ * `maxAuthenticatedArrivalBurstFrames=26` - the Wi-Fi retry storm released 520 ms of speech at once
+ * after nearly half a second of silence. A fixed depth therefore fails twice over: it drops the
+ * tail of a burst that arrives above the ceiling and it runs dry during the silence that follows a
+ * burst it did absorb.
  *
  * The target depth is the worst recent need over a ten second window, so a burst raises the depth
- * immediately (fast attack) and ten clean seconds let it fall back to the floor (slow decay). The
- * measured local link produced a 160 ms gap and then stayed mostly paced; a four second window
- * forgot that spike long before the next one, so the target fell to six frames and the writer
- * underran again. Ten seconds keep the reserve through the gap's repeat pattern. Ceilings stay
- * inside the walkie-talkie budget: 240 ms on a local link, 480 ms on a remote/VPN link whose stalls
- * are longer. The hard queue limit is only a memory guard; the trim keeps latency at the target.
+ * immediately (fast attack) and ten clean seconds let it fall back to the floor (slow decay). Build
+ * 123 measured 315-439 ms gaps against the old 240 ms ceiling and dropped 34 frames; the target
+ * ceiling is now 480 ms local and 720 ms remote. The hard queue limit (640/960 ms) is a memory guard
+ * above the target, and the age watchdog is 800/1100 ms so a deep reserve is not expired before it
+ * plays. The extra walkie-talkie delay is the price of a link that stalls for half a second; a paced
+ * link still stays at the 40 ms floor.
  */
 class UplinkJitterBuffer {
     data class Snapshot(
@@ -52,21 +53,26 @@ class UplinkJitterBuffer {
         const val TRIM_SLACK_FRAMES = 2
         /**
          * A paced link resumes on an 80 ms reserve; a link that just proved it can stall for
-         * 160 ms waits for up to 160 ms. The measured 160 ms gap drained a two frame (40 ms)
-         * reserve before the next frame arrived, so the writer counted underruns and played PLC.
+         * hundreds of milliseconds waits for the measured reserve. The old eight-frame (160 ms)
+         * maximum could not cover the 315-439 ms gaps seen in build 123, so re-priming repeated
+         * the same underrun. Twenty-four frames (480 ms) cover the worst local gap plus slack.
          */
         const val PRIME_FRAMES_MIN = 4
-        const val PRIME_FRAMES_MAX = 8
+        const val PRIME_FRAMES_MAX = 24
         /** Three starved polls (60 ms) mean the gap is real: wait for the reserve again. */
         const val UNPRIME_AFTER_UNDERRUNS = 3
         const val LOCAL_TARGET_FLOOR = 2
         const val REMOTE_TARGET_FLOOR = 3
-        /** 12 * 20 ms = 240 ms: a local link must not feel like a walkie-talkie. */
-        const val LOCAL_TARGET_CEILING = 12
-        /** 24 * 20 ms = 480 ms: mobile data and VPN paths stall for longer. */
-        const val REMOTE_TARGET_CEILING = 24
-        const val LOCAL_MAX_AGE_MS = 400L
-        const val REMOTE_MAX_AGE_MS = 640L
+        /** 24 * 20 ms = 480 ms: cover the measured 439 ms local gap. */
+        const val LOCAL_TARGET_CEILING = 24
+        /** 36 * 20 ms = 720 ms: mobile data and VPN paths stall for longer. */
+        const val REMOTE_TARGET_CEILING = 36
+        /** A 26-frame burst can exceed the target briefly; this is only a memory guard. */
+        const val LOCAL_QUEUE_LIMIT = 32
+        const val REMOTE_QUEUE_LIMIT = 48
+        /** The watchdog must outlive the deepest target, or it would expire its own reserve. */
+        const val LOCAL_MAX_AGE_MS = 800L
+        const val REMOTE_MAX_AGE_MS = 1_100L
         /**
          * Frames delivered back to back count as one burst. Wi-Fi clumps are forwarded a few
          * milliseconds apart rather than in the same instant, so this is a fifth of the 20 ms
@@ -144,10 +150,9 @@ class UplinkJitterBuffer {
             }
             lastAuthenticatedArrivalAt = nowMs
         }
-        // The hard limit is the documented ceiling itself (12 frames local, 24 remote), so even a
-        // huge burst can never leave more than 240 ms / 480 ms queued. The adaptive trim below
-        // only lowers the depth further.
-        val maxQueue = ceiling()
+        // The hard limit is above the adaptive target so a legitimate 26-frame burst can land
+        // without discarding its tail; the trim below brings latency back to the target.
+        val maxQueue = queueLimit()
         while (queue.size >= maxQueue) {
             queue.removeFirst()
             dropped++
@@ -161,7 +166,10 @@ class UplinkJitterBuffer {
      */
     private fun observe(gapMs: Long, burst: Int, nowMs: Long) {
         val gapFrames = if (gapMs > FRAME_MS) ((gapMs - FRAME_MS + FRAME_MS - 1) / FRAME_MS).toInt() else 0
-        val need = maxOf(gapFrames, burst) + 1
+        // A silence needs two frames of slack: the writer consumes one while the next arrival is
+        // due, and a 439 ms gap with only one frame of slack still underran in the field. A burst
+        // needs one frame so its tail is not immediately trimmed away.
+        val need = maxOf(gapFrames + 2, burst + 1)
         if (need <= floor()) return
         needAt[needIndex] = nowMs
         needFrames[needIndex] = minOf(need, ceiling())
@@ -182,11 +190,13 @@ class UplinkJitterBuffer {
 
     private fun ceiling() = if (remoteLink) REMOTE_TARGET_CEILING else LOCAL_TARGET_CEILING
 
+    private fun queueLimit() = if (remoteLink) REMOTE_QUEUE_LIMIT else LOCAL_QUEUE_LIMIT
+
     /**
      * How much reserve playback waits for after a starvation. The target includes one frame of
      * slack over the measured need, so the reserve is one less. A paced link gets 80 ms; a link
-     * that just proved a 160 ms gap waits up to 160 ms, because that is the one that will starve
-     * again.
+     * that just proved a 439 ms gap waits for up to 480 ms, because that is the one that will
+     * starve again.
      */
     private fun primeFrames() =
         (targetFrames - 1).coerceIn(PRIME_FRAMES_MIN, PRIME_FRAMES_MAX)

@@ -159,18 +159,20 @@ struct CallAudioPlaybackBuffer<Frame> {
     /// reserve was enough. This is the number of real underruns, not every empty player instant.
     private(set) var underruns = 0
     private(set) var maxArrivalGapMs = 0
-    /// The measured hotspot delivered 160 ms gaps after a nominal 20 ms cadence. Three frames
-    /// (60 ms) was less than half of one gap, so every stall reached the speaker as a hole. The
-    /// startup reserve is one 160 ms gap; after the player really runs dry, four frames (80 ms)
-    /// are enough to resume without turning the recovery into a second long pause.
-    private let initialReserveFrames = 8
-    private let reprimeReserveFrames = 4
-    /// 12 * 20 ms = 240 ms, the same bounded latency budget as the sender.
-    private let maximumScheduledFrames = 12
+    /// The measured downlink delivered 315 ms gaps after a nominal 20 ms cadence, and the reverse
+    /// path showed 439 ms gaps with 26-frame bursts. Sixteen frames (320 ms) cover the measured
+    /// downlink stall; the old eight-frame reserve drained and the four-frame re-prime repeated
+    /// the underrun 30 times in one 18 second call. A real underrun now rebuilds the same 320 ms
+    /// reserve, so the recovery is one deliberate pause rather than a cycle of 80 ms holes.
+    private let initialReserveFrames = 16
+    private let reprimeReserveFrames = 16
+    /// 26 * 20 ms = 520 ms. The larger bound is required for the 26-frame Wi-Fi burst measured on
+    /// the Redmi uplink; a 240 ms ceiling dropped the tail of every such burst.
+    private let maximumScheduledFrames = 26
     /// Three frame periods without a scheduled buffer means the player, not merely the network,
     /// has run dry. A single late frame is normal and must not force a re-prime.
     private let starvation: TimeInterval = 0.06
-    private var reserveFrames = 8
+    private var reserveFrames = 16
 
     mutating func reset() {
         frames.removeAll()

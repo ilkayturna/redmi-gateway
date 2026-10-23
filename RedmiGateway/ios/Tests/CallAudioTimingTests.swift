@@ -254,39 +254,40 @@ struct CallAudioTimingTests {
         expect(pacer.next(now: 0.3) == 7, "new stream accepts its own capture")
     }
 
-    // Break caught: the measured hotspot delivered 160 ms gaps after a 20 ms cadence. A three-frame
-    // (60 ms) reserve could not cover one, so every stall reached the speaker as a hole. Eight
-    // frames (160 ms) cover the gap; after the player really runs dry, four frames resume it without
-    // adding a second full-length pause.
+    // Break caught: the measured downlink delivered 315 ms gaps after a 20 ms cadence, and the
+    // old four-frame re-prime repeated the underrun 30 times in one 18 second call. Sixteen frames
+    // (320 ms) cover the measured stall; a 26-frame burst fits before the player is bounded.
     static func playbackStartsWithJitterReserveAndReprimesAfterAGap() {
         var playback = CallAudioPlaybackBuffer<Int>()
-        for frame in 1...7 {
+        for frame in 1...15 {
             expect(playback.enqueue(frame, now: Double(frame - 1) * 0.02).isEmpty,
                    "downlink keeps building the jitter reserve")
         }
-        expect(playback.enqueue(8, now: 0.14) == Array(1...8),
-               "downlink starts with the measured 160 ms reserve")
+        expect(playback.enqueue(16, now: 0.30) == Array(1...16),
+               "downlink starts with the measured 320 ms reserve")
         let generation = playback.generation
-        for _ in 0..<8 { playback.completed(generation: generation) }
-        expect(playback.enqueue(9, now: 0.30).isEmpty,
-               "a 160 ms gap re-primes instead of playing one frame into a dry player")
-        expect(playback.enqueue(10, now: 0.32).isEmpty, "re-prime waits for four frames")
-        expect(playback.enqueue(11, now: 0.34).isEmpty, "third re-prime frame")
-        expect(playback.enqueue(12, now: 0.36) == [9, 10, 11, 12],
-               "downlink resumes in order with a short reserve")
+        for _ in 0..<16 { playback.completed(generation: generation) }
+        expect(playback.enqueue(17, now: 0.66).isEmpty,
+               "a 360 ms gap re-primes instead of playing one frame into a dry player")
+        for frame in 18...31 {
+            expect(playback.enqueue(frame, now: 0.66 + Double(frame - 17) * 0.02).isEmpty,
+                   "re-prime waits for sixteen frames")
+        }
+        expect(playback.enqueue(32, now: 0.96) == Array(17...32),
+               "downlink resumes in order with the full 320 ms reserve")
         expect(playback.underruns == 1, "the real underrun is visible in diagnostics")
-        expect(playback.maxArrivalGapMs >= 160, "the arrival gap is visible in diagnostics")
-        expect(playback.enqueue(13, now: 0.38) == [13], "steady downlink keeps flowing")
-        for _ in 0..<5 { playback.completed(generation: generation) }
-        expect(playback.enqueue(14, now: 0.90).isEmpty,
+        expect(playback.maxArrivalGapMs >= 360, "the arrival gap is visible in diagnostics")
+        expect(playback.enqueue(33, now: 0.98) == [33], "steady downlink keeps flowing")
+        for _ in 0..<17 { playback.completed(generation: generation) }
+        expect(playback.enqueue(34, now: 1.60).isEmpty,
                "a half-second outage restores the startup reserve")
-        for frame in 15...20 {
-            expect(playback.enqueue(frame, now: 0.90 + Double(frame - 14) * 0.02).isEmpty,
+        for frame in 35...48 {
+            expect(playback.enqueue(frame, now: 1.60 + Double(frame - 34) * 0.02).isEmpty,
                    "outage reserve rebuilds")
         }
-        expect(playback.enqueue(21, now: 1.04) == Array(14...21),
+        expect(playback.enqueue(49, now: 1.90) == Array(34...49),
                "post-outage downlink restarts with the full reserve")
-        expect(playback.enqueue(22, now: 1.06) == [22],
+        expect(playback.enqueue(50, now: 1.92) == [50],
                "downlink keeps flowing after the outage reserve")
     }
 
@@ -294,17 +295,17 @@ struct CallAudioTimingTests {
     static func oldPlaybackCompletionCannotDrainNewStream() {
         var playback = CallAudioPlaybackBuffer<Int>()
         let old = playback.generation
-        for frame in 1...8 { _ = playback.enqueue(frame, now: Double(frame - 1) * 0.02) }
+        for frame in 1...15 { _ = playback.enqueue(frame, now: Double(frame - 1) * 0.02) }
         playback.reset()
-        for frame in 4...10 {
+        for frame in 4...18 {
             expect(playback.enqueue(frame, now: 0.1 + Double(frame - 4) * 0.02).isEmpty,
                    "new playback builds its reserve")
         }
-        expect(playback.enqueue(11, now: 0.24) == Array(4...11), "new playback starts")
-        expect(playback.enqueue(12, now: 0.26) == [12], "new playback keeps flowing")
-        for _ in 0..<8 { playback.completed(generation: old) }
-        expect(playback.scheduledFrames == 9, "old completions leave new playback untouched")
-        expect(playback.enqueue(13, now: 0.28) == [13],
+        expect(playback.enqueue(19, now: 0.40) == Array(4...19), "new playback starts")
+        expect(playback.enqueue(20, now: 0.42) == [20], "new playback keeps flowing")
+        for _ in 0..<16 { playback.completed(generation: old) }
+        expect(playback.scheduledFrames == 17, "old completions leave new playback untouched")
+        expect(playback.enqueue(21, now: 0.44) == [21],
                "old completions cannot force false rebuffer")
     }
 
@@ -312,8 +313,8 @@ struct CallAudioTimingTests {
     static func playbackCapacityStaysBounded() {
         var playback = CallAudioPlaybackBuffer<Int>()
         var scheduled: [Int] = []
-        for frame in 1...20 { scheduled += playback.enqueue(frame, now: 0) }
-        expect(scheduled == Array(1...12), "scheduled downlink audio has a finite capacity")
-        expect(playback.droppedFrames == 8, "downlink overflow is observable in counters")
+        for frame in 1...30 { scheduled += playback.enqueue(frame, now: 0) }
+        expect(scheduled == Array(1...26), "scheduled downlink audio has a finite capacity")
+        expect(playback.droppedFrames == 4, "downlink overflow is observable in counters")
     }
 }

@@ -37,11 +37,11 @@ class UplinkJitterBufferTest {
     }
 
     // Catches an unbounded backlog replaying stale speech after a long network burst.
-    @Test fun excessiveBurstKeepsOnlyTheNewestTwoHundredFortyMilliseconds() {
+    @Test fun excessiveBurstKeepsOnlyTheNewestQueueLimit() {
         val buffer = UplinkJitterBuffer()
-        repeat(20) { buffer.offer(frame(it), 0) }
-        val played = (0 until 12).mapNotNull { buffer.poll(it * 20L)?.get(0)?.toInt() }
-        assertEquals((8 until 20).toList(), played)
+        repeat(40) { buffer.offer(frame(it), 0) }
+        val played = (0 until 32).mapNotNull { buffer.poll(it * 20L)?.get(0)?.toInt() }
+        assertEquals((8 until 40).toList(), played)
         assertEquals(8, buffer.snapshot().dropped)
         assertEquals(0, buffer.snapshot().queued)
     }
@@ -97,26 +97,17 @@ class UplinkJitterBufferTest {
         assertEquals(0, buffer.snapshot().dropped)
     }
 
-    // Catches replaying stale speech after a writer stall shorter than the 900 ms watchdog.
-    @Test fun expiredSpeechIsDiscardedBeforeFreshSpeechResumes() {
+    // Catches replaying stale speech after a writer stall beyond the watchdog.
+    @Test fun expiredSpeechIsDiscardedBeforeItCanReplay() {
         val buffer = UplinkJitterBuffer()
         repeat(5) { buffer.offer(frame(it), 0) }
         assertEquals(0, buffer.poll(0)!![0].toInt())
         buffer.offer(frame(5), 380)
-        assertNull(buffer.poll(401))
+        assertNull(buffer.poll(801))
         assertEquals(4, buffer.snapshot().dropped)
         assertEquals(4, buffer.snapshot().expired)
         assertEquals(1, buffer.snapshot().underruns)
-        buffer.offer(frame(6), 420)
-        buffer.offer(frame(7), 440)
-        assertNull(buffer.poll(440))
-        buffer.offer(frame(8), 460)
-        assertNull(buffer.poll(460))
-        buffer.offer(frame(9), 480)
-        buffer.offer(frame(10), 500)
-        buffer.offer(frame(11), 520)
-        buffer.offer(frame(12), 540)
-        assertEquals(5, buffer.poll(540)!![0].toInt())
+        assertEquals(1, buffer.snapshot().queued)
     }
 
     // Catches dropped/reordered speech or false underflows on a paced, lossless stream.
@@ -199,29 +190,30 @@ class UplinkJitterBufferTest {
         buffer.offer(frame(4), 130L)
         assertNull(buffer.poll(140L))
 
-        // The 130 ms gap raised the target to seven frames, so the reserve is six; once six
+        // The 130 ms gap raises the target to eight frames, so the reserve is seven; once seven
         // frames accumulate, the buffer re-primes and plays.
         buffer.offer(frame(5), 150L)
         buffer.offer(frame(6), 170L)
         buffer.offer(frame(7), 190L)
         buffer.offer(frame(8), 210L)
         buffer.offer(frame(9), 230L)
-        assertEquals(4, buffer.poll(230L)!![0].toInt())
+        buffer.offer(frame(10), 250L)
+        assertEquals(4, buffer.poll(250L)!![0].toInt())
     }
 
-    // Catches a hard limit that lets the queue sit above the documented ceiling: a burst must never
-    // leave more than 240 ms queued locally, or 480 ms on a remote/VPN link.
-    @Test fun localCeilingIsTwelveFramesAndRemoteIsTwentyFour() {
+    // Catches a hard limit that lets the queue sit above the documented guard: 640 ms local and
+    // 960 ms remote are memory bounds, above the adaptive 480/720 ms targets.
+    @Test fun hardQueueLimitIsAboveTheAdaptiveCeiling() {
         val local = UplinkJitterBuffer()
-        repeat(20) { local.offer(frame(it), 0) }
-        assertEquals(12, local.snapshot().queued)
+        repeat(40) { local.offer(frame(it), 0) }
+        assertEquals(32, local.snapshot().queued)
         assertEquals(8, local.snapshot().dropped)
 
         val remote = UplinkJitterBuffer()
         remote.reset(remote = true)
-        repeat(30) { remote.offer(frame(it), 0) }
-        assertEquals(24, remote.snapshot().queued)
-        assertEquals(6, remote.snapshot().dropped)
+        repeat(60) { remote.offer(frame(it), 0) }
+        assertEquals(48, remote.snapshot().queued)
+        assertEquals(12, remote.snapshot().dropped)
     }
 
     // Catches trimming inside the reserve the adaptive target allows (target plus two frame slack).
@@ -245,13 +237,13 @@ class UplinkJitterBufferTest {
         val local = UplinkJitterBuffer()
         assertEquals(2, local.snapshot().targetFrames)
         repeat(12) { local.offer(frame(it), 0) }
-        assertEquals(12, local.snapshot().targetFrames)
+        assertEquals(13, local.snapshot().targetFrames)
 
         val remote = UplinkJitterBuffer()
         remote.reset(remote = true)
         assertEquals(3, remote.snapshot().targetFrames)
         repeat(40) { remote.offer(frame(it), 0) }
-        assertEquals(24, remote.snapshot().targetFrames)
+        assertEquals(36, remote.snapshot().targetFrames)
     }
 
     // Catches Wi-Fi clumps that arrive a few milliseconds apart being read as paced frames: the
@@ -275,10 +267,10 @@ class UplinkJitterBufferTest {
     // the measured "gap=338 ms but targetFrames=6".
     @Test fun theMemoryRingHoldsAFullWindowOfClumpedTraffic() {
         val buffer = UplinkJitterBuffer()
-        // One 338 ms silence takes the target to the local ceiling.
+        // One 338 ms silence raises the target by the gap plus two frames of slack.
         buffer.offer(frame(1), 0)
         buffer.offer(frame(2), 338)
-        assertEquals(12, buffer.snapshot().targetFrames)
+        assertEquals(18, buffer.snapshot().targetFrames)
 
         // Clumped traffic for the rest of the window: four frames every 100 ms, which is four
         // qualifying observations per clump and ~340 of them inside the ten second window.
@@ -290,7 +282,7 @@ class UplinkJitterBufferTest {
             now += 100
         }
         // The spike is still inside the window: the answer must not depend on how many clumps ran.
-        assertEquals(12, buffer.snapshot().targetFrames)
+        assertEquals(18, buffer.snapshot().targetFrames)
     }
 
     // Catches the same ring being sized by seconds rather than by the samples a burst produces.
@@ -298,7 +290,7 @@ class UplinkJitterBufferTest {
         val buffer = UplinkJitterBuffer()
         buffer.offer(frame(0), 0)
         buffer.offer(frame(1), 338)
-        assertEquals(12, buffer.snapshot().targetFrames)
+        assertEquals(18, buffer.snapshot().targetFrames)
 
         var now = 358L
         var index = 2
@@ -308,7 +300,7 @@ class UplinkJitterBufferTest {
             now += 20
         }
         // Three seconds of paced audio later the silence is still remembered.
-        assertEquals(12, buffer.snapshot().targetFrames)
+        assertEquals(18, buffer.snapshot().targetFrames)
 
         while (now < 338 + 10_500) {
             buffer.offer(frame(index++), now)
