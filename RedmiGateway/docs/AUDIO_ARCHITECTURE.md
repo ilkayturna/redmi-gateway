@@ -29,7 +29,7 @@ iPhone mic ─▶ UDP ─▶ open ─▶ AudioTrack (USAGE_MEDIA → TELEPHONY) 
 | Uplink | A 48 kHz stereo `AudioTrack` with `USAGE_MEDIA`/`CONTENT_TYPE_SPEECH` and `setPreferredDevice(TYPE_TELEPHONY)`, fed by a 3× polyphase upsampler (`Upsampler3x.kt`) | The track lands on the INCALL_MUSIC output (`incall_music_uplink2`), which mixes into the uplink without moving the call off the handset path. |
 | Vendor fix | `scripts/device/vendor_audio_fix.py` maps `USECASE_INCALL_MUSIC_UPLINK2` to PCM 27 and uses the `Incall_Music_2 Audio Mixer MultiMedia9` path | Without it, `pcm_prepare` fails and the uplink sounds like the old "helicopter" audio. It is reversible (`status`, `apply` and `revert`, backups in `/vendor/etc/phonebridge-backup`) and was applied with the owner's approval. Diagnostics show whether it is present. |
 | Isolation | `setParameters("device_mute=true;direction=tx")` and `direction=rx` | This mutes the Redmi's own microphone and earpiece while the iPhone owns the call, without touching the stream the iPhone feeds or reads. |
-| Android uplink pacing | Blocking writes pace 20 ms frames. Local links prime 4 frames; remote links retain 2-frame priming. `UplinkJitterBuffer` holds at most 12 frames (240 ms), trims one frame when depth stays above 6 for more than 500 ms, and discards PCM more than 400 ms old before playback. | A recoverable 200 ms arrival burst fits without losing speech, while depth and monotonic arrival age bound the backlog after a stall. See `RELAY_HEALTH` and diagnostics. |
+| Android uplink pacing | Blocking writes pace 20 ms frames. `UplinkJitterBuffer` primes 4–8 frames (80–160 ms) depending on the measured target, holds at most 12 frames (240 ms) locally or 24 remotely, trims one frame when depth stays two frames above the adaptive target for more than 500 ms, and discards PCM more than 400 ms old before playback. The target is the worst recent need over a ten second window. | The measured link delivered a 160 ms gap followed by a nine-frame burst; an 80 ms reserve covered neither, and a four second window forgot the spike before the next one. Ten seconds keep the reserve through repeated jitter, while the bounded queue still caps latency. See `RELAY_HEALTH` and diagnostics. |
 
 ## iPhone timing and capture privacy (2026-10-01)
 
@@ -47,11 +47,15 @@ The network format remains 20 ms of 16 kHz mono PCM16. Timing helpers in
   starts the next interval from actual send time, preventing an immediate catch-up packet.
   Backpressure bounds outstanding sends to 3; an empty or blocked queue schedules another
   future wake-up rather than spinning on an expired deadline.
-- **Playback:** 3 received frames prime playback, and at most 12 frames may be scheduled with
-  the player. The completion callback is `.dataPlayedBack`, so a scheduled frame remains
-  outstanding until it actually plays. When the player drains, priming is rearmed before new
-  speech starts. A receive gap above 500 ms clears unscheduled reserve and rearms priming.
-  Session generations prevent old completions or receives from entering the following call.
+- **Playback:** 8 received frames (160 ms) prime playback, matching the measured downlink gap,
+  and at most 12 frames may be scheduled with the player. The completion callback is
+  `.dataPlayedBack`, so a scheduled frame remains outstanding until it actually plays. A steady
+  drain does not rebuild the reserve; only a real underrun (three frame periods with no scheduled
+  buffer and a gap above 60 ms) re-primes four frames so recovery is one short pause instead of
+  repeated holes. A receive gap above 500 ms clears unscheduled reserve and rearms the full
+  eight-frame startup reserve. `DOWNLINK_HEALTH` reports the largest arrival gap, underruns,
+  dropped frames and scheduled depth. Session generations prevent old completions or receives
+  from entering the following call.
 - **Mute privacy:** a mute transition clears pending capture and increments a mute generation.
   The tap's generation and captured-while-muted snapshot, together with the latest transition's
   monotonic timestamp, mask delayed or partially accumulated PCM from before or across unmute.
