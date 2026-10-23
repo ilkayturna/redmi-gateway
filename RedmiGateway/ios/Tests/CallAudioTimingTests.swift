@@ -12,19 +12,19 @@ struct CallAudioTimingTests {
 
     static func main() {
         captureBatchesArePaced()
-        schedulerStallDoesNotCatchUp()
+        schedulerStallCatchesUpOnlyAboveTheReserve()
         microphoneReprimesAfterStarvation()
         transientEmptyQueueKeepsPacing()
         pacedSpeechHasNoSendGaps()
         reloadedReserveCannotBypassPacing()
         timerCadenceSurvivesHandlerCostAndWakeJitter()
-        midIntervalStallCannotEmitCloseCatchUp()
+        midIntervalStallCatchUpIsBounded()
         discardedReserveCannotReplaySpeech()
         mutedCaptureCannotReplayAfterUnmute()
         delayedCallbackCannotReplayMutedInterval()
         staleAndOverflowingCaptureIsDiscarded()
         staleCaptureCannotEnterRestartedStream()
-        playbackStartsWithJitterReserveAndReprimesAfterAGap()
+        playbackMaintainsReserveAndReprimesAfterAGap()
         oldPlaybackCompletionCannotDrainNewStream()
         playbackCapacityStaysBounded()
         if failures != 0 { print("\(failures) audio timing regression(s)"); exit(1) }
@@ -57,15 +57,21 @@ struct CallAudioTimingTests {
         }
     }
 
-    // Break caught: advancing an old deadline repeatedly after a delayed timer.
-    static func schedulerStallDoesNotCatchUp() {
+    // Break caught: restarting a full interval from actual time after a late wake. That sent one
+    // frame less than the microphone produced on every late tick (48/s versus 50/s), and the
+    // surplus slowly overflowed the queue. A deep backlog now catches up in bounded 5 ms steps;
+    // one wake still emits at most one packet.
+    static func schedulerStallCatchesUpOnlyAboveTheReserve() {
         var pacer = CallAudioPacer<Int>()
         pacer.enqueue(Array(0..<10), capturedAt: 0.2, now: 0.2, generation: pacer.generation)
         expect(pacer.next(now: 0.2) == 0, "first paced frame")
         expect(pacer.next(now: 0.28) == 1, "delayed scheduler emits one fresh frame")
-        expect(pacer.next(now: 0.28) == nil, "delayed scheduler does not catch up in a burst")
-        expect(pacer.next(now: 0.299) == nil, "next frame waits a complete interval")
-        expect(pacer.next(now: 0.30) == 2, "next frame resumes at real time")
+        expect(pacer.next(now: 0.28) == nil, "one wake never emits two packets")
+        // Eight frames remain, which is the catch-up threshold: schedule the next slot 5 ms out.
+        expect(pacer.nextWakeUp(now: 0.28) <= 0.2851, "deep backlog gets a bounded catch-up slot")
+        expect(pacer.next(now: 0.284) == nil, "catch-up still waits its 5 ms slot")
+        expect(pacer.next(now: 0.285) == 2, "catch-up sends the next frame in order")
+        expect(pacer.next(now: 0.285) == nil, "catch-up never drains the queue in one wake")
     }
 
     // Break caught: restarting speech with a single frame after an empty queue. The queue has to be
@@ -136,10 +142,10 @@ struct CallAudioTimingTests {
     // Break caught: unbounded capture backlog and sending obsolete speech after a stall.
     static func staleAndOverflowingCaptureIsDiscarded() {
         var pacer = CallAudioPacer<Int>()
-        pacer.enqueue(Array(1...20), capturedAt: 0.4, now: 0.4, generation: pacer.generation)
-        expect(pacer.next(now: 0.4) == 9, "overflow keeps the latest twelve PCM frames")
+        pacer.enqueue(Array(1...30), capturedAt: 0.4, now: 0.4, generation: pacer.generation)
+        expect(pacer.next(now: 0.4) == 7, "overflow keeps the newest twenty-four fresh PCM frames")
         expect(pacer.next(now: 1.0) == nil, "expired speech cannot leave the sender")
-        pacer.enqueue([21, 22, 23], capturedAt: 0.5, now: 1.0, generation: pacer.generation)
+        pacer.enqueue([31, 32, 33], capturedAt: 0.3, now: 1.0, generation: pacer.generation)
         expect(pacer.next(now: 1.0) == nil, "delayed capture work cannot revive stale speech")
     }
 
@@ -183,15 +189,17 @@ struct CallAudioTimingTests {
                "ordinary timer jitter preserves bounded packet separation")
     }
 
-    // Break caught: preserving a nominal deadline after a19ms-late wake emits
-    // the next packet1ms later, even though a full catch-up loop was removed.
-    static func midIntervalStallCannotEmitCloseCatchUp() {
+    // Break caught: preserving a nominal deadline after a 19 ms late wake used to emit the next
+    // packet 1 ms later. The catch-up path is now explicit and bounded: one packet per 5 ms slot,
+    // and only while more than 160 ms of speech is queued.
+    static func midIntervalStallCatchUpIsBounded() {
         var pacer = CallAudioPacer<Int>()
         pacer.enqueue(Array(0..<10), capturedAt: 0.2, now: 0.2, generation: pacer.generation)
         _ = pacer.next(now: 0.2)
         expect(pacer.next(now: 0.239) == 1, "late wake emits one frame")
-        expect(pacer.nextWakeUp(now: 0.2395) >= 0.258999, "late wake restores a full paced interval")
-        expect(pacer.next(now: 0.24) == nil, "missed phase cannot cause1ms catch-up packet")
+        expect(pacer.nextWakeUp(now: 0.2395) >= 0.244, "late wake schedules one catch-up slot")
+        expect(pacer.next(now: 0.2439) == nil, "missed phase cannot emit immediately")
+        expect(pacer.next(now: 0.244) == 2, "missed phase resumes one catch-up packet later")
     }
 
     // Break caught: mute toggles retain the paced reserve and replay old speech.
@@ -254,10 +262,11 @@ struct CallAudioTimingTests {
         expect(pacer.next(now: 0.3) == 7, "new stream accepts its own capture")
     }
 
-    // Break caught: the measured downlink delivered 315 ms gaps after a 20 ms cadence, and the
-    // old four-frame re-prime repeated the underrun 30 times in one 18 second call. Sixteen frames
-    // (320 ms) cover the measured stall; a 26-frame burst fits before the player is bounded.
-    static func playbackStartsWithJitterReserveAndReprimesAfterAGap() {
+    // Break caught: scheduling every arriving frame immediately. That let the player drain at the
+    // first 263 ms arrival gap (measured: underruns=2,5,7,10 in one 30 s call) because the 320 ms
+    // startup reserve was never maintained. The player now stays sixteen frames ahead and refills
+    // on every completion; a gap deeper than the reserve rebuilds a reserve that covers it.
+    static func playbackMaintainsReserveAndReprimesAfterAGap() {
         var playback = CallAudioPlaybackBuffer<Int>()
         for frame in 1...15 {
             expect(playback.enqueue(frame, now: Double(frame - 1) * 0.02).isEmpty,
@@ -266,29 +275,34 @@ struct CallAudioTimingTests {
         expect(playback.enqueue(16, now: 0.30) == Array(1...16),
                "downlink starts with the measured 320 ms reserve")
         let generation = playback.generation
-        for _ in 0..<16 { playback.completed(generation: generation) }
-        expect(playback.enqueue(17, now: 0.66).isEmpty,
-               "a 360 ms gap re-primes instead of playing one frame into a dry player")
-        for frame in 18...31 {
-            expect(playback.enqueue(frame, now: 0.66 + Double(frame - 17) * 0.02).isEmpty,
-                   "re-prime waits for sixteen frames")
-        }
-        expect(playback.enqueue(32, now: 0.96) == Array(17...32),
-               "downlink resumes in order with the full 320 ms reserve")
+
+        // A 263 ms arrival gap consumes thirteen buffers but leaves three: the player is still
+        // ahead and the next frame refills the reserve instead of starting a silence.
+        for _ in 0..<13 { expect(playback.completed(generation: generation) == nil,
+                                 "the reserve is not refilled without an arrival") }
+        expect(playback.scheduledFrames == 3, "263 ms gap leaves the player ahead")
+        expect(playback.enqueue(17, now: 0.563) == [17],
+               "the next arrival refills the maintained reserve")
+        expect(playback.underruns == 0, "the measured 263 ms gap does not underrun")
+        expect(playback.maxArrivalGapMs >= 263, "the arrival gap is visible in diagnostics")
+
+        // A real outage drains the player. The re-prime reserve covers the 400 ms gap that caused
+        // it, so the same outage cannot repeat immediately.
+        for _ in 0..<4 { playback.completed(generation: generation) }
+        expect(playback.scheduledFrames == 0, "the outage drained the player")
+        expect(playback.enqueue(18, now: 0.963).isEmpty,
+               "a 400 ms gap re-primes instead of playing one frame into a dry player")
         expect(playback.underruns == 1, "the real underrun is visible in diagnostics")
-        expect(playback.maxArrivalGapMs >= 360, "the arrival gap is visible in diagnostics")
-        expect(playback.enqueue(33, now: 0.98) == [33], "steady downlink keeps flowing")
-        for _ in 0..<17 { playback.completed(generation: generation) }
-        expect(playback.enqueue(34, now: 1.60).isEmpty,
-               "a half-second outage restores the startup reserve")
-        for frame in 35...48 {
-            expect(playback.enqueue(frame, now: 1.60 + Double(frame - 34) * 0.02).isEmpty,
-                   "outage reserve rebuilds")
+        for frame in 19...39 {
+            expect(playback.enqueue(frame, now: 0.963 + Double(frame - 18) * 0.02).isEmpty,
+                   "re-prime waits for the reserve the gap proved necessary")
         }
-        expect(playback.enqueue(49, now: 1.90) == Array(34...49),
-               "post-outage downlink restarts with the full reserve")
-        expect(playback.enqueue(50, now: 1.92) == [50],
-               "downlink keeps flowing after the outage reserve")
+        expect(playback.enqueue(40, now: 1.403) == Array(18...40),
+               "downlink resumes in order with the deeper 440 ms reserve")
+        expect(playback.enqueue(41, now: 1.423).isEmpty,
+               "a full reserve does not schedule beyond its target")
+        expect(playback.completed(generation: generation) == 41,
+               "one completion releases exactly one queued frame")
     }
 
     // Break caught: an AVAudioPlayerNode completion from before stop mutating a new stream.
@@ -302,11 +316,13 @@ struct CallAudioTimingTests {
                    "new playback builds its reserve")
         }
         expect(playback.enqueue(19, now: 0.40) == Array(4...19), "new playback starts")
-        expect(playback.enqueue(20, now: 0.42) == [20], "new playback keeps flowing")
+        expect(playback.enqueue(20, now: 0.42) == [], "new playback keeps its reserve")
         for _ in 0..<16 { playback.completed(generation: old) }
-        expect(playback.scheduledFrames == 17, "old completions leave new playback untouched")
-        expect(playback.enqueue(21, now: 0.44) == [21],
+        expect(playback.scheduledFrames == 16, "old completions leave new playback untouched")
+        expect(playback.enqueue(21, now: 0.44) == [],
                "old completions cannot force false rebuffer")
+        expect(playback.completed(generation: playback.generation) == 20,
+               "the new stream still releases its queued speech in order")
     }
 
     // Break caught: scheduling an unbounded amount of stale playback into AVAudioPlayerNode.
@@ -314,7 +330,8 @@ struct CallAudioTimingTests {
         var playback = CallAudioPlaybackBuffer<Int>()
         var scheduled: [Int] = []
         for frame in 1...30 { scheduled += playback.enqueue(frame, now: 0) }
-        expect(scheduled == Array(1...26), "scheduled downlink audio has a finite capacity")
+        expect(scheduled == Array(1...16), "the player is fed only up to its reserve")
         expect(playback.droppedFrames == 4, "downlink overflow is observable in counters")
+        expect(playback.scheduledFrames == 16, "scheduled audio stays at the reserve target")
     }
 }

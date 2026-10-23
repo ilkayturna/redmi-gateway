@@ -29,7 +29,7 @@ iPhone mic ─▶ UDP ─▶ open ─▶ AudioTrack (USAGE_MEDIA → TELEPHONY) 
 | Uplink | A 48 kHz stereo `AudioTrack` with `USAGE_MEDIA`/`CONTENT_TYPE_SPEECH` and `setPreferredDevice(TYPE_TELEPHONY)`, fed by a 3× polyphase upsampler (`Upsampler3x.kt`) | The track lands on the INCALL_MUSIC output (`incall_music_uplink2`), which mixes into the uplink without moving the call off the handset path. |
 | Vendor fix | `scripts/device/vendor_audio_fix.py` maps `USECASE_INCALL_MUSIC_UPLINK2` to PCM 27 and uses the `Incall_Music_2 Audio Mixer MultiMedia9` path | Without it, `pcm_prepare` fails and the uplink sounds like the old "helicopter" audio. It is reversible (`status`, `apply` and `revert`, backups in `/vendor/etc/phonebridge-backup`) and was applied with the owner's approval. Diagnostics show whether it is present. |
 | Isolation | `setParameters("device_mute=true;direction=tx")` and `direction=rx` | This mutes the Redmi's own microphone and earpiece while the iPhone owns the call, without touching the stream the iPhone feeds or reads. |
-| Android uplink pacing | Blocking writes pace 20 ms frames. `UplinkJitterBuffer` primes 4–24 frames (80–480 ms) depending on the measured target, holds at most 32 frames (640 ms) locally or 48 remotely, trims one frame when depth stays two frames above the adaptive target for more than 500 ms, and discards PCM more than 800 ms old (1,100 ms remote) before playback. The target ceiling is 24 frames (480 ms) locally and 36 (720 ms) remotely; the target is the worst recent need over a ten second window. | Build 123 measured a 439 ms gap followed by a 26-frame burst on the iPhone→Redmi path and dropped 34 frames at the old 240 ms ceiling. The target uses the gap plus two frames of slack and a burst plus one; ten seconds keep the reserve through the repeat pattern. The hard queue and age limits are memory/watchdog guards above the target, not the latency policy. The cost is up to about 0.5 s of walkie-talkie delay while the link is this bad. See `RELAY_HEALTH` and diagnostics. |
+| Android uplink pacing | Blocking writes pace 20 ms frames. `UplinkJitterBuffer` primes 12 frames (240 ms) on the first start locally, 16 (320 ms) remotely, then 4–24 frames (80–480 ms) depending on the measured target; it holds at most 32 frames (640 ms) locally or 48 remotely, trims one frame when depth stays two frames above the adaptive target for more than 500 ms, and discards PCM more than 800 ms old (1,100 ms remote) before playback. The target ceiling is 24 frames (480 ms) locally and 36 (720 ms) remotely; the target is the worst recent need over a ten second window. | Build 123 measured a 439 ms gap followed by a 26-frame burst on the iPhone→Redmi path and dropped 34 frames at the old 240 ms ceiling. Build 126 underran 9–28 times because the first prime (4 frames) happened before the adaptive target had seen the 160–206 ms opening gaps; the startup prime now covers them. The target uses the gap plus two frames of slack and a burst plus one; ten seconds keep the reserve through the repeat pattern. The hard queue and age limits are memory/watchdog guards above the target, not the latency policy. The cost is up to about 0.5 s of walkie-talkie delay while the link is this bad. See `RELAY_HEALTH` and diagnostics. |
 
 ## iPhone timing and capture privacy (2026-10-01)
 
@@ -39,25 +39,27 @@ The network format remains 20 ms of 16 kHz mono PCM16. Timing helpers in
 
 - **Capture and send:** the tap converts to 16 kHz and deposits complete frames into a bounded
   capture queue under a lock. A one-shot timer sends at most one frame per deadline, after
-  priming 3 frames. Capacity is 12 frames; captured PCM older than 320 ms is discarded. The tap
+  priming 3 frames. Capacity is 24 frames; captured PCM older than 480 ms is discarded. The tap
   stamps capture time before conversion or dispatch, using the hardware host timestamp when
   available, and accounts for each frame's position within a batch. Queueing a delayed callback
   therefore does not make old microphone samples fresh.
-- **Timer phase:** lateness below 2 ms preserves the nominal 20 ms phase. A stall of 2 ms or more
-  starts the next interval from actual send time, preventing an immediate catch-up packet.
-  Backpressure bounds outstanding sends to 3; an empty or blocked queue schedules another
-  future wake-up rather than spinning on an expired deadline.
-- **Playback:** 16 received frames (320 ms) prime playback, covering the measured 315 ms downlink
-  gap, and at most 26 frames (520 ms) may be scheduled with the player, covering the 26-frame
-  burst measured on the reverse path. The completion callback is `.dataPlayedBack`, so a
-  scheduled frame remains outstanding until it actually plays. A steady drain does not rebuild the
-  reserve; only a real underrun (three frame periods with no scheduled buffer and a gap above
-  60 ms) re-primes the same 16-frame reserve. Build 123's four-frame re-prime repeated the
-  underrun 30 times in one 18 second call because the next 315 ms gap drained it again. A receive
-  gap above 500 ms clears unscheduled reserve and rearms the 16-frame startup reserve.
-  `DOWNLINK_HEALTH` reports the largest arrival gap, underruns, dropped frames and scheduled
-  depth. Session generations prevent old completions or receives from entering the following
-  call.
+- **Timer phase:** lateness below 2 ms preserves the nominal 20 ms phase. A late wake with only
+  the working reserve advances to the next future slot instead of restarting a full interval from
+  actual time; restarting sent 48 frames/s while the microphone produced 50/s, and the surplus
+  became the measured `overflow=20`. When more than eight frames (160 ms) are queued, the pacer
+  drains at 5 ms catch-up slots, one packet per wake, until the reserve is back to normal.
+  Backpressure bounds outstanding sends to 4; an empty or blocked queue schedules another future
+  wake-up rather than spinning on an expired deadline.
+- **Playback:** 16 received frames (320 ms) are scheduled initially and the player is kept at that
+  depth for the whole call: scheduling every received frame immediately let the player drain at the
+  measured 263 ms arrival gaps (build 126: underruns 2, 5, 7 and 10 in one 30 s call). Every
+  `.dataPlayedBack` completion refills the reserve from the receive queue. At most 26 frames
+  (520 ms) may be outstanding, covering the 26-frame burst measured on the reverse path. A real
+  underrun (three frame periods with no scheduled buffer and a gap above 60 ms) re-primes with a
+  reserve that covers the gap that caused it, capped at 26 frames; a receive gap above 500 ms
+  clears unscheduled reserve and rebuilds the same gap-sized reserve. `DOWNLINK_HEALTH` reports the
+  largest arrival gap, underruns, dropped frames and scheduled depth. Session generations prevent
+  old completions or receives from entering the following call.
 - **Mute privacy:** a mute transition clears pending capture and increments a mute generation.
   The tap's generation and captured-while-muted snapshot, together with the latest transition's
   monotonic timestamp, mask delayed or partially accumulated PCM from before or across unmute.

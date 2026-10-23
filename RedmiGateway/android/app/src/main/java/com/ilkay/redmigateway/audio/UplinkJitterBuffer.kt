@@ -59,6 +59,14 @@ class UplinkJitterBuffer {
          */
         const val PRIME_FRAMES_MIN = 4
         const val PRIME_FRAMES_MAX = 24
+        /**
+         * The first prime is deeper than the adaptive floor on purpose: call setup measured
+         * 160-206 ms arrival gaps before the target had learned them, so the old four-frame
+         * (80 ms) start underran 9-28 times in one call. Twelve frames (240 ms) local and sixteen
+         * (320 ms) remote cover the first gap; after that the adaptive target takes over.
+         */
+        const val LOCAL_START_PRIME_FRAMES = 12
+        const val REMOTE_START_PRIME_FRAMES = 16
         /** Three starved polls (60 ms) mean the gap is real: wait for the reserve again. */
         const val UNPRIME_AFTER_UNDERRUNS = 3
         const val LOCAL_TARGET_FLOOR = 2
@@ -98,6 +106,9 @@ class UplinkJitterBuffer {
     private var targetFrames = LOCAL_TARGET_FLOOR
     /** Raised by [reset] while the sender duplicates frames, so a copy still lands in time. */
     private var floorOverride = 0
+    /** Startup reserve before the adaptive target has seen this link's first gap. */
+    private var startupPrimeFrames = LOCAL_START_PRIME_FRAMES
+    private var hasPrimedOnce = false
 
     // Rolling window of "how deep the buffer had to be" observations, newest replaces oldest.
     private val needAt = LongArray(HISTORY_SAMPLES)
@@ -114,6 +125,8 @@ class UplinkJitterBuffer {
         // helps if the buffer still holds the frame it belongs to: the caller asks for a slightly
         // deeper floor while redundancy is on.
         floorOverride = minTargetFrames.coerceAtLeast(0)
+        startupPrimeFrames = if (remote) REMOTE_START_PRIME_FRAMES else LOCAL_START_PRIME_FRAMES
+        hasPrimedOnce = false
         lastArrivalAt = null
         burstFrames = 0
         lastAuthenticatedArrivalAt = null
@@ -196,10 +209,14 @@ class UplinkJitterBuffer {
      * How much reserve playback waits for after a starvation. The target includes one frame of
      * slack over the measured need, so the reserve is one less. A paced link gets 80 ms; a link
      * that just proved a 439 ms gap waits for up to 480 ms, because that is the one that will
-     * starve again.
+     * starve again. Before the first prime the startup reserve wins, so the opening 160-206 ms
+     * gaps cannot underrun while the adaptive target is still empty.
      */
-    private fun primeFrames() =
-        (targetFrames - 1).coerceIn(PRIME_FRAMES_MIN, PRIME_FRAMES_MAX)
+    private fun primeFrames(): Int {
+        val adaptive = (targetFrames - 1).coerceIn(PRIME_FRAMES_MIN, PRIME_FRAMES_MAX)
+        return if (hasPrimedOnce) adaptive
+        else maxOf(adaptive, startupPrimeFrames).coerceAtMost(PRIME_FRAMES_MAX)
+    }
 
     @Synchronized fun poll(nowMs: Long): ByteArray? {
         val wasPrimed = primed
@@ -230,6 +247,7 @@ class UplinkJitterBuffer {
         } else highSince = null
         if (!primed && queue.size >= primeFrames()) {
             primed = true
+            hasPrimedOnce = true
             consecutiveUnderruns = 0
         }
         val frame = if (primed) queue.pollFirst() else null
@@ -247,7 +265,12 @@ class UplinkJitterBuffer {
         return frame?.pcm
     }
 
-    @Synchronized fun snapshot() = Snapshot(queue.size, dropped, underruns, expiredFrames,
-        maxAuthenticatedArrivalGapMs, maxAuthenticatedArrivalBurstFrames, targetFrames)
+    @Synchronized fun snapshot(): Snapshot {
+        // Until the first prime the buffer is really waiting for the startup reserve, not the
+        // adaptive floor; diagnostics must report the depth the writer will actually see.
+        val reportedTarget = if (hasPrimedOnce) targetFrames else maxOf(targetFrames, startupPrimeFrames)
+        return Snapshot(queue.size, dropped, underruns, expiredFrames,
+            maxAuthenticatedArrivalGapMs, maxAuthenticatedArrivalBurstFrames, reportedTarget)
+    }
 }
 

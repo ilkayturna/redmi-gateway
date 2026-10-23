@@ -44,6 +44,9 @@ final class AudioEngine {
     private var captureTimer: DispatchSourceTimer?
     private var activeGeneration: UInt64?
     private var pendingSends = 0
+    /// Four datagrams in flight leave room for the 263 ms link stalls without making the capture
+    /// queue wait on a single completion; the old limit of three was hit by every Wi-Fi retry.
+    private let maximumPendingSends = 4
     private var sealer: MediaSealer?
     private var lastSession: UInt32 = 0
     private var lastKey = Data()
@@ -390,23 +393,28 @@ final class AudioEngine {
             socket.start(queue: self.networkQueue)
 
             // Each one-shot uses the pacer's nominal deadline, accounting for handler
-            // cost. A real stall starts a new phase; it never triggers a catch-up loop.
+            // cost. A real stall starts a new phase; a measured backlog drains at catch-up
+            // pace so it cannot grow into the overflow that lost speech in build 126.
             let captureTimer = DispatchSource.makeTimerSource(queue: self.networkQueue)
             captureTimer.schedule(deadline: .now() + .milliseconds(20), leeway: .milliseconds(1))
             captureTimer.setEventHandler { [weak self, weak socket] in
                 guard let self, let socket, self.connection === socket,
                       self.activeGeneration == generation else { return }
-                if self.pendingSends < 3 {
+                let now = Self.monotonicNow()
+                if self.pendingSends < self.maximumPendingSends {
                     self.captureLock.lock()
                     let frame = self.capturePacer.generation == generation
-                        ? self.capturePacer.next(now: Self.monotonicNow()) : nil
+                        ? self.capturePacer.next(now: now) : nil
                     self.captureLock.unlock()
                     if let frame { self.sendPcm(frame) }
                 }
                 self.captureLock.lock()
-                let wakeUp = self.capturePacer.nextWakeUp(now: Self.monotonicNow())
+                let wakeUp = self.capturePacer.nextWakeUp(now: now)
                 self.captureLock.unlock()
-                let delay = max(0, wakeUp - Self.monotonicNow())
+                // While the socket is backpressured, poll a little instead of spinning on a due
+                // deadline; otherwise fire at the pacer's next slot.
+                let floor: TimeInterval = self.pendingSends >= self.maximumPendingSends ? 0.005 : 0.0005
+                let delay = max(floor, wakeUp - now)
                 self.captureTimer?.schedule(deadline: .now() + .nanoseconds(Int(ceil(delay * 1_000_000_000))),
                                             leeway: .milliseconds(1))
             }
@@ -573,7 +581,7 @@ final class AudioEngine {
 
     @discardableResult
     private func sendPacket(type: UInt8, pcm: Data) -> Bool {
-        guard pendingSends < 3, let sealer, let socket = connection else { return false }
+        guard pendingSends < maximumPendingSends, let sealer, let socket = connection else { return false }
         txCounter &+= 1
         let hearing = lastDownlink.map { Date().timeIntervalSince($0) < 0.5 } ?? false
         guard let packet = sealer.seal(type: type, flags: hearing ? MediaSealer.flagHearing : 0,
@@ -638,7 +646,9 @@ final class AudioEngine {
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             self?.networkQueue.async { [weak self] in
                 guard let self else { return }
-                self.playbackBuffer.completed(generation: generation)
+                if let next = self.playbackBuffer.completed(generation: generation) {
+                    self.schedulePlayback(next)
+                }
             }
         }
     }

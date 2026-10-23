@@ -8,8 +8,11 @@ struct CallAudioPacer<Frame> {
         let capturedAt: TimeInterval
     }
     private let interval: TimeInterval = 0.02
-    private let maximumAge: TimeInterval = 0.32
-    private let capacity = 12
+    /// 24 frames = 480 ms. The measured uplink stalled for 263 ms while the send completions were
+    /// blocked; the old twelve-frame queue overflowed by 5-20 frames per call and that speech was
+    /// lost before it could ever leave the phone.
+    private let maximumAge: TimeInterval = 0.48
+    private let capacity = 24
     /// How long the queue may stay empty before the send reserve is rebuilt.
     ///
     /// The tap produces a frame every ~21 ms and the timer takes one every 20 ms, so a healthy
@@ -20,6 +23,14 @@ struct CallAudioPacer<Frame> {
     /// drained its 20 ms buffer into concealment - the crackle. Only a real outage, seven frame
     /// periods without a single frame, rebuilds the reserve.
     private let starvation: TimeInterval = 0.15
+    /// Above this backlog (160 ms) a late sender catches up; a smaller queue is just the working
+    /// reserve and must not turn into a burst. The old code restarted a full interval after every
+    /// late wake instead, which sent 48 frames/s while the microphone produced 50/s: the surplus
+    /// became the measured overflow=20.
+    private let catchUpDepth = 8
+    /// The next catch-up packet waits this long. Long enough that one timer wake still sends at
+    /// most one packet, short enough to drain a measured 300 ms backlog before it goes stale.
+    private let catchUpInterval: TimeInterval = 0.005
     private var frames: [Capture] = []
     private var primed = false
     private var emptySince: TimeInterval?
@@ -50,9 +61,12 @@ struct CallAudioPacer<Frame> {
     }
 
     func nextWakeUp(now: TimeInterval) -> TimeInterval {
-        // Empty queues or socket backpressure must not spin on a past deadline.
+        // An empty or unprimed queue waits for microphone data; a due deadline wakes the timer
+        // immediately so a backlog can catch up. The 0.5 ms floor prevents a tight spin when the
+        // socket is still backpressured and `next` cannot emit anything.
+        guard primed, !frames.isEmpty else { return now + interval }
         if let nextSendAt, nextSendAt > now { return nextSendAt }
-        return now + interval
+        return now + 0.0005
     }
 
     mutating func enqueue(_ batch: [Frame], capturedAt: TimeInterval,
@@ -92,11 +106,22 @@ struct CallAudioPacer<Frame> {
         if let nextSendAt, now + 0.000000001 < nextSendAt { return nil }
         guard !frames.isEmpty else { return nil }
         let frame = frames.removeFirst().frame
-        // Normal sub-2ms jitter keeps the producer's phase instead of accumulating
-        // timer/handler cost. Larger stalls start a full interval from actual time,
-        // so the next nominal deadline cannot cause a near-immediate catch-up packet.
-        if let deadline = nextSendAt, now - deadline < 0.002 {
-            nextSendAt = deadline + interval
+        // Normal sub-2ms jitter keeps the producer's phase instead of accumulating timer/handler
+        // cost. A lateness beyond that used to restart a full interval from actual time, which
+        // sent one frame less than the microphone produced on every late tick: 48/s versus 50/s,
+        // and the surplus slowly overflowed the queue. A real backlog now drains at catch-up
+        // pace; a late wake with only the working reserve advances to the next future slot and
+        // keeps the phase, so it never emits a near-immediate catch-up packet.
+        if let deadline = nextSendAt {
+            if now - deadline < 0.002 {
+                nextSendAt = deadline + interval
+            } else if frames.count >= catchUpDepth {
+                nextSendAt = now + catchUpInterval
+            } else {
+                var next = deadline + interval
+                while next <= now { next += interval }
+                nextSendAt = next
+            }
         } else {
             nextSendAt = now + interval
         }
@@ -153,26 +178,26 @@ struct CallAudioPlaybackBuffer<Frame> {
     private var primed = false
     private var lastArrival: TimeInterval?
     private(set) var generation: UInt64 = 0
+    /// Frames handed to AVAudioPlayerNode but not played back yet. The player is kept at
+    /// `targetFrames` ahead of real time instead of being fed once per arrival.
     private(set) var scheduledFrames = 0
     private(set) var droppedFrames = 0
     /// A downlink that runs dry is silent; the diagnostics log needs the count to prove whether the
     /// reserve was enough. This is the number of real underruns, not every empty player instant.
     private(set) var underruns = 0
     private(set) var maxArrivalGapMs = 0
-    /// The measured downlink delivered 315 ms gaps after a nominal 20 ms cadence, and the reverse
-    /// path showed 439 ms gaps with 26-frame bursts. Sixteen frames (320 ms) cover the measured
-    /// downlink stall; the old eight-frame reserve drained and the four-frame re-prime repeated
-    /// the underrun 30 times in one 18 second call. A real underrun now rebuilds the same 320 ms
-    /// reserve, so the recovery is one deliberate pause rather than a cycle of 80 ms holes.
+    /// The measured downlink delivered 263 ms arrival gaps against a nominal 20 ms cadence, and the
+    /// player drained before the next burst arrived. Sixteen frames (320 ms) cover that gap, and
+    /// the player is kept this far ahead for the whole call: scheduling every arriving frame
+    /// immediately let the reserve drain at each gap and produced 2-10 underruns per call.
     private let initialReserveFrames = 16
-    private let reprimeReserveFrames = 16
     /// 26 * 20 ms = 520 ms. The larger bound is required for the 26-frame Wi-Fi burst measured on
     /// the Redmi uplink; a 240 ms ceiling dropped the tail of every such burst.
     private let maximumScheduledFrames = 26
     /// Three frame periods without a scheduled buffer means the player, not merely the network,
     /// has run dry. A single late frame is normal and must not force a re-prime.
     private let starvation: TimeInterval = 0.06
-    private var reserveFrames = 16
+    private var targetFrames = 16
 
     mutating func reset() {
         frames.removeAll()
@@ -182,7 +207,7 @@ struct CallAudioPlaybackBuffer<Frame> {
         droppedFrames = 0
         underruns = 0
         maxArrivalGapMs = 0
-        reserveFrames = initialReserveFrames
+        targetFrames = initialReserveFrames
         generation &+= 1
     }
 
@@ -191,43 +216,58 @@ struct CallAudioPlaybackBuffer<Frame> {
             let gap = max(0, now - lastArrival)
             maxArrivalGapMs = max(maxArrivalGapMs, Int((gap * 1000).rounded()))
             if gap > 0.5 {
-                // A real outage: stale audio is worthless, and the stream starts with the full
-                // reserve again.
+                // A real outage: stale audio is worthless, but the gap it exposed must not be
+                // forgotten - the stream resumes with enough reserve to cover it again.
                 frames.removeAll()
                 primed = false
-                reserveFrames = initialReserveFrames
+                targetFrames = reserveFrames(forGap: gap)
             } else if primed, scheduledFrames == 0, gap > starvation {
-                // The player had nothing left for three frame periods. Resume after a short
+                // The player had nothing left for three frame periods. Resume after the measured
                 // reserve rather than scheduling one frame into a dry device and repeating holes.
                 underruns += 1
                 primed = false
-                reserveFrames = reprimeReserveFrames
+                targetFrames = reserveFrames(forGap: gap)
             }
         }
         lastArrival = now
         frames.append(frame)
-        if !primed && frames.count >= reserveFrames { primed = true }
+        if primed {
+            // Keep only the newest speech when a burst overruns the allowance above the reserve.
+            let maximumQueued = max(1, maximumScheduledFrames - targetFrames)
+            if frames.count > maximumQueued {
+                droppedFrames += frames.count - maximumQueued
+                frames.removeFirst(frames.count - maximumQueued)
+            }
+        } else if frames.count > targetFrames {
+            // Waiting for the reserve: the oldest frames would play after a needlessly long delay.
+            droppedFrames += frames.count - targetFrames
+            frames.removeFirst(frames.count - targetFrames)
+        }
+        if !primed, frames.count + scheduledFrames >= targetFrames { primed = true }
+        return takeReady()
+    }
+
+    /// One player buffer finished. Refill the reserve from the queue and hand the next frame back
+    /// to the engine; this is what keeps the player `targetFrames` ahead instead of draining dry.
+    @discardableResult
+    mutating func completed(generation: UInt64) -> Frame? {
+        guard generation == self.generation else { return nil }
+        scheduledFrames = max(0, scheduledFrames - 1)
+        return takeReady().first
+    }
+
+    private mutating func takeReady() -> [Frame] {
         guard primed else { return [] }
         var ready: [Frame] = []
-        while !frames.isEmpty {
-            let next = frames.removeFirst()
-            if scheduledFrames < maximumScheduledFrames {
-                scheduledFrames += 1
-                ready.append(next)
-            } else {
-                droppedFrames += 1
-            }
+        while scheduledFrames < targetFrames, !frames.isEmpty {
+            ready.append(frames.removeFirst())
+            scheduledFrames += 1
         }
-        // The next outage gets the full startup reserve; the smaller one is only for this recovery.
-        reserveFrames = initialReserveFrames
         return ready
     }
 
-    mutating func completed(generation: UInt64) {
-        guard generation == self.generation else { return }
-        scheduledFrames = max(0, scheduledFrames - 1)
-        // No re-priming here: a steady downlink finishes its last scheduled frame all the time,
-        // and rebuilding the reserve at that moment delivered the audio in clumps with holes.
-        // enqueue() re-primes only after a measured starvation (see `starvation`).
+    private func reserveFrames(forGap gap: TimeInterval) -> Int {
+        let need = Int((gap / 0.02).rounded(.up)) + 2
+        return min(maximumScheduledFrames, max(initialReserveFrames, need))
     }
 }
