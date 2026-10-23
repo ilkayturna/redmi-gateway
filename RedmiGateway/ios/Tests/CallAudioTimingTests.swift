@@ -296,10 +296,12 @@ struct CallAudioTimingTests {
         let old = playback.generation
         for frame in 1...8 { _ = playback.enqueue(frame, now: Double(frame - 1) * 0.02) }
         playback.reset()
-        for frame in 4...11 {
-            _ = playback.enqueue(frame, now: 0.1 + Double(frame - 4) * 0.02)
+        for frame in 4...10 {
+            expect(playback.enqueue(frame, now: 0.1 + Double(frame - 4) * 0.02).isEmpty,
+                   "new playback builds its reserve")
         }
-        expect(playback.enqueue(12, now: 0.26) == Array(4...12), "new playback starts")
+        expect(playback.enqueue(11, now: 0.24) == Array(4...11), "new playback starts")
+        expect(playback.enqueue(12, now: 0.26) == [12], "new playback keeps flowing")
         for _ in 0..<8 { playback.completed(generation: old) }
         expect(playback.scheduledFrames == 9, "old completions leave new playback untouched")
         expect(playback.enqueue(13, now: 0.28) == [13],
