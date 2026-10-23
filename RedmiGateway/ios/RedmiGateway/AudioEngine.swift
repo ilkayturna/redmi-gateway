@@ -642,10 +642,16 @@ final class AudioEngine {
                 }
                 switch opened.type {
                 case 1:
-                    guard opened.payload.count == self.pcmFrameBytes else {
+                    // A current Redmi sends exactly one 20 ms frame. A Redmi that predates exact
+                    // framing sends the HAL's ~19 ms read instead; playing that is still better
+                    // than dropping the whole downlink, and `short=` in DOWNLINK_HEALTH shows the
+                    // old gateway. Only a malformed payload is refused.
+                    guard !opened.payload.isEmpty, opened.payload.count % 2 == 0,
+                          opened.payload.count <= self.pcmFrameBytes else {
                         self.shortPackets += 1
                         break
                     }
+                    if opened.payload.count != self.pcmFrameBytes { self.shortPackets += 1 }
                     self.lastPcmRxCounter = opened.counter
                     self.receivedFrames += 1
                     self.enqueuePlayback(opened.payload)
