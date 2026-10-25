@@ -581,6 +581,23 @@ istek teslim edilemiyor → ses Redmi'de kalıyor → tekrar deneniyor. **Karars
    `sinceLastMessageMs ≈ sessionMs` = peer susuyor, ağ ya da askıya alınma) → **uygulama mantığını
    en son** suçla. Bu vakada kapı, HAL ve ses yolu temizdi; suçlu bağlantı politikasıydı.
 
+### 6.10 Yeniden deneme döngüsü TEK UÇUŞ olmalı — paralel denemeler birbirini bozar
+
+**Hata (22.10 build 114 ve 25.10.2026 11:52 build 139):** iPhone'dan cevaplanan gelen aramada
+`didActivate`, `audio_ready`'den önce geldi; ilk `AudioEngine.start` girişi 0 Hz gördü. Build 117'deki
+"20 kez 150 ms'de yeniden dene" düzeltmesi tek döngü varsaymıştı; oysa her `audio_ready`, her çağrı
+olayı ve her yeniden deneme **kendi** döngüsünü başlattı: **11 döngü** aynı anda, her biri önce motoru
+durdurup ses işlemeyi yeniden açtı ve giriş arama boyunca hiç format vermedi. Ses Redmi'de kaldı.
+Telemetrideki imza: aynı `attempt N/20` satırının **aynı saniyede 11 kez** görünmesi.
+
+**KURAL:**
+1. Bir kaynağı "hazır olana kadar" yeniden deneyen her yol **tek uçuş**tur: bekleyen bir deneme
+   varken gelen yeni istek **yeni döngü açmaz**, bekleyenin hedefini günceller.
+2. Yeniden deneme her adımda kaynağı yıkıp kuruyorsa (stop + yeniden yapılandırma), paralel iki
+   deneme **kesinlikle** birbirini bozar. Döngü sayısını telemetride say.
+3. Sorun yereldeyken (iPhone mikrofonu) karşı tarafa tekrar istek gönderme: Redmi her `audio_start`'ta
+   yeni oturum açar ve bekleyen deneme hareketli bir hedefi kovalar.
+
 ---
 
 ## 7. OTOMASYON VE BAYAT YOLLAR — SESSİZ GERİ ALMA
