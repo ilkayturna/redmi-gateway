@@ -900,6 +900,12 @@ final class CallKitManager: NSObject, CXProviderDelegate {
                     }
                     continue
                 }
+                if AudioEngine.shared.isWaitingForInput {
+                    // The hold-up is this iPhone's microphone, not the Redmi. Every extra audio_start
+                    // made the Redmi open a new session and the waiting start chase it (25.10.2026).
+                    connection.log("Audio retry: this iPhone's microphone is not ready yet; not asking the Redmi again")
+                    continue
+                }
                 attempt += 1
                 connection.log("Audio is still on the Redmi; asking again (attempt \(attempt))")
                 self.audioRequested = true

@@ -96,6 +96,10 @@ final class AudioEngine {
     private var isInterrupted = false
     private var lastRecoveryRequest = Date.distantPast
     private(set) var isSessionPrepared = false
+    /// The one start that is waiting for the input node to report a format; see start().
+    private var formatWait: (host: String, port: UInt16, session: UInt32, key: Data, force: Bool)?
+    /// True while a start waits for this iPhone's microphone; asking the Redmi again cannot help then.
+    var isWaitingForInput: Bool { formatWait != nil }
     /// The Swift flag can outlive the actual engine: an audio-route change stops AVAudioEngine
     /// without touching `running`. Callers asking "is audio flowing?" must see the real state.
     var isRunning: Bool { running && engine.isRunning }
@@ -179,6 +183,12 @@ final class AudioEngine {
     /// session can still change the input format.
     func warmUp() {
         guard !running else { return }
+        // A start is waiting for the input format; touching the input node now is the churn that
+        // kept it without one (see start()).
+        guard formatWait == nil else {
+            log("Audio path: warm-up skipped while a start waits for the microphone")
+            return
+        }
         let began = Date()
         _ = engine.inputNode
         if !voiceProcessingWarmed {
@@ -243,6 +253,16 @@ final class AudioEngine {
             log("Audio engine already running for this session; duplicate start ignored")
             return
         }
+        // Only one start may wait for the input format. On 25.10.2026 11:52 (and 22.10.2026 15:10)
+        // every audio_ready, call event and retry began its own twenty-step wait; eleven ran at once,
+        // each one first stopped the engine and switched voice processing on again, and the input
+        // never reported a format for the rest of the call. A new request now hands its endpoint to
+        // the start that is already waiting.
+        if attempt == 1, let waiting = formatWait {
+            formatWait = (host: host, port: port, session: session, key: key, force: force || waiting.force)
+            log("Audio start already waiting for the microphone; endpoint updated (session=\(session))")
+            return
+        }
         if force || wasRunning {
             log("Audio engine rebuilding (force=\(force), flag=\(wasRunning), " +
                 "engine=\(wasEngineRunning), session=\(session))")
@@ -294,11 +314,25 @@ final class AudioEngine {
                     "inputSr=\(inputFormat.sampleRate), channels=\(inputFormat.channelCount), " +
                     "sessionSr=\(sessionInfo.sampleRate))")
                 if attempt < maxStartAttempts, !running {
+                    formatWait = (host: host, port: port, session: session, key: key, force: force)
+                    if attempt == 6 || attempt == 13 { resetInputUnit(attempt: attempt) }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                        guard let self, !self.running else { return }
-                        self.start(host: host, port: port, session: session, key: key,
-                                   attempt: attempt + 1, force: force)
+                        guard let self else { return }
+                        guard let target = self.formatWait else {
+                            self.log("Audio start wait ended: call audio was stopped meanwhile")
+                            return
+                        }
+                        self.formatWait = nil
+                        guard !self.running else {
+                            self.log("Audio start wait ended: the engine is already running")
+                            return
+                        }
+                        self.start(host: target.host, port: target.port, session: target.session, key: target.key,
+                                   attempt: attempt + 1, force: target.force)
                     }
+                } else {
+                    formatWait = nil
+                    log("Audio start gave up: the microphone reported no format in \(attempt) attempts")
                 }
                 return
             }
@@ -463,7 +497,24 @@ final class AudioEngine {
         }
     }
 
+    /// One deliberate reset of the input unit while it reports no format: a clean voice-processing
+    /// unit instead of the state that repeated on/off switching left behind. Done twice per wait.
+    private func resetInputUnit(attempt: Int) {
+        log("Audio input still has no format at attempt \(attempt); resetting the input unit")
+        engine.reset()
+        try? engine.inputNode.setVoiceProcessingEnabled(false)
+        try? engine.inputNode.setVoiceProcessingEnabled(true)
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            log("Audio session could not be activated during the reset: \(error.localizedDescription)")
+        }
+    }
+
     func stop(preservingControls: Bool = false) {
+        // start() calls this with preservingControls before it builds the graph; only a real stop
+        // (the call ended, CallKit deactivated the session) cancels a start waiting for the format.
+        if !preservingControls { formatWait = nil }
         captureLock.lock()
         capturePacer.reset()
         // schedulePlayback uses this lock too: no old receive can schedule a buffer
