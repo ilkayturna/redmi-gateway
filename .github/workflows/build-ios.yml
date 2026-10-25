@@ -150,6 +150,24 @@ jobs:
           "$RUNNER_TEMP/pushenv/bin/pip" install --disable-pip-version-check --quiet 'PyJWT[crypto]>=2,<3'
           CERT_SERIAL="$(cat "$RUNNER_TEMP/cert_serial" 2>/dev/null || true)" "$RUNNER_TEMP/pushenv/bin/python" scripts/ensure_push_profile.py
 
+      # A build signed without the push entitlement installs and opens normally, but it never rings
+      # while the iPhone is away from the Redmi and gets no SMS or missed-call alerts through Apple,
+      # and nothing on the phone says why. The step above fails softly so its own log stays
+      # readable; this gate stops such a build before anything is archived or uploaded.
+      - name: Require push profile for release
+        if: inputs.release == true
+        shell: bash
+        env:
+          PUSH_PROFILE: ${{ steps.push.outputs.push_profile }}
+          PUSH_OUTCOME: ${{ steps.push.outcome }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PUSH_PROFILE:-}" ]; then
+            echo "::error title=Push profile missing::Provision push notifications produced no profile (outcome: ${PUSH_OUTCOME}). A TestFlight build without push never rings away from the Redmi, so nothing was archived or uploaded. Fix the step log above and run the release again."
+            exit 1
+          fi
+          echo "Push profile for this release: $PUSH_PROFILE"
+
       - name: Archive iPhone app
         shell: bash
         env:
@@ -157,7 +175,8 @@ jobs:
         run: |
           set -euo pipefail
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" RedmiGateway/ios/RedmiGateway/Info.plist
-          # With a push profile the app gets the push entitlement; otherwise it signs as before.
+          # With a push profile the app gets the push entitlement. A release never gets here without
+          # one (see the gate above); the plain profile stays for a job that skips that gate.
           profile='Telefon Gecidi App Store 2026'
           entitlements=()
           if [ -n "${PUSH_PROFILE:-}" ]; then

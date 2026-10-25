@@ -188,6 +188,13 @@ final class BLECentralManager: NSObject, ObservableObject {
             GatewayConnection.shared.log("Ignored unsealed Bluetooth state")
             return
         }
+        // A pairing that was locked at launch may be readable by now; without it the state below
+        // cannot be opened.
+        GatewayConnection.shared.reloadPairingIfLocked(reason: "Bluetooth state")
+        if GatewayConnection.shared.pairingLocked {
+            GatewayConnection.shared.log("Bluetooth state not opened: pairing locked until the first unlock")
+            return
+        }
         guard let key = GatewayConnection.shared.pairing?.bleKey,
               let plain = BridgeCrypto.open(key, Data(bytes[1...]), aad: Self.stateAAD),
               let object = (try? JSONSerialization.jsonObject(with: plain)) as? [String: Any],

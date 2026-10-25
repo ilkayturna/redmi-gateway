@@ -1,5 +1,6 @@
 import AVFoundation
 import SwiftUI
+import UserNotifications
 
 /// First run (or after the pairing was removed): pair once with the code shown on the Redmi.
 struct PairingView: View {
@@ -95,13 +96,16 @@ struct SettingsView: View {
     @ObservedObject private var connection = GatewayConnection.shared
     @ObservedObject private var directory = PhoneContactDirectory.shared
     @ObservedObject private var wake = CallWakeMonitor.shared
+    @ObservedObject private var ble = BLECentralManager.shared
+    @ObservedObject private var notifier = Notifier.shared
     @State private var confirmingUnpair = false
 
     var body: some View {
         NavigationView {
             List {
                 Section(header: Text("Redmi")) {
-                    LabeledRow(title: "Durum", value: linkText, valueColor: connection.link == .ready ? .green : .secondary)
+                    LabeledRow(title: "Durum", value: linkText,
+                               valueColor: (connection.link == .ready || restsOnBluetooth) ? .green : .secondary)
                     if let device = connection.gatewayDevice { LabeledRow(title: "Cihaz", value: device) }
                     if let version = connection.gatewayAppVersion { LabeledRow(title: "Redmi uygulaması", value: version) }
                     if connection.compatibility == .degraded {
@@ -115,18 +119,30 @@ struct SettingsView: View {
                 }
                 Section(header: Text("Aramalar"),
                         footer: Text("Konum iznini \"Her Zaman\" yaparsan, uygulamayı kaydırıp kapatsan bile gelen aramalar iPhone'da çalar. Yalnızca Redmi'nin yakınlığı algılanır; konumun okunmaz ve kaydedilmez.")) {
-                    LabeledRow(title: "Uygulama kapalıyken aramalar", value: wake.isEnabled ? "Açık" : "Kapalı",
-                               valueColor: wake.isEnabled ? .green : .orange)
+                    LabeledRow(title: "Uygulama kapalıyken aramalar", value: wakeText,
+                               valueColor: (wake.isEnabled && !wake.needsPreciseLocation) ? .green : .orange)
                     if !wake.isEnabled {
                         Button("Konum iznini \"Her Zaman\" yap") { wake.requestPermission() }
+                    } else if wake.needsPreciseLocation {
+                        Text("\"Kesin Konum\" kapalı. iPhone, Redmi'nin yakınlığını yalnızca Kesin Konum açıkken algılar; uygulama kapalıyken aramalar çalmayabilir.")
+                            .font(.footnote)
+                            .foregroundColor(.orange)
+                        Button("Kesin Konum'u aç") { wake.openSettings() }
                     }
                 }
-                Section(header: Text("İzinler"), footer: Text("Mikrofon, görüşme iPhone'dayken konuşmanı Redmi'ye iletmek için; Kişiler, numaraları adlarla göstermek için kullanılır. Kişilerin iPhone'dan çıkmaz.")) {
+                Section(header: Text("İzinler"), footer: Text("Mikrofon, görüşme iPhone'dayken konuşmanı Redmi'ye iletmek için; Kişiler, numaraları adlarla göstermek için; Bildirimler, yeni SMS'leri ve cevapsız aramaları haber vermek için kullanılır. Kişilerin iPhone'dan çıkmaz.")) {
                     LabeledRow(title: "Mikrofon", value: microphoneText,
                                valueColor: AudioEngine.shared.microphoneAllowed ? .secondary : .red)
                     LabeledRow(title: "Kişiler", value: directory.canRead ? "İzin var" : "İzin yok",
                                valueColor: directory.canRead ? .secondary : .orange)
-                    if !AudioEngine.shared.microphoneAllowed || !directory.canRead {
+                    LabeledRow(title: "Bildirimler", value: notificationText,
+                               valueColor: notifier.authorization == .denied ? .red : .secondary)
+                    if notifier.authorization == .denied {
+                        Text("Bildirimler kapalı. Yeni SMS'ler ve cevapsız aramalar iPhone'da haber verilmez.")
+                            .font(.footnote)
+                            .foregroundColor(.red)
+                    }
+                    if !AudioEngine.shared.microphoneAllowed || !directory.canRead || notifier.authorization == .denied {
                         Button("iPhone Ayarları'nı aç") {
                             if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
                         }
@@ -158,11 +174,29 @@ struct SettingsView: View {
         .navigationViewStyle(.stack)
     }
 
+    /// Read through `ble` so the row follows the Bluetooth link; see GatewayConnection.restsOnBluetooth.
+    private var restsOnBluetooth: Bool {
+        ble.isConnected && connection.restsOnBluetooth
+    }
+
+    private var wakeText: String {
+        if !wake.isEnabled { return "Kapalı" }
+        return wake.needsPreciseLocation ? "Kesin Konum kapalı" : "Açık"
+    }
+
+    private var notificationText: String {
+        switch notifier.authorization {
+        case .denied: return "İzin yok"
+        case .notDetermined: return "Sorulmadı"
+        default: return "İzin var"
+        }
+    }
+
     private var linkText: String {
         switch connection.link {
         case .ready: return "Bağlı"
         case .pairing: return "Eşleştiriliyor"
-        case .searching: return "Aranıyor"
+        case .searching: return restsOnBluetooth ? "Bağlı · Bluetooth" : "Aranıyor"
         case .connecting: return "Bağlanıyor"
         case .unpaired: return "Eşleşmedi"
         case .offline(let reason): return reason

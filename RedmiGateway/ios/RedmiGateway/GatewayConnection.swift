@@ -52,6 +52,10 @@ public final class GatewayConnection: ObservableObject {
     @Published private(set) var isWiFiConnected = false
     @Published private(set) var isNetworkViable = false
     @Published private(set) var pairing: GatewayPairing?
+    /// True while the Keychain could not be opened because this iPhone has not been unlocked since
+    /// it restarted. The pairing is still there; it is read again as soon as the iPhone is unlocked,
+    /// and until then nothing treats this iPhone as unpaired.
+    @Published private(set) var pairingLocked = false
     /// A second call ringing during the current one.
     @Published private(set) var waitingCall: GSMCall?
 
@@ -60,8 +64,16 @@ public final class GatewayConnection: ObservableObject {
     /// Key for this connection's sealed call audio; nil until authenticated.
     private(set) var mediaKey: Data?
 
-    public var isPaired: Bool { pairing != nil }
+    /// A locked Keychain counts as paired: showing the pairing screen then would ask for a code
+    /// the person does not need, for a pairing that is only waiting for the first unlock.
+    public var isPaired: Bool { pairing != nil || pairingLocked }
     public var isAuthenticated: Bool { state == .authenticated }
+    /// The healthy resting state: the network link sleeps on purpose while the app is off screen,
+    /// and the paired Redmi is still in touch over Bluetooth, which wakes this iPhone for calls and
+    /// messages. Views that show it also observe BLECentralManager so they follow the Bluetooth link.
+    var restsOnBluetooth: Bool {
+        link == .searching && pairing != nil && BLECentralManager.shared.isConnected
+    }
     var isIPhoneAudioConfirmed: Bool { audioLocation == .iphone }
 
     private let kLastHost = "gateway_ip"
@@ -108,6 +120,10 @@ public final class GatewayConnection: ObservableObject {
     private var pingTask: Task<Void, Never>?
     private var syncCallsHasMore = false
     private var smsTimeouts: [String: Task<Void, Never>] = [:]
+    /// Retried sends waiting for the next journal sync before they may go out again; see retrySms.
+    private var smsRetriesAfterSync = Set<String>()
+    /// A decline or hang-up that reached neither link; see keepCallCommand.
+    private var pendingCallCommand: (action: String, callId: String, at: Date)?
     /// When this iPhone last ran a "carry the call audio" request.
     ///
     /// The Redmi broadcasts the request on every authenticated socket, and this iPhone genuinely
@@ -150,8 +166,12 @@ public final class GatewayConnection: ObservableObject {
         if !currentHost.isEmpty, !candidates.contains(Endpoint(host: currentHost, port: currentPort)) {
             candidates.insert(Endpoint(host: currentHost, port: currentPort), at: 0)
         }
-        pairing = PairingKeychain.load()
-        link = pairing == nil ? .unpaired : .searching
+        switch PairingKeychain.read() {
+        case .found(let stored): pairing = stored
+        case .absent: break
+        case .locked: pairingLocked = true
+        }
+        link = (pairing == nil && !pairingLocked) ? .unpaired : .searching
         installTelemetryObservers()
 
         discovery.onEndpointFound = { [weak self] host, port, deviceId in
@@ -174,7 +194,12 @@ public final class GatewayConnection: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
-        if pairing == nil, let legacy = UserDefaults.standard.string(forKey: kLegacyToken),
+        if pairingLocked { log("Pairing locked until the first unlock after a restart; waiting for it") }
+        // Sends saved as pending by an earlier run lost their result window with that run.
+        for pending in history.expirePendingSends(timeout: Self.smsResultTimeout) {
+            startSmsTimeout(requestId: pending.requestId, after: pending.remaining)
+        }
+        if pairing == nil, !pairingLocked, let legacy = UserDefaults.standard.string(forKey: kLegacyToken),
            !legacy.trimmingCharacters(in: .whitespaces).isEmpty {
             // Builds up to 1.0 (33) stored the Redmi's code; it is still valid until the
             // first keyed pairing, so the update needs no action from the person.
@@ -213,6 +238,7 @@ public final class GatewayConnection: ObservableObject {
         PairingKeychain.delete()
         UserDefaults.standard.removeObject(forKey: kLegacyToken)
         pairing = nil
+        pairingLocked = false
         pendingPairCode = nil
         history.reset()
         BLECentralManager.shared.forgetGateway()
@@ -221,6 +247,37 @@ public final class GatewayConnection: ObservableObject {
         closeSocket()
         link = .unpaired
         log("Pairing removed")
+    }
+
+    /// Reads the pairing again when the Keychain was locked at the last read.
+    ///
+    /// Called when iOS reports that protected data is available, and before anything that needs
+    /// the key (a Bluetooth state, a VoIP push, a beacon wake, the app opening): a suspended app
+    /// does not receive the unlock notification, so it would otherwise stay without its pairing
+    /// until the next launch. Cheap when nothing was locked.
+    func reloadPairingIfLocked(reason: String) {
+        guard pairingLocked else { return }
+        switch PairingKeychain.read() {
+        case .locked:
+            return
+        case .absent:
+            pairingLocked = false
+            if pendingPairCode == nil { link = .unpaired }
+            log("Keychain readable after the unlock (\(reason)); no pairing stored")
+        case .found(let stored):
+            pairingLocked = false
+            pairing = stored
+            log("Pairing read after the unlock (\(reason))")
+            history.bind(gatewayId: stored.gatewayId)
+            CallWakeMonitor.shared.refresh()
+            guard started else { return }
+            // Exactly what a launch with a readable pairing does, through the wake path: Bluetooth
+            // reads the call state again, now with the key, and the link connects, fetches what
+            // was missed and goes back to sleep in the background.
+            discovery.start()
+            BLECentralManager.shared.start()
+            catchUp(reason: "pairing unlocked")
+        }
     }
 
     func setManualAddress(host: String, port: Int) {
@@ -555,6 +612,7 @@ public final class GatewayConnection: ObservableObject {
                 if sync.hasMore || syncCallsHasMore {
                     requestSync()
                 } else {
+                    resendRetriedSms()
                     finishCatchUp()
                 }
             }
@@ -566,9 +624,18 @@ public final class GatewayConnection: ObservableObject {
             if let waiting = decode(CallWaitingMessage.self, data) { handleWaiting(waiting) }
         case "sms_send_result":
             if let result = decode(SmsSendResultMessage.self, data), let requestId = result.requestId {
-                smsTimeouts.removeValue(forKey: requestId)?.cancel()
-                history.completePending(requestId: requestId, success: result.success)
-                if !result.success { log("SMS send failed: \(result.error ?? "unknown")") }
+                if !result.success, smsRetriesAfterSync.contains(requestId) {
+                    // The first attempt is reported failed while its retry waits for the journal
+                    // check: nothing went out, so the retry goes ahead as planned.
+                    log("SMS send failed: \(result.error ?? "unknown"); its retry goes ahead")
+                } else {
+                    smsTimeouts.removeValue(forKey: requestId)?.cancel()
+                    // A success for a retry still waiting for its journal check settles it, and
+                    // the message is not sent a second time.
+                    smsRetriesAfterSync.remove(requestId)
+                    history.completePending(requestId: requestId, success: result.success)
+                    if !result.success { log("SMS send failed: \(result.error ?? "unknown")") }
+                }
             }
         case "diagnostics_result":
             if let object = try? JSONSerialization.jsonObject(with: data),
@@ -831,6 +898,8 @@ public final class GatewayConnection: ObservableObject {
         if callState == .idle || callState == .disconnected {
             currentCall = nil
             lastCallError = nil
+            // The call a kept decline or hang-up was meant for is over.
+            pendingCallCommand = nil
             audioLocation = .redmi
             audioNotice = nil
         } else {
@@ -857,6 +926,9 @@ public final class GatewayConnection: ObservableObject {
         } else if let previous = currentCall {
             applyCallEvent(CallEventMessage(state: "disconnected", number: nil, callId: previous.rawCallId))
         }
+        // The state answers the get_state sent right after authentication, so this is the first
+        // moment a kept decline or hang-up can be checked against the Redmi's real call.
+        retryPendingCallCommand(liveCall: response.call)
     }
 
     /// Call state from Bluetooth. In the foreground the network link is authoritative; in the
@@ -900,6 +972,8 @@ public final class GatewayConnection: ObservableObject {
     private func handleAck(_ ack: AckMessage) {
         // The command reached the Redmi; the watchdog must not send it over Bluetooth as well.
         settleControlWatchdog(action: ack.action)
+        // A kept decline or hang-up has arrived too; the Redmi's answer to it stands.
+        if let kept = pendingCallCommand, kept.action == ack.action { pendingCallCommand = nil }
         guard !ack.success else { return }
         switch ack.action {
         case "dial":
@@ -974,7 +1048,13 @@ public final class GatewayConnection: ObservableObject {
             startControlWatchdog(action: action, callId: callId)
             return
         }
-        sendOverBluetooth(action: action, callId: callId)
+        sendOverBluetooth(action: action, callId: callId, reportFailure: Self.isEndCommand(action))
+    }
+
+    /// A decline or hang-up that cannot reach the Redmi leaves its call going on there, so the
+    /// person is told and the command is kept for the link; see keepCallCommand.
+    private static func isEndCommand(_ action: String) -> Bool {
+        action == "reject" || action == "hangup"
     }
 
     /// Sends one command over the authenticated socket; false when nothing could carry it.
@@ -988,7 +1068,8 @@ public final class GatewayConnection: ObservableObject {
             guard error != nil else { return }
             Task { @MainActor in
                 self?.log("\(action) frame not sent; trying Bluetooth")
-                self?.sendOverBluetooth(action: action, callId: callId)
+                self?.sendOverBluetooth(action: action, callId: callId,
+                                        reportFailure: GatewayConnection.isEndCommand(action))
             }
         }
         return true
@@ -1029,22 +1110,71 @@ public final class GatewayConnection: ObservableObject {
         cancelControlWatchdog(key: "\(action)|\(callId)")
         guard BLECentralManager.shared.isReady else {
             log("\(action) not sent: Redmi unreachable")
-            if reportFailure { reportControlFailure(action) }
+            if reportFailure { reportControlFailure(action, callId: callId) }
             return
         }
         BLECentralManager.shared.sendCallControl(action: action, callId: callId) { [weak self] success in
             Task { @MainActor in
                 guard let self else { return }
                 self.log("Bluetooth \(action): \(success ? "ok" : "failed")")
-                if !success, reportFailure { self.reportControlFailure(action) }
+                if !success, reportFailure { self.reportControlFailure(action, callId: callId) }
             }
         }
     }
 
     /// The person has to know when a call command never reached the Redmi.
-    private func reportControlFailure(_ action: String) {
+    private func reportControlFailure(_ action: String, callId: String) {
         guard ["answer", "reject", "hangup"].contains(action) else { return }
-        lastCallError = "Redmi'ye ulaşılamadı; komut iletilemedi."
+        guard Self.isEndCommand(action), !callId.isEmpty else {
+            lastCallError = "Redmi'ye ulaşılamadı; komut iletilemedi."
+            return
+        }
+        keepCallCommand(action, callId: callId)
+    }
+
+    /// Keeps a decline or hang-up that reached neither link and brings the link back for it.
+    ///
+    /// "Reddet" and "Bitir" on the call screen ended silently when the socket was asleep and
+    /// Bluetooth could not carry them either: the call went on ringing or talking on the Redmi
+    /// while this screen gave no sign. Now the screen says so, and the command goes out once the
+    /// link is up again, if the Redmi still shows that same call (see retryPendingCallCommand).
+    private func keepCallCommand(_ action: String, callId: String) {
+        // A retry that fails again keeps the time of the first failure, so the 20 s limit in
+        // retryPendingCallCommand bounds the whole attempt and nothing repeats for the length of a call.
+        var firstFailure = Date()
+        if let kept = pendingCallCommand, kept.action == action, kept.callId == callId { firstFailure = kept.at }
+        pendingCallCommand = (action: action, callId: callId, at: firstFailure)
+        lastCallError = "Redmi'ye ulaşılamadı; bağlantı gelince yeniden denenecek."
+        log("\(action) kept until the link is back")
+        if state == .authenticated {
+            // Only the ack was missing: a fresh state says whether the call is still there. A socket
+            // that merely looks authenticated is found dead by the ping and reconnects.
+            validateLink()
+            send(["type": "get_state"])
+        } else {
+            reconnectNow(reason: "call command waiting")
+        }
+    }
+
+    /// Sends a kept decline or hang-up again, but only to the very call it was meant for.
+    ///
+    /// The Redmi's hang-up falls back to whatever call is live when it does not know the id, so a
+    /// command kept from an earlier call must never reach a new one: it goes out only while it is
+    /// recent and the Redmi's fresh state shows the same call, still ringing for a decline or still
+    /// live for a hang-up.
+    private func retryPendingCallCommand(liveCall: StateCallInfo?) {
+        guard let pending = pendingCallCommand else { return }
+        let callState = liveCall.flatMap { GSMCallState(rawValue: $0.state) } ?? .idle
+        let stillApplies = (pending.action == "reject") ? (callState == .ringing) : callState.isLive
+        guard Date().timeIntervalSince(pending.at) < 20, liveCall?.callId == pending.callId, stillApplies else {
+            pendingCallCommand = nil
+            log("Kept \(pending.action) dropped: its call is over or has changed")
+            return
+        }
+        // The command stays kept until its ack arrives (handleAck), so a second failure counts from
+        // the first one instead of starting a new 20 s.
+        log("Sending the kept \(pending.action) now that the link is back")
+        control(pending.action, callId: pending.callId)
     }
 
     func sendDial(number: String) {
@@ -1082,6 +1212,12 @@ public final class GatewayConnection: ObservableObject {
         send(payload)
     }
 
+    /// How long a send waits for the Redmi's result before it shows as failed.
+    private static let smsResultTimeout: TimeInterval = 90
+    /// How long a retried send waits after the journal check before it goes out again; see
+    /// resendRetriedSms.
+    private static let smsRetryGrace: TimeInterval = 3
+
     /// Queues an SMS; its status in HistoryStore follows the Redmi's real send result.
     func sendSms(recipient: String, message: String) {
         let requestId = UUID().uuidString
@@ -1090,18 +1226,76 @@ public final class GatewayConnection: ObservableObject {
             history.completePending(requestId: requestId, success: false)
             return
         }
+        transmitSms(requestId: requestId, recipient: recipient, message: message)
+    }
+
+    private func transmitSms(requestId: String, recipient: String, message: String) {
         send(["type": "send_sms", "recipient": recipient, "message": message, "requestId": requestId])
+        startSmsTimeout(requestId: requestId, after: Self.smsResultTimeout)
+    }
+
+    /// Marks the send failed when no result came in time. A late result for the same requestId
+    /// still settles it: completePending turns a failed copy into a sent one.
+    private func startSmsTimeout(requestId: String, after delay: TimeInterval) {
+        smsTimeouts.removeValue(forKey: requestId)?.cancel()
+        let nanoseconds = UInt64(max(1, delay) * 1_000_000_000)
         smsTimeouts[requestId] = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 90_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
             guard let self, !Task.isCancelled else { return }
             self.smsTimeouts.removeValue(forKey: requestId)
+            self.smsRetriesAfterSync.remove(requestId)
             self.history.completePending(requestId: requestId, success: false)
         }
     }
 
+    /// "Tekrar dene".
+    ///
+    /// A send that timed out may still have gone out: the Redmi had it and only its result was
+    /// lost with the link. Sending it again at once could send the same text twice, so the copy
+    /// waits ("Gönderiliyor…") for the next journal sync first. The Redmi records every message it
+    /// sends and that entry replaces this copy (HistoryStore.upsertSms), and a result the Redmi kept
+    /// for this requestId settles it. Only a copy that is still waiting after both is sent again,
+    /// under the same requestId, so whichever result arrives last still lands on the one bubble.
     func retrySms(_ message: SmsRecord) {
-        history.removeMessage(id: message.id)
-        sendSms(recipient: message.address, message: message.body)
+        guard message.gatewayId == nil, let requestId = message.requestId else {
+            // A failure the Redmi's own journal recorded: nothing went out, so a new send is safe.
+            history.removeMessage(id: message.id)
+            sendSms(recipient: message.address, message: message.body)
+            return
+        }
+        history.restartPending(requestId: requestId, resent: false)
+        smsRetriesAfterSync.insert(requestId)
+        startSmsTimeout(requestId: requestId, after: Self.smsResultTimeout)
+        log("SMS retry: checking the Redmi's journal before sending again")
+        if state == .authenticated {
+            requestSync()
+        } else {
+            // Authentication always starts a sync, which is the check this retry waits for.
+            reconnectNow(reason: "SMS retry")
+        }
+    }
+
+    /// Sends again the retried messages the journal sync did not account for.
+    ///
+    /// The Redmi delivers a send result it could not hand over earlier on the next authenticated
+    /// link, so a short grace after the sync lets such a result arrive first; a retry that a late
+    /// success settled is never sent a second time.
+    private func resendRetriedSms() {
+        guard !smsRetriesAfterSync.isEmpty else { return }
+        let waiting = smsRetriesAfterSync
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.smsRetryGrace * 1_000_000_000))
+            guard let self else { return }
+            for requestId in waiting where self.smsRetriesAfterSync.contains(requestId) {
+                guard self.state == .authenticated else { return }
+                self.smsRetriesAfterSync.remove(requestId)
+                guard let pending = self.history.pendingMessage(requestId: requestId),
+                      pending.status == .sending else { continue }
+                self.log("SMS retry: not in the Redmi's journal; sending again")
+                self.history.restartPending(requestId: requestId, resent: true)
+                self.transmitSms(requestId: requestId, recipient: pending.address, message: pending.body)
+            }
+        }
     }
 
     func requestDiagnostics() {
@@ -1162,10 +1356,18 @@ public final class GatewayConnection: ObservableObject {
                 let connection = GatewayConnection.shared
                 // Back on screen: the grace has done its job and the link stays.
                 connection.endIdleLinkKeepOpen()
+                connection.reloadPairingIfLocked(reason: "app opened")
                 connection.discovery.start()
                 connection.reconnectNow(reason: "app opened")
                 connection.requestSync()
             }
+        }
+        // The first unlock after a restart makes the Keychain readable; a pairing that was locked at
+        // launch is picked up here while the app is still running.
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in GatewayConnection.shared.reloadPairingIfLocked(reason: "device unlocked") }
         }
     }
 
@@ -1219,6 +1421,12 @@ public final class GatewayConnection: ObservableObject {
     /// after being swiped away). Fetch state and journals; in the background the network link
     /// closes again afterwards unless a call turned up, and Bluetooth stays connected.
     func wakeFromBeacon() {
+        if pairingLocked {
+            // Reading the pairing starts the same catch-up when it succeeds; still locked, there is
+            // no key to connect with yet.
+            reloadPairingIfLocked(reason: "beacon wake")
+            return
+        }
         catchUp(reason: "beacon wake")
     }
 

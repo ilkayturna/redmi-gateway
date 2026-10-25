@@ -197,7 +197,7 @@ struct ConversationView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button { CallKitManager.shared.startOutgoingCall(phoneNumber: address) } label: {
+                Button { InAppDial.start(address) } label: {
                     Image(systemName: "phone")
                 }
                 .accessibilityLabel("Ara")

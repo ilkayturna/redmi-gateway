@@ -34,7 +34,7 @@ struct ContentView: View {
             connection.start()
             offerCallWake()
         }
-        .onChange(of: connection.isPaired) { _ in offerCallWake() }
+        .onChange(of: connection.pairing != nil) { _ in offerCallWake() }
         .onChange(of: router.pending) { route in
             guard let route else { return }
             router.pending = nil
@@ -117,7 +117,9 @@ struct ContentView: View {
 
     /// Asked once after pairing; Settings shows the state afterwards.
     private func offerCallWake() {
-        guard connection.isPaired else { return }
+        // The pairing itself, not isPaired: a pairing still locked behind the first unlock is not
+        // the moment to ask for permissions.
+        guard connection.pairing != nil else { return }
         Notifier.shared.requestPermission()
         guard !callWakePrompted, !CallWakeMonitor.shared.isEnabled else { return }
         callWakePrompted = true
@@ -131,8 +133,13 @@ struct ContentView: View {
 }
 
 /// Only visible when the link is not ready; everyday use never sees technical detail.
+///
+/// The network link is closed on purpose while the app is off screen, so a closed socket is not a
+/// problem in itself: with the Redmi still connected over Bluetooth the banner says so calmly, and
+/// "aranıyor" is left for the case where neither link is up.
 struct ConnectionBanner: View {
     @ObservedObject private var connection = GatewayConnection.shared
+    @ObservedObject private var ble = BLECentralManager.shared
     let openSettings: () -> Void
 
     var body: some View {
@@ -163,28 +170,35 @@ struct ConnectionBanner: View {
         switch connection.link {
         case .ready, .unpaired: return nil
         case .pairing: return "Eşleştiriliyor…"
-        case .searching: return "Redmi aranıyor…"
+        case .searching: return restsOnBluetooth ? "Redmi bağlı · Bluetooth" : "Redmi aranıyor…"
         case .connecting: return "Redmi'ye bağlanıyor…"
         case .offline(let reason): return reason
         case .incompatible(let reason): return reason
         }
     }
 
+    /// Read through `ble` so the banner redraws when the Bluetooth link comes or goes.
+    private var restsOnBluetooth: Bool {
+        ble.isConnected && connection.restsOnBluetooth
+    }
+
     private var isWorking: Bool {
         switch connection.link {
-        case .pairing, .searching, .connecting: return true
+        case .searching: return !restsOnBluetooth
+        case .pairing, .connecting: return true
         default: return false
         }
     }
 
     private var icon: String {
         if case .incompatible = connection.link { return "exclamationmark.triangle.fill" }
+        if restsOnBluetooth { return "antenna.radiowaves.left.and.right" }
         return "wifi.exclamationmark"
     }
 
     private var tint: Color {
         if case .incompatible = connection.link { return .red }
-        return isWorking ? .secondary : .orange
+        return (isWorking || restsOnBluetooth) ? .secondary : .orange
     }
 }
 
@@ -246,6 +260,33 @@ struct SettingsToolbarButton: ToolbarContent {
     }
 }
 
+// MARK: - Calls started inside the app
+
+/// A call tapped in Favorites, Recents, a contact or a conversation.
+///
+/// The network link is closed on purpose 25 s after the app leaves the screen, so almost every
+/// time the app is opened a tap lands before the link is back. startOutgoingCall then refused the
+/// call with an error that only the keypad and the call screen show, and the tap looked dead. The
+/// call now waits for the link the way a call from iOS Recents does (dialFromSystem), and the
+/// banner at the top shows the link coming up meanwhile.
+@MainActor
+enum InAppDial {
+    /// Must stay in step with CallKitManager.emergencyNumbers: these go to the iPhone's own phone
+    /// service at once and must never wait for the Redmi.
+    private static let emergencyNumbers: Set<String> = ["112", "911", "999", "110", "155", "156", "158", "177"]
+
+    static func start(_ number: String) {
+        let connection = GatewayConnection.shared
+        let clean = number.replacingOccurrences(of: "[\\s().-]", with: "", options: .regularExpression)
+        guard !connection.isAuthenticated, !emergencyNumbers.contains(clean) else {
+            CallKitManager.shared.startOutgoingCall(phoneNumber: number)
+            return
+        }
+        connection.log("Call tapped before the link was up; dialling once it is")
+        CallKitManager.shared.dialFromSystem(number)
+    }
+}
+
 // MARK: - Favorites
 
 struct FavoritesView: View {
@@ -269,7 +310,7 @@ struct FavoritesView: View {
                     ForEach(directory.favorites) { favorite in
                         let contact = directory.contact(for: favorite.number)
                         Button {
-                            CallKitManager.shared.startOutgoingCall(phoneNumber: favorite.number)
+                            InAppDial.start(favorite.number)
                         } label: {
                             HStack(spacing: 12) {
                                 ContactAvatar(name: contact?.name ?? favorite.name ?? "", thumbnail: contact?.thumbnail)
@@ -344,7 +385,7 @@ struct RecentsView: View {
                         .contentShape(Rectangle())
                         .onTapGesture {
                             guard !call.number.isEmpty else { return }
-                            CallKitManager.shared.startOutgoingCall(phoneNumber: call.number)
+                            InAppDial.start(call.number)
                         }
                         .swipeActions(edge: .leading) {
                             if !call.number.isEmpty {
@@ -567,7 +608,7 @@ struct ContactDetailView: View {
                         }
                         .buttonStyle(.borderless)
                         .accessibilityLabel("Mesaj gönder")
-                        Button { CallKitManager.shared.startOutgoingCall(phoneNumber: number) } label: {
+                        Button { InAppDial.start(number) } label: {
                             Image(systemName: "phone.fill").frame(width: 36, height: 36)
                         }
                         .buttonStyle(.borderless)

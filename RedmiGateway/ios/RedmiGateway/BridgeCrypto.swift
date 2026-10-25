@@ -162,6 +162,15 @@ struct GatewayPairing: Codable, Equatable {
     var bleKey: Data { BridgeCrypto.derive(key, "ble") }
 }
 
+/// What reading the pairing from the Keychain found.
+enum PairingRead {
+    case found(GatewayPairing)
+    case absent
+    /// The iPhone has not been unlocked since it restarted, so the Keychain cannot be opened yet.
+    /// The pairing may well be there; this must never be treated as "not paired".
+    case locked
+}
+
 enum PairingKeychain {
     private static let service = "com.ilkay.redmigateway.pairing"
     private static let account = "gateway"
@@ -172,14 +181,22 @@ enum PairingKeychain {
          kSecAttrAccount as String: account]
     }
 
-    static func load() -> GatewayPairing? {
+    /// Reads the pairing, telling a locked Keychain apart from an empty one.
+    ///
+    /// The item is readable after the first unlock only. A beacon or Bluetooth relaunch right after
+    /// the iPhone restarted reads it before that unlock, gets errSecInteractionNotAllowed, and used
+    /// to take that for "never paired": Bluetooth state was dropped, a VoIP push became a
+    /// placeholder call and the app opened on the pairing screen.
+    static func read() -> PairingRead {
         var query = baseQuery
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
-        return try? JSONDecoder().decode(GatewayPairing.self, from: data)
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecInteractionNotAllowed { return .locked }
+        guard status == errSecSuccess, let data = item as? Data,
+              let pairing = try? JSONDecoder().decode(GatewayPairing.self, from: data) else { return .absent }
+        return .found(pairing)
     }
 
     @discardableResult

@@ -26,20 +26,44 @@ final class CallWakeMonitor: NSObject, ObservableObject {
     static let shared = CallWakeMonitor()
 
     @Published private(set) var authorization: CLAuthorizationStatus = .notDetermined
+    @Published private(set) var accuracy: CLAccuracyAuthorization = .fullAccuracy
 
     private let manager = CLLocationManager()
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    /// iOS asks about "Always" only once after "While Using"; remembered so the button then goes
+    /// straight to Settings.
+    private let kAlwaysAsked = "call_wake_always_asked"
+    /// When the app last lost the screen, for example to a permission question.
+    private var resignedActiveAt: Date?
 
     override private init() {
         super.init()
         manager.delegate = self
         authorization = manager.authorizationStatus
+        accuracy = manager.accuracyAuthorization
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willResignActiveNotification, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in CallWakeMonitor.shared.resignedActiveAt = Date() }
+        }
     }
 
     var isEnabled: Bool { authorization == .authorizedAlways }
 
+    /// "Always" is granted but "Precise Location" is off. iOS does not monitor or range beacons
+    /// for an app with approximate location, so the call wake is silently off although the
+    /// permission reads as granted.
+    var needsPreciseLocation: Bool { isEnabled && accuracy == .reducedAccuracy }
+
     /// Monitors the beacons of the current pairing, or nothing when unpaired or not allowed.
     func refresh() {
+        // Before the first unlock after a restart the pairing cannot be read and looks absent.
+        // Stopping the regions then would leave the app with nothing to relaunch it once the
+        // iPhone is unlocked, so they stay as they are until the pairing is readable again.
+        if GatewayConnection.shared.pairingLocked {
+            GatewayConnection.shared.log("Call wake regions kept: pairing locked until the first unlock")
+            return
+        }
         let wanted: UUID? = {
             guard let pairing = GatewayConnection.shared.pairing, authorization == .authorizedAlways,
                   CLLocationManager.isMonitoringAvailable(for: CLBeaconRegion.self) else { return nil }
@@ -69,13 +93,40 @@ final class CallWakeMonitor: NSObject, ObservableObject {
     }
 
     /// Asks for "Always" location access, or opens Settings when iOS no longer asks.
+    ///
+    /// After "While Using" iOS shows the "Always" question once; every later request does nothing
+    /// at all, and the button looked broken. It now asks only when iOS can still show the question,
+    /// and opens the app's Settings page when no question took the screen within a second (an
+    /// earlier build may already have used the one chance).
     func requestPermission() {
         switch authorization {
-        case .notDetermined, .authorizedWhenInUse:
+        case .notDetermined:
             manager.requestAlwaysAuthorization()
+        case .authorizedWhenInUse:
+            let defaults = UserDefaults.standard
+            guard !defaults.bool(forKey: kAlwaysAsked) else {
+                openSettings()
+                return
+            }
+            defaults.set(true, forKey: kAlwaysAsked)
+            let askedAt = Date()
+            manager.requestAlwaysAuthorization()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                Task { @MainActor in
+                    let monitor = CallWakeMonitor.shared
+                    if let resigned = monitor.resignedActiveAt, resigned >= askedAt { return }
+                    guard monitor.authorization == .authorizedWhenInUse else { return }
+                    monitor.openSettings()
+                }
+            }
         default:
-            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+            openSettings()
         }
+    }
+
+    /// This app's page in iOS Settings (location, precise location, notifications).
+    func openSettings() {
+        if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
     }
 
     static func beaconUUID(for pairing: GatewayPairing) -> UUID {
@@ -132,10 +183,13 @@ final class CallWakeMonitor: NSObject, ObservableObject {
 
 extension CallWakeMonitor: CLLocationManagerDelegate {
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        // Called for a change of either the permission or its precision.
         let status = manager.authorizationStatus
+        let accuracy = manager.accuracyAuthorization
         Task { @MainActor in
             let monitor = CallWakeMonitor.shared
             monitor.authorization = status
+            monitor.accuracy = accuracy
             monitor.refresh()
         }
     }

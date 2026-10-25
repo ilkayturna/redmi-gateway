@@ -227,10 +227,59 @@ final class HistoryStore: ObservableObject {
         scheduleSave()
     }
 
+    /// Settles a send from this iPhone. A failed copy still accepts a late success for its
+    /// requestId (the Redmi hands over results it kept for a closed link), but a sent copy is never
+    /// turned back into a failed one: after a retry two results can arrive for one requestId, and
+    /// one of them going out is what the person needs to see.
     func completePending(requestId: String, success: Bool) {
         guard let index = messages.firstIndex(where: { $0.requestId == requestId && $0.gatewayId == nil }) else { return }
+        if !success, messages[index].status == .sent { return }
         messages[index].status = success ? .sent : .failed
         scheduleSave()
+    }
+
+    /// The pending copy of a send from this iPhone, while no journal entry has replaced it.
+    func pendingMessage(requestId: String) -> SmsRecord? {
+        messages.first { $0.requestId == requestId && $0.gatewayId == nil }
+    }
+
+    /// "Tekrar dene" on a pending copy: it waits for a result again under the same requestId.
+    ///
+    /// The date moves only when the message really goes out again. Until then the journal entry of
+    /// the first attempt, if there is one, is matched against the original date (upsertSms).
+    func restartPending(requestId: String, resent: Bool) {
+        guard let index = messages.firstIndex(where: { $0.requestId == requestId && $0.gatewayId == nil }) else { return }
+        messages[index].status = .sending
+        if resent {
+            messages[index].date = Date()
+            finishMessages()
+        } else {
+            scheduleSave()
+        }
+    }
+
+    /// Sends from this iPhone that are still waiting for the Redmi's result.
+    ///
+    /// The result window lives only in the connection's memory while the pending copy is saved, so
+    /// a send that iOS cut short (the app ended in the background) stayed on "Gönderiliyor…" for
+    /// good. At launch the copies whose window has closed become failed, the same state the timeout
+    /// leaves, and keep their requestId so a late result can still settle them. The rest are
+    /// returned with the time they have left.
+    func expirePendingSends(timeout: TimeInterval) -> [(requestId: String, remaining: TimeInterval)] {
+        let now = Date()
+        var open: [(requestId: String, remaining: TimeInterval)] = []
+        var changed = false
+        for index in messages.indices where messages[index].status == .sending && messages[index].gatewayId == nil {
+            let remaining = messages[index].date.addingTimeInterval(timeout).timeIntervalSince(now)
+            if remaining > 0, let requestId = messages[index].requestId {
+                open.append((requestId: requestId, remaining: min(remaining, timeout)))
+            } else {
+                messages[index].status = .failed
+                changed = true
+            }
+        }
+        if changed { scheduleSave() }
+        return open
     }
 
     func removeMessage(id: String) {

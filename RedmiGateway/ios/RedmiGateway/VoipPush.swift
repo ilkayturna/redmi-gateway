@@ -34,6 +34,8 @@ final class VoipPush: NSObject, PKPushRegistryDelegate {
         var callId: String?
         var number: String?
         var dropReason: String?
+        // The app may have been suspended through the first unlock and missed iOS's notice of it.
+        GatewayConnection.shared.reloadPairingIfLocked(reason: "VoIP push")
         if let sealedText = payload.dictionaryPayload["p"] as? String {
             if let sealed = Data(base64Encoded: sealedText) {
                 if let pairing = GatewayConnection.shared.pairing {
@@ -54,6 +56,10 @@ final class VoipPush: NSObject, PKPushRegistryDelegate {
                     } else {
                         dropReason = "push could not be opened"
                     }
+                } else if GatewayConnection.shared.pairingLocked {
+                    // Before the first unlock after a restart the key cannot be read, so the call
+                    // cannot be opened; iOS still gets its placeholder call below.
+                    dropReason = "pairing locked until the first unlock"
                 } else {
                     dropReason = "no pairing"
                 }
