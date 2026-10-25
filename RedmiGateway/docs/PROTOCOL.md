@@ -190,7 +190,9 @@ call.
   authority on who carries the conversation; see AUDIO_ARCHITECTURE.md for the reasons.
 - `call_log {item}` and `sms {item}` are live journal entries.
 - `call_waiting {state: ringing|ended, callId, number?}` is a second incoming call during the
-  current one. `answer` with its `callId` ends the current call and answers it. `reject` or
+  current one. `answer` with its `callId` ends the current call and answers it; with
+  `holdCurrent: true` (2.0.13, Bluetooth `"h": true`) it answers while Telecom puts the current call
+  on hold, and the two calls then show in `calls` like an added call. `reject` or
   `hangup` with its `callId` declines it. When the current call ends, the waiting call becomes
   the current call under the same `callId`.
 - `calls {primaryId, merging, items: [{callId, state, number, direction, conference, parentId, waiting}]}`

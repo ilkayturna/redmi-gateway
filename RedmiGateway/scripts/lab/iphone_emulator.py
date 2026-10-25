@@ -274,6 +274,21 @@ async def call_scenario(args):
         check("conference reported in calls", bool(confs))
         print("calls on the Redmi:", bridge_client.adb_shell(
             'dumpsys telecom | sed -n "/^  mCalls:/,/^  mCallAudioManager/p" | grep -oE "Call id=TC@[0-9]+, state=[A-Z_]+|childs\\([0-9]+\\)"').split())
+    if args.scenario == "resume":
+        # Add a second call, end it, and the first call must come back from hold by itself (2.0.12).
+        await client.send({"type": "dial", "number": args.dial})
+        await report("second_call", 10)
+        snaps = [e for e in s.events if e.get("type") == "calls"]
+        active = [i for i in snaps[-1].get("items", []) if i.get("state") == "active"] if snaps else []
+        second_id = active[0]["callId"] if active else None
+        print(f"ending the second call {second_id}")
+        await client.send({"type": "hangup", "callId": second_id})
+        await report("after_second_ended", 5)
+        last = [e for e in s.events if e.get("type") == "calls"][-1]
+        states = [i.get("state") for i in last.get("items", [])]
+        check("first call resumed from hold", states == ["active"])
+        owners = [(e.get("owner"), e.get("detail")) for e in s.events if e.get("type") == "audio_state"]
+        check("audio stayed on the iPhone", not any(o == "redmi" for o, _ in owners[1:]))
     if args.scenario == "reconnect":
         # iOS replaces its control socket while the call audio keeps flowing on UDP. The new socket
         # of the same iPhone must still be able to move the audio back (2.0.9).

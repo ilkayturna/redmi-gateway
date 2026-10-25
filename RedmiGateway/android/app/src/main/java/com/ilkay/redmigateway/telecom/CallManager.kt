@@ -591,6 +591,34 @@ object CallManager {
         }
     }
 
+    /**
+     * "Beklet ve yanıtla": the waiting call is answered and the current one goes on hold, as on any
+     * phone. Until 2.0.13 every answer of a waiting call ended the current call, so the iPhone's own
+     * "Hold & Accept" button hung up on the first caller.
+     *
+     * Telecom holds the active call itself when another call is answered, but only a call that can be
+     * held; one that cannot would be disconnected instead, so that case is refused here.
+     */
+    @Synchronized
+    private fun answerWaitingHoldingCurrent(): Boolean {
+        val current = activeCall
+        if (current != null && isCallLive(current) &&
+            (current.details?.callCapabilities?.and(Call.Details.CAPABILITY_HOLD) ?: 0) == 0) {
+            log("Hold & accept refused: the current call cannot be held")
+            return false
+        }
+        val (call, id) = clearWaiting() ?: return false
+        log("Hold & accept: answering the waiting call $id; the current call goes on hold")
+        return try {
+            call.answer(VideoProfile.STATE_AUDIO_ONLY)
+            updatePrimaryCallAndNotify("hold_and_accept")
+            true
+        } catch (e: Exception) {
+            log("Hold & accept failed: ${e.message}")
+            false
+        }
+    }
+
     /** The current call ended while another was waiting: the waiting call becomes current. */
     private fun promoteWaiting() {
         val (call, id) = clearWaiting() ?: return
@@ -622,7 +650,10 @@ object CallManager {
         }
     }
 
-    fun answer(expectedCallId: String? = null): Boolean {
+    fun answer(expectedCallId: String? = null, holdCurrent: Boolean = false): Boolean {
+        if (expectedCallId != null && expectedCallId == waitingCallId && waitingCall != null && holdCurrent) {
+            return answerWaitingHoldingCurrent()
+        }
         if (expectedCallId != null && expectedCallId == waitingCallId && waitingCall != null) {
             // "End & Accept": end the current call; the waiting one is answered once it is current.
             log("Answering the waiting call after ending the current one")

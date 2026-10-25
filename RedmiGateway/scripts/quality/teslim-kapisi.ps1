@@ -22,8 +22,8 @@ param(
     # USB seri no; adb Wi-Fi uzerindeyse ornegin 192.168.1.111:5555 ver (evde TV de adb'de gorunur).
     [string]$Seri = '17df6357',
     [string]$Repo = 'C:\Users\ilkay.turna\source\repos\redmi-gateway',
-    [string]$BeklenenAndroidSurum = '2.0.12',
-    [int]$BeklenenVersionCode = 212,
+    [string]$BeklenenAndroidSurum = '2.0.13',
+    [int]$BeklenenVersionCode = 213,
     [string]$AscKlasor = 'C:\Users\ilkay.turna\Documents\asc-cli',
     [string]$AscAppId = '6816340544',
     [int]$HotspotButcesiSn = 8,

@@ -1058,7 +1058,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         val callId = json.optString("id").ifBlank { json.optString("callId") }
         val seq = json.optLong("q", json.optLong("seq", 0))
         val executed = when (action) {
-            "answer" -> CallManager.answer(callId.ifEmpty { null })
+            "answer" -> CallManager.answer(callId.ifEmpty { null }, json.optBoolean("h", false))
             "reject" -> CallManager.reject(callId.ifEmpty { null })
             "hangup" -> CallManager.hangup(callId.ifEmpty { null })
             "ringing_ack" -> {

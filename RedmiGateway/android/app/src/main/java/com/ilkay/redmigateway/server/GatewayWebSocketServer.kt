@@ -376,7 +376,8 @@ class GatewayWebSocketServer(
     private fun dispatch(peer: Peer, json: JSONObject) {
         val conn = peer.conn
         when (val type = json.optString("type")) {
-            "answer" -> sendAck(peer, "answer", CallManager.answer(json.optString("callId").ifBlank { null }))
+            // holdCurrent: "Beklet ve yanıtla" for a waiting call (2.0.13); without it the current call ends.
+            "answer" -> sendAck(peer, "answer", CallManager.answer(json.optString("callId").ifBlank { null }, json.optBoolean("holdCurrent", false)))
             "reject" -> sendAck(peer, "reject", CallManager.reject(json.optString("callId").ifBlank { null }))
             "hangup" -> sendAck(peer, "hangup", CallManager.hangup(json.optString("callId").ifBlank { null }))
             "hold_call" -> {
