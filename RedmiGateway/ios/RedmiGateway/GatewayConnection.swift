@@ -58,6 +58,13 @@ public final class GatewayConnection: ObservableObject {
     @Published private(set) var pairingLocked = false
     /// A second call ringing during the current one.
     @Published private(set) var waitingCall: GSMCall?
+    /// Every call the Redmi holds (the `calls` event, Redmi 2.0.12): a call on hold, the conference
+    /// a merge built. Empty for an older Redmi and when no call is left. Kept when the link drops,
+    /// because the calls go on on the Redmi; the next authentication brings a fresh list.
+    @Published private(set) var calls: [GatewayCallInfo] = []
+    /// The network is building a conference (~20 s after merge_calls).
+    @Published private(set) var callsMerging = false
+    @Published private(set) var callsPrimaryId: String?
 
     public var onCallEvent: ((CallEventMessage) -> Void)?
     public var connectedHost: String { currentHost }
@@ -147,6 +154,9 @@ public final class GatewayConnection: ObservableObject {
     /// VoIP push token (PushKit); sent to the Redmi for calls while this iPhone is away.
     private var pushToken: String?
     private var alertPushToken: String?
+    /// When each of the Redmi's calls became active, for the call timer: with two calls the primary
+    /// call changes (a second call, a swap, a conference) and the timer must stay with its own call.
+    private var connectedAtByCallId: [String: Date] = [:]
 
     let discovery = NWGatewayDiscovery()
     private let pathMonitor = NWPathMonitor()
@@ -596,6 +606,12 @@ public final class GatewayConnection: ObservableObject {
             if let result = decode(AuthResultMessage.self, data) { handleAuthResult(result) }
         case "call":
             if let event = decode(CallEventMessage.self, data) { applyCallEvent(event) }
+        case "calls":
+            if let list = decode(CallsMessage.self, data) {
+                applyCalls(list)
+            } else {
+                log("Dropped a calls list that could not be read")
+            }
         case "state":
             if let response = decode(StateResponseMessage.self, data) { handleStateResponse(response) }
         case "ack":
@@ -909,21 +925,39 @@ public final class GatewayConnection: ObservableObject {
     private func applyCallEvent(_ event: CallEventMessage) {
         let callState = GSMCallState(rawValue: event.state) ?? .idle
         if callState == .idle || callState == .disconnected {
+            if !calls.isEmpty {
+                // The Redmi says no call is left (a state reply or Bluetooth "idle") while the last
+                // calls list still shows some: close the ones only that list knew, such as a call on
+                // hold. The primary call is left to onCallEvent below, exactly as before.
+                log("No call left on the Redmi; clearing the kept list of \(calls.count) call(s)")
+                calls = []
+                callsMerging = false
+                callsPrimaryId = nil
+                CallKitManager.shared.reconcile(with: [], primaryId: event.callId ?? currentCall?.rawCallId, merging: false)
+            }
             currentCall = nil
             lastCallError = nil
             // The call a kept decline or hang-up was meant for is over.
             pendingCallCommand = nil
             audioLocation = .redmi
             audioNotice = nil
+            connectedAtByCallId.removeAll()
         } else {
             let existing = currentCall
+            let rawCallId = event.callId ?? existing?.rawCallId ?? ""
+            // With two calls the primary call can change under the same screen; nothing of the other
+            // call (its number, its timer) may carry over to this one.
+            let sameCall = existing?.rawCallId == rawCallId
+            var connectedAt = connectedAtByCallId[rawCallId] ?? (sameCall ? existing?.connectedAt : nil)
+            if callState == .active, connectedAt == nil { connectedAt = Date() }
+            if let connectedAt { connectedAtByCallId[rawCallId] = connectedAt }
             currentCall = GSMCall(
                 id: existing?.id ?? UUID(),
-                rawCallId: event.callId ?? existing?.rawCallId ?? "",
-                number: event.number ?? existing?.number ?? "",
+                rawCallId: rawCallId,
+                number: event.number ?? (sameCall ? existing?.number : nil) ?? "",
                 state: callState,
                 isIncoming: event.direction.map { $0 == "incoming" } ?? existing?.isIncoming ?? (callState == .ringing),
-                connectedAt: callState == .active ? (existing?.connectedAt ?? Date()) : existing?.connectedAt
+                connectedAt: connectedAt
             )
             // A failure from an earlier step must not stay on screen once the call is up: after one
             // late duplicate answer command the person saw "could not be answered" for the whole
@@ -931,6 +965,27 @@ public final class GatewayConnection: ObservableObject {
             if callState == .active { lastCallError = nil }
         }
         onCallEvent?(event)
+    }
+
+    /// Every call the Redmi holds; it arrives just before the `call` event for the primary call.
+    private func applyCalls(_ list: CallsMessage) {
+        let primary = (list.primaryId ?? "").isEmpty ? nil : list.primaryId
+        let merging = list.merging ?? false
+        if list.items != calls || merging != callsMerging || primary != callsPrimaryId {
+            // Ids are shortened and numbers left out: the log is shared for diagnosis.
+            let summary = list.items.map { item -> String in
+                var text = "\(item.callId.prefix(8)):\(item.state)"
+                if item.isConference { text += ":conf" }
+                if item.isConferenceChild { text += ":child" }
+                if item.isWaiting { text += ":waiting" }
+                return text
+            }.joined(separator: ", ")
+            log("Calls on the Redmi: [\(summary)] primary=\(primary.map { String($0.prefix(8)) } ?? "none") merging=\(merging)")
+        }
+        calls = list.items
+        callsMerging = merging
+        callsPrimaryId = primary
+        CallKitManager.shared.reconcile(with: list.items, primaryId: primary, merging: merging)
     }
 
     private func handleStateResponse(_ response: StateResponseMessage) {
@@ -1052,23 +1107,29 @@ public final class GatewayConnection: ObservableObject {
 
     // MARK: - Commands
 
-    func sendAnswer(callId: String) { control("answer", callId: callId) }
+    /// `holdCurrent` answers a waiting call without ending the current one, which the Redmi's
+    /// Telecom puts on hold ("Beklet ve yanıtla", Redmi 2.0.13). Without it an answer for the waiting
+    /// call ends the current call first, as before.
+    func sendAnswer(callId: String, holdCurrent: Bool = false) { control("answer", callId: callId, holdCurrent: holdCurrent) }
     func sendReject(callId: String) { control("reject", callId: callId) }
     func sendHangup(callId: String) { control("hangup", callId: callId) }
 
     /// Tells the Redmi this iPhone shows the incoming call, so it can ring quietly.
     func sendRingingAck(callId: String) { control("ringing_ack", callId: callId) }
 
-    private func control(_ action: String, callId: String) {
+    private func control(_ action: String, callId: String, holdCurrent: Bool = false) {
         // An answer or decline must reach the Redmi, or the other phone keeps ringing. The sealed
         // frame is lost both when the socket or its key is not ready (checked here) and when the
         // socket has died without the handshake noticing, which shows up only in the send
         // completion; the Bluetooth link carries the command in either case.
-        if state == .authenticated, sendOverSealedLink(["type": action, "callId": callId]) {
-            startControlWatchdog(action: action, callId: callId)
+        var payload: [String: Any] = ["type": action, "callId": callId]
+        if holdCurrent { payload["holdCurrent"] = true }
+        if state == .authenticated, sendOverSealedLink(payload) {
+            startControlWatchdog(action: action, callId: callId, holdCurrent: holdCurrent)
             return
         }
-        sendOverBluetooth(action: action, callId: callId, reportFailure: Self.isEndCommand(action))
+        sendOverBluetooth(action: action, callId: callId, reportFailure: Self.isEndCommand(action),
+                          holdCurrent: holdCurrent)
     }
 
     /// A decline or hang-up that cannot reach the Redmi leaves its call going on there, so the
@@ -1084,12 +1145,14 @@ public final class GatewayConnection: ObservableObject {
               let frame = channel.seal(json) else { return false }
         let action = payload["type"] as? String ?? ""
         let callId = payload["callId"] as? String ?? ""
+        let holdCurrent = payload["holdCurrent"] as? Bool ?? false
         task.send(.string(frame)) { [weak self] error in
             guard error != nil else { return }
             Task { @MainActor in
                 self?.log("\(action) frame not sent; trying Bluetooth")
                 self?.sendOverBluetooth(action: action, callId: callId,
-                                        reportFailure: GatewayConnection.isEndCommand(action))
+                                        reportFailure: GatewayConnection.isEndCommand(action),
+                                        holdCurrent: holdCurrent)
             }
         }
         return true
@@ -1098,7 +1161,7 @@ public final class GatewayConnection: ObservableObject {
     /// The Redmi answers every command with an ack. No ack means the frame died on the way even
     /// though the socket accepted it, so the command goes over Bluetooth once: without this a lost
     /// answer left the other phone ringing while this iPhone showed the call as answered.
-    private func startControlWatchdog(action: String, callId: String) {
+    private func startControlWatchdog(action: String, callId: String, holdCurrent: Bool = false) {
         let key = "\(action)|\(callId)"
         cancelControlWatchdog(key: key)
         let task = Task { @MainActor [weak self] in
@@ -1106,7 +1169,7 @@ public final class GatewayConnection: ObservableObject {
             guard let self, !Task.isCancelled else { return }
             self.cancelControlWatchdog(key: key)
             self.log("No ack for \(action); sending it over Bluetooth")
-            self.sendOverBluetooth(action: action, callId: callId, reportFailure: true)
+            self.sendOverBluetooth(action: action, callId: callId, reportFailure: true, holdCurrent: holdCurrent)
         }
         controlWatchdogs.append((key: key, action: action, task: task))
     }
@@ -1124,7 +1187,8 @@ public final class GatewayConnection: ObservableObject {
     }
 
     /// Bluetooth carries a control command when the sealed link cannot.
-    private func sendOverBluetooth(action: String, callId: String, reportFailure: Bool = false) {
+    private func sendOverBluetooth(action: String, callId: String, reportFailure: Bool = false,
+                                   holdCurrent: Bool = false) {
         // This command's own watchdog is done with, so it is never delivered twice; other commands
         // waiting for an ack of the same action keep their watchdog.
         cancelControlWatchdog(key: "\(action)|\(callId)")
@@ -1133,7 +1197,7 @@ public final class GatewayConnection: ObservableObject {
             if reportFailure { reportControlFailure(action, callId: callId) }
             return
         }
-        BLECentralManager.shared.sendCallControl(action: action, callId: callId) { [weak self] success in
+        BLECentralManager.shared.sendCallControl(action: action, callId: callId, holdCurrent: holdCurrent) { [weak self] success in
             Task { @MainActor in
                 guard let self else { return }
                 self.log("Bluetooth \(action): \(success ? "ok" : "failed")")

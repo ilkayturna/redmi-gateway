@@ -141,6 +141,37 @@ struct SmsPush: Decodable {
     let item: SmsEntry
 }
 
+/// One call the Redmi's Telecom holds, from the `calls` event (Redmi 2.0.12, docs/PROTOCOL.md).
+///
+/// Only callId and state are required; the rest is read leniently so a missing field never drops
+/// the whole list.
+struct GatewayCallInfo: Decodable, Equatable, Identifiable {
+    let callId: String
+    /// ringing, dialing, connecting, active, holding or disconnecting.
+    let state: String
+    let number: String?
+    let direction: String?
+    let conference: Bool?
+    /// The conference this call belongs to; the Redmi sends "" when there is none.
+    let parentId: String?
+    /// A second incoming call during the current one; the call_waiting flow handles it.
+    let waiting: Bool?
+
+    var id: String { callId }
+    var isConference: Bool { conference == true }
+    var isWaiting: Bool { waiting == true }
+    /// A participant inside a conference: the conference call stands for it.
+    var isConferenceChild: Bool { !(parentId ?? "").isEmpty }
+}
+
+/// Every call the Redmi holds. Sent after authentication and before every `call` event; an empty
+/// list means no call is left.
+struct CallsMessage: Decodable {
+    let primaryId: String?
+    let merging: Bool?
+    let items: [GatewayCallInfo]
+}
+
 /// A second incoming call during the current one (call waiting).
 struct CallWaitingMessage: Decodable {
     let state: String

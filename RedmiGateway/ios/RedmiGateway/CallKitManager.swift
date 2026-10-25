@@ -34,6 +34,20 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     private var connectedOutgoing: Set<UUID> = []
     private var autoRetries: [UUID: Int] = [:]
     private var pendingOutgoing: UUID?
+    /// Redmi call ids that were already live when this iPhone dialled. With a second call ("Çağrı
+    /// ekle") an event for the first call must never be taken as the new call's first event; see
+    /// uuidFor.
+    private var callIdsBeforeDial: Set<String> = []
+    /// Resumes asked of CallKit only to show what the Redmi already did; the provider does not send
+    /// them back. See resumeInCallKitIfRedmiDid.
+    private var callKitOnlyHoldChanges: Set<UUID> = []
+    /// When a hold or resume was last asked for each call through CallKit.
+    private var holdRequestedAt: [UUID: Date] = [:]
+    /// Waiting calls "Beklet ve yanıtla" is answering; the answer keeps the current call on hold.
+    private var answerHoldingCurrent: Set<UUID> = []
+    /// Waiting calls answered here with the current call kept on hold, and when; see the "ringing"
+    /// case in handleGatewayCallEvent.
+    private var holdAnswerAt: [UUID: Date] = [:]
     private var endedCallIds: [String: Date] = [:]
     /// Answered from the app without a CallKit call; its audio moves here once it is active.
     private var pickupAfterAnswer: String?
@@ -113,12 +127,18 @@ final class CallKitManager: NSObject, CXProviderDelegate {
                     provider.reportCall(with: uuid, updated: callUpdate(number: number))
                 }
             }
-            // Answered here, and the Redmi took that announcement back: the radio never confirmed,
-            // so nobody is on the call and it is really ringing on the Redmi again. Close this
-            // answered CallKit call - it was never connected - and show the call as incoming once
-            // more, so the person can answer it from this iPhone instead of being left with a
-            // silent "connected" call and no way to pick the real one up.
-            if incoming.contains(uuid), answeredHere.contains(uuid) {
+            if incoming.contains(uuid), answeredHere.contains(uuid),
+               let heldAnswer = holdAnswerAt[uuid], Date().timeIntervalSince(heldAnswer) < 15 {
+                // A waiting call answered with the current call kept on hold: the Redmi made no
+                // "active" announcement for it, so "ringing" only means the radio has not confirmed
+                // yet. Taking it for a withdrawn answer would stop the audio of the call on hold too.
+                GatewayConnection.shared.log("Call \(rawId.prefix(8)) still ringing after hold and answer; waiting for the radio")
+            } else if incoming.contains(uuid), answeredHere.contains(uuid) {
+                // Answered here, and the Redmi took that announcement back: the radio never confirmed,
+                // so nobody is on the call and it is really ringing on the Redmi again. Close this
+                // answered CallKit call - it was never connected - and show the call as incoming once
+                // more, so the person can answer it from this iPhone instead of being left with a
+                // silent "connected" call and no way to pick the real one up.
                 if audioRequested { stopAudio() }
                 let number = numbers[uuid]
                 GatewayConnection.shared.log("Answer not confirmed by the Redmi; showing the call as incoming again")
@@ -188,12 +208,20 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     private func uuidFor(rawId: String, state: String) -> UUID {
         if let existing = uuidByCallId[rawId] { return existing }
         if let pending = pendingOutgoing, ["dialing", "connecting", "active"].contains(state) {
-            // The first event of the call this iPhone just dialed.
-            pendingOutgoing = nil
-            if let temporary = callIdByUuid[pending] { uuidByCallId.removeValue(forKey: temporary) }
-            uuidByCallId[rawId] = pending
-            callIdByUuid[pending] = rawId
-            return pending
+            if callIdsBeforeDial.contains(rawId) {
+                // A second call is being dialled and this event is about the first one, which has no
+                // CallKit call here (it is carried on the Redmi). Taken as the new call, it would
+                // have been shown as the dialled call and its real events dropped.
+                GatewayConnection.shared.log("Event for call \(rawId.prefix(8)), live before this dial; not taken as the new call")
+            } else {
+                // The first event of the call this iPhone just dialed.
+                pendingOutgoing = nil
+                callIdsBeforeDial = []
+                if let temporary = callIdByUuid[pending] { uuidByCallId.removeValue(forKey: temporary) }
+                uuidByCallId[rawId] = pending
+                callIdByUuid[pending] = rawId
+                return pending
+            }
         }
         let uuid = UUID()
         uuidByCallId[rawId] = uuid
@@ -214,8 +242,47 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         ringConfirmed.remove(uuid)
         connectedOutgoing.remove(uuid)
         autoRetries.removeValue(forKey: uuid)
-        if pendingOutgoing == uuid { pendingOutgoing = nil }
-        if audioCallUuid == uuid { stopAudio() }
+        callKitOnlyHoldChanges.remove(uuid)
+        holdRequestedAt.removeValue(forKey: uuid)
+        answerHoldingCurrent.remove(uuid)
+        holdAnswerAt.removeValue(forKey: uuid)
+        if pendingOutgoing == uuid {
+            pendingOutgoing = nil
+            callIdsBeforeDial = []
+        }
+        if audioCallUuid == uuid { handOverOrStopAudio() }
+    }
+
+    /// The call that owned the audio is gone from this iPhone (ended, merged away or refused).
+    ///
+    /// The Redmi relays device-level audio: the same stream goes on through a second call, a hold, a
+    /// swap and a merge (lab-measured), so while another call of the session is still live on the
+    /// Redmi the engine keeps running and that call owns the audio. Only the last call stops it.
+    private func handOverOrStopAudio() {
+        if let next = audioSuccessor() {
+            audioCallUuid = next
+            audioPathLog("the call that owned the audio is gone; call \(callIdByUuid[next].map { String($0.prefix(8)) } ?? "?") keeps it running")
+            return
+        }
+        audioPathLog("the call that owned the audio is gone and no other call is live; stopping the call audio")
+        stopAudio()
+    }
+
+    /// Another call of this session that can carry the audio on: answered or dialled here, and live
+    /// on the Redmi according to its latest calls list (an older Redmi sends none). Prefers the
+    /// active call.
+    private func audioSuccessor() -> UUID? {
+        let liveStates: Set<String> = ["active", "holding", "dialing", "connecting"]
+        let liveIds = Set(GatewayConnection.shared.calls
+            .filter { !$0.isWaiting && liveStates.contains($0.state) }
+            .map { $0.callId })
+        if liveIds.isEmpty { return nil }
+        let candidates = incoming.union(outgoing).filter { uuid in
+            if incoming.contains(uuid) && !answeredHere.contains(uuid) { return false }
+            guard let rawId = callIdByUuid[uuid] else { return false }
+            return liveIds.contains(rawId)
+        }
+        return candidates.first(where: { states[$0] == "active" }) ?? candidates.first
     }
 
     private func end(_ uuid: UUID, reason: CXCallEndedReason) {
@@ -247,6 +314,12 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         switch states[uuid] {
         case "active": return incoming.contains(uuid) ? answeredHere.contains(uuid) : outgoing.contains(uuid)
         case "dialing", "connecting": return outgoing.contains(uuid) && !pickups.contains(uuid)
+        case "holding":
+            // On hold inside a session that already carries its audio here (a second call, a swap).
+            // The audio is device-level on the Redmi, so a hold must never stop it, skip a recovery
+            // or refuse the endpoint. A held call never starts audio on its own.
+            guard uuid == audioCallUuid else { return false }
+            return incoming.contains(uuid) ? answeredHere.contains(uuid) : outgoing.contains(uuid)
         case "ringing":
             // Answered here a moment ago; the Redmi's "active" event is still on its way. The audio
             // engine may start as soon as the Redmi sends its endpoint, so the sound is already
@@ -482,10 +555,24 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     func handOffToRedmi() {
         let connection = GatewayConnection.shared
         connection.sendAudioToRedmi()
-        guard let uuid = currentCallUuid else { return }
+        guard let uuid = currentCallUuid else {
+            connection.log("Hand-off to the Redmi: the current call has no CallKit call here")
+            return
+        }
         if let rawId = callIdByUuid[uuid] { endedCallIds[rawId] = Date() }
         audioRequested = false
-        end(uuid, reason: .answeredElsewhere)
+        // The audio is device-level, so every call of the session goes to the Redmi with it: a call
+        // on hold left in CallKit would keep the audio here for a conversation this iPhone no longer
+        // carries. A call still ringing here stays with the call-waiting flow.
+        var leaving = [uuid]
+        for other in incoming.union(outgoing) where other != uuid && other != pendingOutgoing && states[other] != "ringing" {
+            leaving.append(other)
+        }
+        // Stopped here, before the calls end: ending them one by one would hand the audio from one
+        // to the next instead of letting it go.
+        if let owner = audioCallUuid, leaving.contains(owner) { stopAudio() }
+        if leaving.count > 1 { connection.log("Hand-off to the Redmi: \(leaving.count) calls leave this iPhone") }
+        for call in leaving { end(call, reason: .answeredElsewhere) }
     }
 
     func handleGatewayLinkLost() {
@@ -559,6 +646,35 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         if let current = currentCallUuid, current != waiting { actions.append(CXEndCallAction(call: current)) }
         actions.append(CXAnswerCallAction(call: waiting))
         callController.request(CXTransaction(actions: actions)) { _ in }
+    }
+
+    /// "Beklet ve yanıtla": the current call goes on hold and the waiting call is answered, the same
+    /// as the system screen's "Hold & Accept" - one transaction, a hold then the answer. The answer
+    /// then asks the Redmi to keep the current call (holdCurrent), even when that call has no
+    /// CallKit call here. The audio session runs on: it is device-level on the Redmi.
+    func answerWaitingHoldingCurrent() {
+        let connection = GatewayConnection.shared
+        guard let callId = connection.waitingCall?.rawCallId, let waiting = uuidByCallId[callId] else {
+            connection.log("Hold and answer: no waiting call shown here")
+            return
+        }
+        var actions: [CXAction] = []
+        if let current = currentCallUuid, current != waiting,
+           callController.callObserver.calls.contains(where: { $0.uuid == current && !$0.isOnHold && !$0.hasEnded }) {
+            actions.append(CXSetHeldCallAction(call: current, onHold: true))
+        }
+        actions.append(CXAnswerCallAction(call: waiting))
+        answerHoldingCurrent.insert(waiting)
+        connection.log("Hold and answer: answering call \(callId.prefix(8)); \(actions.count > 1 ? "holding the current call in CallKit" : "no CallKit call to hold here, the Redmi holds it")")
+        callController.request(CXTransaction(actions: actions)) { error in
+            guard error != nil else { return }
+            Task { @MainActor in
+                let code = error.map { ($0 as NSError).code } ?? -1
+                CallKitManager.shared.answerHoldingCurrent.remove(waiting)
+                GatewayConnection.shared.log("CallKit refused hold and answer: \(code)")
+                GatewayConnection.shared.lastCallError = "Bekleyen arama yanıtlanamadı."
+            }
+        }
     }
 
     // MARK: - Calls started outside the app
@@ -687,6 +803,22 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         for uuid in outgoing where states[uuid] == "dialing" || states[uuid] == "pending" {
             end(uuid, reason: .failed)
         }
+        // An added call that never went out: CallKit held the first call for it (and sent
+        // hold_call), and nothing resumes that call on the Redmi, because no call ended there.
+        let presented = incoming.union(outgoing)
+        let held = presented.filter { uuid in
+            callController.callObserver.calls.contains { $0.uuid == uuid && $0.isOnHold && !$0.hasEnded }
+        }
+        if presented.count == 1, let uuid = held.first {
+            GatewayConnection.shared.log("The added call failed; resuming the call that was held for it")
+            callController.request(CXTransaction(action: CXSetHeldCallAction(call: uuid, onHold: false))) { error in
+                guard error != nil else { return }
+                Task { @MainActor in
+                    let code = error.map { ($0 as NSError).code } ?? -1
+                    GatewayConnection.shared.log("CallKit refused to resume the held call: \(code)")
+                }
+            }
+        }
     }
 
     // MARK: - Reporting
@@ -764,10 +896,19 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             connection.lastCallError = "Redmi bağlantısı yok. Arama başlatılamadı."
             return
         }
-        guard pendingOutgoing == nil, connection.currentCall == nil else {
-            connection.lastCallError = "Zaten bir arama sürüyor."
+        if let refusal = dialRefusal() {
+            connection.lastCallError = refusal
+            connection.log("Dial refused here: \(refusal)")
             return
         }
+        // A second call ("Çağrı ekle"): CallKit asks this provider to hold the current call and the
+        // Redmi's Telecom holds it as well; the audio keeps running for the whole session.
+        callIdsBeforeDial = Set(connection.calls.map { $0.callId })
+        if let current = connection.currentCall {
+            if !current.rawCallId.isEmpty { callIdsBeforeDial.insert(current.rawCallId) }
+            connection.log("Adding a second call while call \(current.rawCallId.prefix(8)) is \(current.state.rawValue)")
+        }
+        // Does nothing while the engine runs, so a call in progress keeps its audio untouched.
         AudioEngine.shared.prepareSession()
         let uuid = UUID()
         let temporaryId = "outgoing_\(uuid.uuidString.prefix(8))"
@@ -796,6 +937,263 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         }
     }
 
+    /// Why a dial cannot go out now, or nil when it can.
+    ///
+    /// With no call the dial goes out as before. With one call in progress a second one may be added,
+    /// as the Redmi (2.0.12) allows: one call, active or on hold, and nothing ringing, dialling or
+    /// being merged. An older Redmi sends no calls list and refuses a second call, so the old answer
+    /// stays for it.
+    private func dialRefusal() -> String? {
+        let connection = GatewayConnection.shared
+        if pendingOutgoing != nil { return "Bir arama zaten başlatılıyor." }
+        if connection.currentCall == nil { return nil }
+        if connection.calls.isEmpty { return "Zaten bir arama sürüyor." }
+        if connection.callsMerging { return "Çağrılar birleştiriliyor; biraz bekle." }
+        let settingUp: Set<String> = ["ringing", "dialing", "connecting"]
+        if connection.waitingCall != nil || connection.calls.contains(where: { settingUp.contains($0.state) }) {
+            return "Önce çalan ya da aranan çağrı sonuçlansın."
+        }
+        let calls = connection.calls.filter { !$0.isWaiting && !$0.isConferenceChild }
+        if calls.count > 1 { return "Aynı anda en fazla iki çağrı olabilir." }
+        if let only = calls.first, only.state == "active" || only.state == "holding" { return nil }
+        return "Zaten bir arama sürüyor."
+    }
+
+    // MARK: - Several calls (the Redmi's calls list)
+
+    /// Brings the CallKit calls in line with every call the Redmi holds (the `calls` event).
+    ///
+    /// The `call` event names only the primary call, so a call on hold that hung up, or the calls a
+    /// merge replaced with a conference under a new id, were never closed here. The list arrives
+    /// just before every `call` event, and the primary call is left to that event, which keeps the
+    /// single-call path as it was. Idempotent: the same list a second time changes nothing.
+    func reconcile(with items: [GatewayCallInfo], primaryId: String?, merging: Bool) {
+        let connection = GatewayConnection.shared
+        let live = items.filter { !$0.isWaiting }
+        var byId: [String: GatewayCallInfo] = [:]
+        for item in live where byId[item.callId] == nil { byId[item.callId] = item }
+        let waitingIds = Set(items.filter { $0.isWaiting }.map { $0.callId })
+        let waitingId = connection.waitingCall?.rawCallId
+        // A conference this iPhone has not mapped yet: a merge has just finished.
+        let newConference = live.first { $0.isConference && !$0.isConferenceChild && uuidByCallId[$0.callId] == nil }
+
+        var gone: [UUID] = []
+        var intoConference: [UUID] = []
+        for uuid in incoming.union(outgoing) {
+            // The call being dialled has no Redmi id yet; its first event maps it (uuidFor).
+            if uuid == pendingOutgoing { continue }
+            guard let rawId = callIdByUuid[uuid] else { continue }
+            if rawId.isEmpty || rawId == "gateway_call" || rawId.hasPrefix("outgoing_") { continue }
+            // The call-waiting flow owns a waiting call.
+            if rawId == waitingId || waitingIds.contains(rawId) { continue }
+            // Still ringing and not answered here: the call event, the state reply and the ring
+            // watchdog end those, each with the right reason.
+            if incoming.contains(uuid), states[uuid] == "ringing", !answeredHere.contains(uuid) { continue }
+            if let item = byId[rawId] {
+                if let conference = newConference, item.parentId == conference.callId {
+                    // Still listed, but now a participant of the new conference.
+                    intoConference.append(uuid)
+                } else if rawId != primaryId, states[uuid] != item.state {
+                    connection.log("Call \(rawId.prefix(8)): \(states[uuid] ?? "none") -> \(item.state) (calls list)")
+                    states[uuid] = item.state
+                }
+                continue
+            }
+            // No longer listed. The primary call's own event follows and ends it as it always did.
+            if rawId == primaryId { continue }
+            gone.append(uuid)
+        }
+
+        if let conference = newConference, !(gone.isEmpty && intoConference.isEmpty) {
+            finishMerge(into: conference, merged: gone + intoConference)
+        } else if !gone.isEmpty {
+            if merging && !live.isEmpty {
+                // Between the merged calls leaving and the conference arriving (11 ms measured, but
+                // the network may take longer). The next list brings the conference, or, if the merge
+                // failed, these calls end with it.
+                connection.log("Calls list: \(gone.count) call(s) left while merging; waiting for the conference")
+            } else {
+                for uuid in gone {
+                    connection.log("Call \(callIdByUuid[uuid].map { String($0.prefix(8)) } ?? "?") is no longer on the Redmi; ending it here")
+                    end(uuid, reason: .remoteEnded)
+                }
+            }
+        }
+        forgetUnpresentedCalls(listed: Set(items.map { $0.callId }), primaryId: primaryId)
+        resumeInCallKitIfRedmiDid(byId)
+    }
+
+    /// A merge finished: the network replaced the merged calls with a conference under a new id.
+    ///
+    /// One CallKit call carries on as the conference and keeps the audio; the other closes without
+    /// touching it. Before this the iPhone ended its call while the conference went on on the Redmi,
+    /// the "takıldı" the owner saw when calls were merged.
+    private func finishMerge(into conference: GatewayCallInfo, merged: [UUID]) {
+        let connection = GatewayConnection.shared
+        guard let fallback = merged.first else {
+            connection.log("Merge done, but no call here to carry the conference")
+            return
+        }
+        let keep: UUID
+        if let owner = audioCallUuid, merged.contains(owner) {
+            keep = owner
+        } else {
+            keep = merged.first(where: { states[$0] == "active" }) ?? fallback
+        }
+        let oldId = callIdByUuid[keep]
+        if let oldId {
+            if uuidByCallId[oldId] == keep { uuidByCallId.removeValue(forKey: oldId) }
+            // A late event for the old id must not raise a call again.
+            endedCallIds[oldId] = Date()
+        }
+        uuidByCallId[conference.callId] = keep
+        callIdByUuid[keep] = conference.callId
+        states[keep] = conference.state
+        provider.reportCall(with: keep, updated: conferenceUpdate())
+        connection.log("Merge done: call \(oldId.map { String($0.prefix(8)) } ?? "?") now carries the conference \(conference.callId.prefix(8)) (owns the audio: \(audioCallUuid == keep))")
+        for uuid in merged where uuid != keep {
+            connection.log("Merge done: closing merged call \(callIdByUuid[uuid].map { String($0.prefix(8)) } ?? "?") here; the audio stays")
+            end(uuid, reason: .remoteEnded)
+        }
+    }
+
+    /// A call this iPhone never presented (carried on the Redmi only) leaves an entry here when it
+    /// ends while another call is the primary one, and that entry kept hasCalls true - and with it
+    /// the network link open in the background - after the last call. The list is the authority.
+    private func forgetUnpresentedCalls(listed: Set<String>, primaryId: String?) {
+        let stale = states.keys.filter { uuid in
+            if incoming.contains(uuid) || outgoing.contains(uuid) || uuid == pendingOutgoing { return false }
+            guard let rawId = callIdByUuid[uuid] else { return false }
+            return !listed.contains(rawId) && rawId != primaryId
+        }
+        if stale.isEmpty { return }
+        GatewayConnection.shared.log("Calls list: forgetting \(stale.count) call(s) this iPhone never presented")
+        for uuid in stale { cleanup(uuid) }
+    }
+
+    /// The Redmi resumed the last call on hold by itself (the other call ended). CallKit still shows
+    /// it held until it is told, and with only a held call CallKit lets the audio session go.
+    ///
+    /// Only for a single remaining call that the Redmi reports active, and not right after a hold was
+    /// asked for here: a list sent before that hold took effect must not undo it.
+    private func resumeInCallKitIfRedmiDid(_ byId: [String: GatewayCallInfo]) {
+        let presented = incoming.union(outgoing).filter { states[$0] != "ringing" && $0 != pendingOutgoing }
+        if presented.count != 1 { return }
+        guard let uuid = presented.first, let rawId = callIdByUuid[uuid], byId[rawId]?.state == "active",
+              callController.callObserver.calls.contains(where: { $0.uuid == uuid && $0.isOnHold && !$0.hasEnded })
+        else { return }
+        if callKitOnlyHoldChanges.contains(uuid) { return }
+        if let asked = holdRequestedAt[uuid], Date().timeIntervalSince(asked) < 5 {
+            GatewayConnection.shared.log("Call \(rawId.prefix(8)) is active on the Redmi but held in CallKit; a hold was just asked for, left as it is")
+            return
+        }
+        GatewayConnection.shared.log("The Redmi resumed call \(rawId.prefix(8)); showing it as resumed in CallKit")
+        callKitOnlyHoldChanges.insert(uuid)
+        callController.request(CXTransaction(action: CXSetHeldCallAction(call: uuid, onHold: false))) { error in
+            guard error != nil else { return }
+            Task { @MainActor in
+                let code = error.map { ($0 as NSError).code } ?? -1
+                CallKitManager.shared.callKitOnlyHoldChanges.remove(uuid)
+                GatewayConnection.shared.log("CallKit refused to show the resumed call: \(code)")
+            }
+        }
+    }
+
+    private func conferenceUpdate() -> CXCallUpdate {
+        let update = CXCallUpdate()
+        update.remoteHandle = CXHandle(type: .generic, value: "Konferans")
+        update.localizedCallerName = "Konferans"
+        update.hasVideo = false
+        update.supportsDTMF = true
+        update.supportsHolding = true
+        update.supportsGrouping = true
+        update.supportsUngrouping = false
+        return update
+    }
+
+    /// The two calls the Redmi lists outside a conference, one active and one on hold.
+    private func activeAndHeldCalls() -> (active: GatewayCallInfo, held: GatewayCallInfo)? {
+        let calls = GatewayConnection.shared.calls.filter { !$0.isWaiting && !$0.isConferenceChild }
+        guard calls.count == 2,
+              let active = calls.first(where: { $0.state == "active" }),
+              let held = calls.first(where: { $0.state == "holding" }) else { return nil }
+        return (active: active, held: held)
+    }
+
+    /// The CallKit call this iPhone shows for a Redmi call id, if any.
+    private func presentedUuid(for rawId: String) -> UUID? {
+        guard let uuid = uuidByCallId[rawId], incoming.contains(uuid) || outgoing.contains(uuid) else { return nil }
+        return uuid
+    }
+
+    /// "Değiştir": the active call goes on hold and the held one resumes.
+    ///
+    /// One CallKit transaction with both hold changes, so the system call screen agrees; the provider
+    /// sends hold_call for each. A call carried on the Redmi only has no CallKit call, and then the
+    /// Redmi swaps by itself.
+    func swapCalls() {
+        let connection = GatewayConnection.shared
+        if connection.callsMerging {
+            connection.log("Swap refused: the calls are being merged")
+            return
+        }
+        guard let pair = activeAndHeldCalls() else {
+            connection.log("Swap refused: the Redmi does not list one active and one held call")
+            connection.lastCallError = "Değiştirilecek bekleyen çağrı yok."
+            return
+        }
+        guard let activeUuid = presentedUuid(for: pair.active.callId),
+              let heldUuid = presentedUuid(for: pair.held.callId) else {
+            connection.log("Swap: not both calls are in CallKit here; asking the Redmi to swap")
+            connection.send(["type": "swap_calls"])
+            return
+        }
+        connection.log("Swap: holding \(pair.active.callId.prefix(8)) and resuming \(pair.held.callId.prefix(8))")
+        let actions: [CXAction] = [
+            CXSetHeldCallAction(call: activeUuid, onHold: true),
+            CXSetHeldCallAction(call: heldUuid, onHold: false)
+        ]
+        callController.request(CXTransaction(actions: actions)) { error in
+            guard error != nil else { return }
+            Task { @MainActor in
+                let code = error.map { ($0 as NSError).code } ?? -1
+                GatewayConnection.shared.log("CallKit refused the swap (\(code)); asking the Redmi to swap")
+                GatewayConnection.shared.send(["type": "swap_calls"])
+            }
+        }
+    }
+
+    /// "Birleştir": CallKit groups the two calls and the provider sends merge_calls. The network
+    /// needs about 20 s to build the conference, which then replaces both calls (finishMerge).
+    func mergeCalls() {
+        let connection = GatewayConnection.shared
+        if connection.callsMerging {
+            connection.log("Merge refused: the calls are already being merged")
+            return
+        }
+        guard let pair = activeAndHeldCalls() else {
+            connection.log("Merge refused: the Redmi does not list one active and one held call")
+            connection.lastCallError = "Birleştirilecek iki çağrı yok."
+            return
+        }
+        guard let activeUuid = presentedUuid(for: pair.active.callId),
+              let heldUuid = presentedUuid(for: pair.held.callId) else {
+            connection.log("Merge: not both calls are in CallKit here; asking the Redmi to merge")
+            connection.send(["type": "merge_calls"])
+            return
+        }
+        connection.log("Merge: grouping \(pair.active.callId.prefix(8)) with \(pair.held.callId.prefix(8)) in CallKit")
+        let action = CXSetGroupCallAction(call: activeUuid, callUUIDToGroupWith: heldUuid)
+        callController.request(CXTransaction(action: action)) { error in
+            guard error != nil else { return }
+            Task { @MainActor in
+                let code = error.map { ($0 as NSError).code } ?? -1
+                GatewayConnection.shared.log("CallKit refused the merge (\(code)); asking the Redmi to merge")
+                GatewayConnection.shared.send(["type": "merge_calls"])
+            }
+        }
+    }
+
     // MARK: - CXProviderDelegate
 
     func providerDidReset(_ provider: CXProvider) {
@@ -813,12 +1211,20 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         ringConfirmed.removeAll()
         connectedOutgoing.removeAll()
         pendingOutgoing = nil
+        callIdsBeforeDial = []
+        callKitOnlyHoldChanges.removeAll()
+        holdRequestedAt.removeAll()
+        answerHoldingCurrent.removeAll()
+        holdAnswerAt.removeAll()
     }
 
     func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         let connection = GatewayConnection.shared
         let uuid = action.callUUID
         let rawId = callIdByUuid[uuid] ?? ""
+        // "Beklet ve yanıtla" from the app asks for it explicitly, even when the current call has no
+        // CallKit call here (carried on the Redmi).
+        let askedToHold = answerHoldingCurrent.remove(uuid) != nil
         guard !rawId.isEmpty, states[uuid] == "ringing",
               connection.isAuthenticated || BLECentralManager.shared.isReady else {
             // This refusal used to leave no trace. The answer itself is not kept for later: an
@@ -832,13 +1238,32 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             action.fail()
             return
         }
+        // A waiting call answered while another call of this manager stays live: the system's "Hold &
+        // Accept" (CXSetHeldCallAction on the current call, then this) or "Beklet ve yanıtla" here.
+        // The Redmi then answers it without ending the current call, which Telecom puts on hold.
+        // After "End & Accept" CallKit has already ended the current call (CXEndCallAction), so no
+        // other call is live and the answer keeps its old meaning: end the current call, then answer.
+        let othersLive = incoming.union(outgoing).contains { other in
+            other != uuid && other != pendingOutgoing && states[other] != nil && states[other] != "ringing"
+        }
+        let holdCurrent = askedToHold || othersLive
+        if holdCurrent || rawId == connection.waitingCall?.rawCallId {
+            connection.log("Answering call \(rawId.prefix(8)) while another call is in progress: \(holdCurrent ? "the current call goes on hold" : "the current call was ended first") (asked=\(askedToHold) othersLive=\(othersLive))")
+        }
+        // The audio is device-level: with the current call kept on hold, the session already running
+        // here carries the answered call too. A second audio_start would make the Redmi open a new
+        // session under the running engine (rule 6.10).
+        let keepsAudioSession = holdCurrent && audioRequested && connection.isAuthenticated
         answeredHere.insert(uuid)
         audioCallUuid = uuid
+        if holdCurrent { holdAnswerAt[uuid] = Date() }
         // Keep the ring-time origin when there is one, so the whole path reads on one timeline.
         if audioPathStartedAt == nil { audioPathStartedAt = Date() }
         audioPathLog("answer tapped")
-        connection.sendAnswer(callId: rawId)
-        if connection.isAuthenticated {
+        connection.sendAnswer(callId: rawId, holdCurrent: holdCurrent)
+        if keepsAudioSession {
+            audioPathLog("answered with the current call on hold; the running audio session carries this call, no new audio_start")
+        } else if connection.isAuthenticated {
             audioRequested = true
             connection.sendAudioStart()
             audioPathLog("audio_start sent")
@@ -971,21 +1396,53 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         action.fulfill()
     }
 
+    /// Hold or resume, from the system call screen, from "Değiştir", or from CallKit itself: it holds
+    /// the current call when a second one is dialled ("Çağrı ekle") or a waiting call is taken with
+    /// "Beklet ve yanıtla". The Redmi's Telecom also holds on its own then; a repeated hold is
+    /// harmless. Nothing here touches the audio: the session runs on through a hold.
     func provider(_ provider: CXProvider, perform action: CXSetHeldCallAction) {
         let uuid = action.callUUID
         let rawId = callIdByUuid[uuid] ?? ""
-        GatewayConnection.shared.send([
-            "type": "hold_call",
-            "callId": rawId,
-            "hold": action.isOnHold
-        ])
+        let connection = GatewayConnection.shared
+        let change = action.isOnHold ? "hold" : "resume"
+        if callKitOnlyHoldChanges.remove(uuid) != nil {
+            // Only shows in CallKit what the Redmi already did; sending it back would be an echo.
+            connection.log("CallKit \(change) for call \(rawId.prefix(8)) mirrors the Redmi; not sent")
+        } else if rawId.isEmpty || rawId == "gateway_call" || rawId.hasPrefix("outgoing_") {
+            // The Redmi has not named this call yet and ignores hold_call for an unknown id.
+            connection.log("CallKit \(change) for a call the Redmi has not named yet; left to the Redmi")
+        } else {
+            holdRequestedAt[uuid] = Date()
+            connection.log("CallKit \(change) for call \(rawId.prefix(8)); sending hold_call\(connection.isAuthenticated ? "" : " (no link to the Redmi; it will not arrive)")")
+            connection.send([
+                "type": "hold_call",
+                "callId": rawId,
+                "hold": action.isOnHold
+            ])
+        }
         action.fulfill()
     }
 
+    /// Merge, from "Birleştir" or the system call screen. The network takes about 20 s to build the
+    /// conference; the calls list then replaces both calls with it (finishMerge).
     func provider(_ provider: CXProvider, perform action: CXSetGroupCallAction) {
-        GatewayConnection.shared.send([
-            "type": "merge_calls"
-        ])
+        let connection = GatewayConnection.shared
+        guard let other = action.callUUIDToGroupWith else {
+            // Ungrouping: the Redmi cannot split a conference (supportsUngrouping is false).
+            connection.log("CallKit asked to take a call out of its group; not supported, refused")
+            action.fail()
+            return
+        }
+        let first = callIdByUuid[action.callUUID].map { String($0.prefix(8)) } ?? "?"
+        let second = callIdByUuid[other].map { String($0.prefix(8)) } ?? "?"
+        if connection.callsMerging {
+            connection.log("Merge of \(first) + \(second) asked while the Redmi is already merging; not asked again")
+        } else {
+            connection.log("Merge of \(first) + \(second) requested; sending merge_calls\(connection.isAuthenticated ? "" : " (no link to the Redmi; it will not arrive)")")
+            connection.send([
+                "type": "merge_calls"
+            ])
+        }
         action.fulfill()
     }
 
@@ -1000,7 +1457,9 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
-        audioPathLog("didDeactivate received; stopping call audio")
+        // The call count tells a deactivation inside a multi-call session (hold, swap, merge, hold and
+        // answer) apart from the end of a call; the stop itself is unchanged.
+        audioPathLog("didDeactivate received (\(incoming.union(outgoing).count) call(s) here); stopping call audio")
         audioActivated = false
         stopAudio()
     }

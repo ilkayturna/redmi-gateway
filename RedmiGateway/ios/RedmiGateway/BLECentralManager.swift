@@ -137,7 +137,9 @@ final class BLECentralManager: NSObject, ObservableObject {
     }
 
     /// Answer, reject, hang up or acknowledge ringing while the network link is down.
-    func sendCallControl(action: String, callId: String, completion: ((Bool) -> Void)? = nil) {
+    /// `holdCurrent` ("h") answers a waiting call keeping the current one on hold (Redmi 2.0.13).
+    func sendCallControl(action: String, callId: String, holdCurrent: Bool = false,
+                         completion: ((Bool) -> Void)? = nil) {
         guard let peripheral, let controlChar, let key = GatewayConnection.shared.pairing?.bleKey else {
             completion?(false)
             return
@@ -146,7 +148,8 @@ final class BLECentralManager: NSObject, ObservableObject {
         // Milliseconds keep the sequence increasing across restarts of either phone.
         let seq = max(now, lastControlSeq + 1)
         lastControlSeq = seq
-        let payload: [String: Any] = ["a": action, "id": callId, "q": seq, "t": now]
+        var payload: [String: Any] = ["a": action, "id": callId, "q": seq, "t": now]
+        if holdCurrent { payload["h"] = true }
         guard let json = try? JSONSerialization.data(withJSONObject: payload),
               let sealed = BridgeCrypto.seal(key, json, aad: Self.controlAAD) else {
             completion?(false)
