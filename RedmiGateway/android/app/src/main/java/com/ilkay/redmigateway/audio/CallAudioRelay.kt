@@ -285,6 +285,8 @@ object CallAudioRelay : CallManager.CallListener {
     private val downlinkReads = AtomicInteger()
     /** Reads that returned less than one 20 ms frame; a high rate means the HAL is chopping. */
     private val downlinkShortReads = AtomicInteger()
+    /** Loudness of what the iPhone is sent, reported once per health line. */
+    private val downlinkLevel = PcmLevelMeter()
     // Counters since the cutover began. The per second window above is reset on every roll, so it
     // cannot measure the first partial window; these two make the handover decision at
     // VERIFY_WINDOW_MS instead of at the next one second boundary.
@@ -608,6 +610,7 @@ object CallAudioRelay : CallManager.CallListener {
             // writer that is genuinely blocking.
             val windowWriteMs = windowMaxWriteMs
             windowMaxWriteMs = 0
+            val level = downlinkLevel.takeLevel()
             val health = "RELAY_HEALTH owner=$owner iphone=$windowIPhone/s uplink=$windowWrites/s " +
                 "pcm=$windowPcmWrites/s silence=$windowSilenceWrites/s partial=$windowPartialWrites/s " +
                 "downlink=$windowReads/s shortReads=$windowShortReads/s queued=${queue.queued} targetFrames=${queue.targetFrames} " +
@@ -615,7 +618,9 @@ object CallAudioRelay : CallManager.CallListener {
                 "expired=${queue.expired} underruns=${queue.underruns} maxWriteMs=$maxWriteMs " +
                 "windowMaxWriteMs=$windowWriteMs " +
                 "maxAuthenticatedArrivalGapMs=${queue.maxAuthenticatedArrivalGapMs} " +
-                "maxAuthenticatedArrivalBurstFrames=${queue.maxAuthenticatedArrivalBurstFrames}"
+                "maxAuthenticatedArrivalBurstFrames=${queue.maxAuthenticatedArrivalBurstFrames} " +
+                "downlinkSpeechDbfs=${level.speechRmsDbfs} downlinkPeakDbfs=${level.peakDbfs} " +
+                "downlinkActive=${level.activePercent}%"
             Log.i(TAG, health)
             com.ilkay.redmigateway.journal.DiagnosticsLog.record("Audio", health)
         }
@@ -1065,6 +1070,9 @@ object CallAudioRelay : CallManager.CallListener {
         verificationScheduled = false
         badWindows = 0
         resetWindow()
+        // The meter is otherwise emptied only by a health line, so the first line of this call
+        // would report the last seconds of the previous one.
+        downlinkLevel.takeLevel()
         track.play()
         record.startRecording()
         writerThread = Thread({ writeLoop(track) }, "CallAudio-Uplink").apply {
@@ -1239,6 +1247,7 @@ object CallAudioRelay : CallManager.CallListener {
                 reportedShortReads = assembler.shortReads
             }
             downlinkReads.incrementAndGet()
+            downlinkLevel.add(assembler.frame)
             cutoverReads.incrementAndGet()
             lastCutoverReadAt = SystemClock.elapsedRealtime()
             if (firstCutoverReadAt == 0L) {
