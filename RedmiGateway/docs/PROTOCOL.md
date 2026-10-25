@@ -162,7 +162,10 @@ The Bluetooth key is `derive(K, "ble")`. Sealed values are `0x02 | nonce | ciphe
 | type | fields | reply |
 |---|---|---|
 | `get_state` | — | `state` |
-| `dial` | `number` | `ack` |
+| `dial` | `number` | `ack`; with one call in progress it becomes a second call and Telecom holds the first (2.0.12) |
+| `hold_call` | `callId`, `hold` (bool) | `ack` |
+| `swap_calls` | — | `ack`; the active call goes on hold and the held one resumes |
+| `merge_calls` | — | `ack`; the network builds the conference, which can take ~20 s |
 | `answer`, `reject`, `hangup` | `callId` | `ack` |
 | `dtmf` | `digit`, `callId`? | `ack` |
 | `ringing_ack` | `callId` | `ack`; the Redmi silences its ringer if the "ring quietly" setting is on |
@@ -190,6 +193,12 @@ call.
   current one. `answer` with its `callId` ends the current call and answers it. `reject` or
   `hangup` with its `callId` declines it. When the current call ends, the waiting call becomes
   the current call under the same `callId`.
+- `calls {primaryId, merging, items: [{callId, state, number, direction, conference, parentId, waiting}]}`
+  (2.0.12, protocol 2 only) lists every call Telecom holds, sent before each `call` event and after
+  authentication; an empty list means no call is left. `call` events still name only the primary
+  call. A merge replaces the merged calls with a conference call that has a new `callId`; the
+  children carry it in `parentId`. The Redmi waits 0.7 s (3 s while `merging`) before it reports
+  the end of the last call, because a merge leaves no live call for a few milliseconds.
 - `sync_calls` / `sync_sms` `{items, hasMore, lastSeq}`.
 
 ### Journals and replay

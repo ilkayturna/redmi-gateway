@@ -95,6 +95,13 @@ class Session:
                 self.events.append(msg)
             elif msg.get("type") == "call":
                 print(f"  <- call {msg.get('state')} direction={msg.get('direction')}")
+            elif msg.get("type") == "calls":
+                items = [f"{i.get('state')}{'/conf' if i.get('conference') else ''}" for i in msg.get("items", [])]
+                summary = f"{items} merging={msg.get('merging')}"
+                if summary != getattr(self, "last_calls", None):
+                    print(f"  <- calls {summary}")
+                    self.last_calls = summary
+                self.events.append(msg)
             elif msg.get("type") == "call_log":
                 item = msg.get("item", {})
                 print(f"  <- call_log seq={item.get('seq')} type={item.get('type')} answeredOn={item.get('answeredOn')}")
@@ -246,6 +253,27 @@ async def call_scenario(args):
             await report("soak", 5)
     media.tone = True
     await report("iphone_tone", 5)
+    if args.scenario == "multicall":
+        # Second call, swap and merge while the iPhone carries the audio: does the relay keep
+        # delivering frames through hold and conference? The second call goes straight to Telecom,
+        # so this measures the audio path before any app change.
+        print("dial a second call (Çağrı ekle)")
+        await client.send({"type": "dial", "number": args.dial})
+        ack = await s.wait_for("ack", 5)
+        check("second dial accepted", bool(ack) and ack.get("action") == "dial" and ack.get("success") is True)
+        await report("second_call", 12)
+        print("swap_calls")
+        await client.send({"type": "swap_calls"})
+        await report("after_swap", 6)
+        print("merge_calls (the network may take ~20 s)")
+        await client.send({"type": "merge_calls"})
+        await report("after_merge", 30)
+        owners = [(e.get("owner"), e.get("detail")) for e in s.events if e.get("type") == "audio_state"]
+        check("audio stayed on the iPhone through add, swap and merge", not any(o == "redmi" for o, _ in owners[1:]))
+        confs = [e for e in s.events if e.get("type") == "calls" and any(i.get("conference") for i in e.get("items", []))]
+        check("conference reported in calls", bool(confs))
+        print("calls on the Redmi:", bridge_client.adb_shell(
+            'dumpsys telecom | sed -n "/^  mCalls:/,/^  mCallAudioManager/p" | grep -oE "Call id=TC@[0-9]+, state=[A-Z_]+|childs\\([0-9]+\\)"').split())
     if args.scenario == "reconnect":
         # iOS replaces its control socket while the call audio keeps flowing on UDP. The new socket
         # of the same iPhone must still be able to move the audio back (2.0.9).
@@ -282,6 +310,15 @@ async def call_scenario(args):
         await report("manual_redmi", 3)
     await client.send({"type": "hangup", "callId": call_id})
     await asyncio.sleep(5)  # the call log entry follows the hangup
+    if args.scenario == "multicall":
+        # A call left on hold would stay open on the owner's line; end whatever remains.
+        for _ in range(3):
+            left = bridge_client.adb_shell('dumpsys telecom | sed -n "/^  mCalls:/,/^  mCallAudioManager/p" | grep -c "Call id="').strip()
+            print(f"  calls left after hangup: {left or '?'}")
+            if left == "0":
+                break
+            await client.send({"type": "hangup"})
+            await asyncio.sleep(3)
     mtask.cancel()
     s.task.cancel()
     print(f"downlink rejected packets: {media.framing.rejected}")

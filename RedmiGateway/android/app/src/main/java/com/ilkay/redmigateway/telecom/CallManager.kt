@@ -100,6 +100,28 @@ object CallManager {
         }
     }
 
+    /**
+     * How long "no call is live" must hold before the call session is declared over.
+     *
+     * Measured on 25.10.2026 15:20:45 (IVR 532 twice, merged): the two merged calls left Telecom and
+     * the conference call arrived 11 ms later. In that gap this object announced the end, the relay
+     * gave the audio back to the Redmi, and the iPhone ended its call while the conference went on
+     * on the Redmi - the "takıldı" the owner saw when calls were merged. A short wait costs nothing
+     * when a call really ends; while this side has asked for a merge the network may take seconds.
+     */
+    private const val END_GRACE_MS = 700L
+    private const val MERGE_GRACE_MS = 3_000L
+    /** The merge measured that day took 21 s from the request to the conference. */
+    private const val MERGE_WINDOW_MS = 45_000L
+    /** When this side last asked for a merge; 0 once the conference exists. */
+    @Volatile private var mergeRequestedAt = 0L
+    private var endPending = false
+    private val confirmEnd = Runnable { confirmEndNow() }
+    private val resumeHeld = Runnable { resumeHeldNow() }
+
+    private fun mergeInProgress() = mergeRequestedAt != 0L &&
+        android.os.SystemClock.elapsedRealtime() - mergeRequestedAt < MERGE_WINDOW_MS
+
     val isConference: Boolean
         get() = isConference(activeCall) || calls.any { isConference(it) && isCallLive(it) }
 
@@ -260,6 +282,8 @@ object CallManager {
         val mappedState = mapCallState(call.state)
         val isConf = isConference(call)
         log("Call Added: ID=$callId, State=$mappedState, IsConference=$isConf, TotalCalls=${calls.size}")
+        // The conference exists: the merge is done, and normal call ends need no long grace again.
+        if (isConf) mergeRequestedAt = 0L
 
         val callback = object : Call.Callback() {
             override fun onStateChanged(c: Call, state: Int) {
@@ -378,7 +402,47 @@ object CallManager {
         callIds.remove(call)
 
         updatePrimaryCallAndNotify("call_removed")
+        // Telecom settles the remaining call first; a merge in flight is left alone.
+        mainHandler.removeCallbacks(resumeHeld)
+        mainHandler.postDelayed(resumeHeld, 800L)
     }
+
+    /** One call as the iPhone sees it in a `calls` message (docs/PROTOCOL.md). */
+    data class CallInfo(
+        val callId: String,
+        val state: String,
+        val number: String?,
+        val direction: String,
+        val conference: Boolean,
+        val parentId: String?,
+        val waiting: Boolean,
+    )
+
+    /**
+     * Every call Telecom holds right now, not only the primary one. The single primary call was all
+     * the iPhone ever heard about, so a call on hold, the calls inside a conference and the moment a
+     * merge replaced two calls with one were invisible to it.
+     */
+    @Synchronized
+    fun snapshot(): List<CallInfo> = calls.mapNotNull { call ->
+        val id = callIds[call] ?: return@mapNotNull null
+        val state = mapCallState(call.state)
+        if (state == "disconnected" || state == "idle") return@mapNotNull null
+        val conf = isConference(call)
+        val direction = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            call.details?.callDirection == Call.Details.DIRECTION_INCOMING) "incoming" else "outgoing"
+        CallInfo(
+            callId = id,
+            state = state,
+            number = if (conf) getConferenceTitle(call) else extractPhoneNumber(call),
+            direction = direction,
+            conference = conf,
+            parentId = call.parent?.let { callIds[it] },
+            waiting = call === waitingCall,
+        )
+    }
+
+    val isMerging: Boolean get() = mergeInProgress()
 
     private fun selectPrimaryCall(): Call? {
         val liveCalls = calls.filter { isCallLive(it) && it !== waitingCall }
@@ -411,6 +475,11 @@ object CallManager {
     @Synchronized
     private fun updatePrimaryCallAndNotify(reason: String) {
         val primary = selectPrimaryCall()
+        if (primary != null && endPending) {
+            mainHandler.removeCallbacks(confirmEnd)
+            endPending = false
+            log("A call replaced the ended one within the grace ($reason); the call goes on")
+        }
         if (primary != null) {
             activeCall = primary
             currentCallId = callIds[primary] ?: UUID.randomUUID().toString().also { callIds[primary] = it }
@@ -450,7 +519,49 @@ object CallManager {
             log("Primary call evaluated ($reason): ID=$currentCallId, State=$currentCallState, Number=$currentPhoneNumber, Conf=$isConf")
             notifyStateChanged()
         } else {
-            // No live calls remain!
+            // No live calls remain - possibly only for the moment a merge swaps calls; see END_GRACE_MS.
+            // A waiting call keeps the old immediate path: "end and answer" promotes it from here.
+            if ((activeCall != null || currentCallState != "idle") && waitingCall == null) {
+                if (!endPending) {
+                    val grace = if (mergeInProgress()) MERGE_GRACE_MS else END_GRACE_MS
+                    endPending = true
+                    log("No live call ($reason); waiting $grace ms for a merged or replacing call before ending")
+                    mainHandler.postDelayed(confirmEnd, grace)
+                }
+                return
+            }
+            finishCallSession(reason)
+        }
+    }
+
+    @Synchronized
+    private fun confirmEndNow() {
+        if (!endPending) return
+        endPending = false
+        if (selectPrimaryCall() != null) {
+            updatePrimaryCallAndNotify("end_cancelled")
+            return
+        }
+        finishCallSession("end_confirmed")
+    }
+
+    /**
+     * The other call ended and the one left is on hold: resume it. Holding was this phone's doing
+     * (a second call was added), so the person expects to be back with the first caller; left on
+     * hold, that caller heard hold music and the iPhone showed a call nobody could talk on.
+     */
+    @Synchronized
+    private fun resumeHeldNow() {
+        if (mergeInProgress()) return
+        val held = calls.filter { isCallLive(it) && it !== waitingCall }.singleOrNull() ?: return
+        if (held.state != Call.STATE_HOLDING) return
+        log("The other call ended; resuming the call on hold: ID=${callIds[held]}")
+        runCatching { held.unhold() }.onFailure { log("Could not resume the call on hold: ${it.message}") }
+    }
+
+    @Synchronized
+    private fun finishCallSession(reason: String) {
+        run {
             if (activeCall != null || currentCallState != "idle") {
                 log("No live calls remain ($reason). Transitioning to disconnected then idle.")
                 val finalId = currentCallId
@@ -702,6 +813,8 @@ object CallManager {
 
     fun merge(): Boolean {
         val current = activeCall ?: return false
+        mergeRequestedAt = android.os.SystemClock.elapsedRealtime()
+        notifyStateChanged()
         val details = current.details
         val hasMergeCap = details != null && (details.callCapabilities and Call.Details.CAPABILITY_MERGE_CONFERENCE) != 0
         if (hasMergeCap) {
@@ -782,10 +895,18 @@ object CallManager {
             log("Cannot dial: invalid number format")
             return false
         }
-        if (activeCall != null || calls.any { isCallLive(it) }) {
-            log("Cannot dial: gateway is already handling a call")
+        // One call in progress may get a second one ("Çağrı ekle"): Telecom puts the current call on
+        // hold by itself (measured 25.10.2026 15:20:06). More than that, or a call still being set
+        // up or ringing, is refused.
+        val live = calls.filter { isCallLive(it) && it !== waitingCall }
+        val busy = waitingCall != null || live.size > 1 || live.any {
+            it.state == Call.STATE_RINGING || it.state == Call.STATE_DIALING || it.state == Call.STATE_CONNECTING
+        }
+        if (busy) {
+            log("Cannot dial: ${live.size} call(s) already in progress")
             return false
         }
+        if (live.size == 1) log("Adding a second call; the current one goes on hold")
         val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
         if (telecomManager == null) {
             log("Cannot dial: TelecomManager unavailable")

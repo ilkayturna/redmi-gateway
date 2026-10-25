@@ -363,6 +363,7 @@ class GatewayWebSocketServer(
         )
         serverListener?.onClientCountChanged(authenticatedCount())
         val state = CallManager.currentCallState
+        if (peer.protocol >= 2) send(peer, callsMessage())
         if (state != "idle") send(peer, callEvent(CallManager.currentCallId ?: "", state, CallManager.currentPhoneNumber))
         if (peer.protocol >= 2) sendAudioState(peer, CallAudioRelay.owner, CallAudioRelay.lastReason)
         val waiting = CallManager.waitingCallId
@@ -644,9 +645,29 @@ class GatewayWebSocketServer(
     // ---- Broadcasts ----
 
     override fun onCallStateChanged(callId: String, state: String, number: String?) {
+        // The full list goes first, also when the last call is gone, so the iPhone can close a
+        // call on hold or the calls inside a conference that the primary event never names.
+        val calls = callsMessage()
+        for (peer in peers.values) if (peer.authenticated && peer.protocol >= 2) send(peer, calls)
         if (callId == "none" && state == "idle") return
         broadcast(callEvent(callId, state, number))
     }
+
+    /** Every call on the Redmi (docs/PROTOCOL.md "calls"); old iPhone builds ignore the type. */
+    private fun callsMessage(): JSONObject = JSONObject()
+        .put("type", "calls")
+        .put("primaryId", CallManager.currentCallId ?: "")
+        .put("merging", CallManager.isMerging)
+        .put("items", JSONArray().apply {
+            for (info in CallManager.snapshot()) put(JSONObject()
+                .put("callId", info.callId)
+                .put("state", info.state)
+                .put("number", info.number ?: "")
+                .put("direction", info.direction)
+                .put("conference", info.conference)
+                .put("parentId", info.parentId ?: "")
+                .put("waiting", info.waiting))
+        })
 
     override fun onLogMessage(message: String) = Unit
 
