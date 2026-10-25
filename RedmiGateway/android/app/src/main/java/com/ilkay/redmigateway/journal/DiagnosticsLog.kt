@@ -60,10 +60,14 @@ object DiagnosticsLog {
     /** Appends one line. Never blocks the caller and never throws. */
     fun record(tag: String, message: String) {
         val target = file ?: lateInitFile() ?: return
-        val line = "${stamp.format(Date())} $tag: $message"
+        // The time is taken here, but formatted on the log thread: SimpleDateFormat is not
+        // thread-safe, and the audio, Bluetooth and main threads all write here at once during a
+        // call, which can garble the very timestamps a call review depends on.
+        val at = System.currentTimeMillis()
         runCatching {
             executor.execute {
                 runCatching {
+                    val line = "${stamp.format(Date(at))} $tag: $message"
                     target.parentFile?.mkdirs()
                     target.appendText(line + "\n")
                     if (shouldTrimDiagnosticsLog(writes.incrementAndGet())) trim(target)

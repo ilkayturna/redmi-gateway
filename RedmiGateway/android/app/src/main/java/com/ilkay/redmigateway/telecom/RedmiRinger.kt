@@ -142,11 +142,16 @@ object RedmiRinger {
         }.onFailure { Log.w(TAG, "Could not silence TelecomManager ringer: ${it.message}") }
     }
 
+    /** True while this phone rings (or would, with sound off); read on the main thread. */
+    val isRinging: Boolean get() = ringing
+
     private fun start(reason: String) {
         handler.removeCallbacks(ringNow)
         if (callId == null || ringing) return
         ringing = true
         ringingSince = SystemClock.elapsedRealtime()
+        // Only now does the call screen take over this phone's display; see CallUiNotifier.
+        CallUiNotifier.onRedmiRinging()
         val audio = context.getSystemService(AudioManager::class.java)
         val mode = audio?.ringerMode ?: AudioManager.RINGER_MODE_NORMAL
         Log.i(TAG, "Redmi rings: $reason (mode=$mode, silentRequested=$silentRequested)")

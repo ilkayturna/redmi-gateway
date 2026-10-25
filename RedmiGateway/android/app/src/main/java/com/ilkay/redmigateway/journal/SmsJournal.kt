@@ -136,11 +136,24 @@ class SmsJournal private constructor(context: Context) :
     private fun hasPermission() =
         appContext.checkSelfPermission(Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED
 
+    /**
+     * [date] is the network's send time from the PDU, while an SMS app stores the time it received
+     * the message in DATE and the send time in DATE_SENT. A message the network held back for more
+     * than two minutes (the Redmi out of coverage or rebooting) therefore missed a DATE-only window,
+     * got a synthetic copy here, and reached the iPhone twice. Either column now counts, and DATE
+     * may be anything up to the present moment.
+     */
     private fun existsInProvider(address: String, body: String, date: Long): Boolean = try {
+        val now = System.currentTimeMillis()
         appContext.contentResolver.query(
             Telephony.Sms.CONTENT_URI, arrayOf(Telephony.Sms._ID),
-            "${Telephony.Sms.BODY} = ? AND ${Telephony.Sms.DATE} BETWEEN ? AND ?",
-            arrayOf(body, (date - 120_000).toString(), (date + 120_000).toString()), null
+            "${Telephony.Sms.BODY} = ? AND (${Telephony.Sms.DATE_SENT} BETWEEN ? AND ? " +
+                "OR ${Telephony.Sms.DATE} BETWEEN ? AND ?)",
+            arrayOf(
+                body,
+                (date - 120_000).toString(), (date + 120_000).toString(),
+                (date - 120_000).toString(), (maxOf(date, now) + 120_000).toString()
+            ), null
         )?.use { it.count > 0 } ?: false
     } catch (_: Exception) {
         false

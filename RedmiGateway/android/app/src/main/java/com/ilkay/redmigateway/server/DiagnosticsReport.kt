@@ -36,12 +36,22 @@ object DiagnosticsReport {
      * anyone checks when the iPhone has no sound, and a false "present" sends the search into the
      * code when the answer is in /vendor.
      */
-    fun vendorAudioFixPresent(): Boolean = runCatching {
-        vendorFixPresent(
-            platformInfo = File("/vendor/etc/audio_platform_info_intcodec.xml").readText(),
-            mixerPaths = File("/vendor/etc/mixer_paths_idp.xml").readText(),
-        )
-    }.getOrDefault(false)
+    fun vendorAudioFixPresent(): Boolean {
+        val platform = File("/vendor/etc/audio_platform_info_intcodec.xml")
+        val mixer = File("/vendor/etc/mixer_paths_idp.xml")
+        return runCatching {
+            // Settings refreshes every two seconds on the main thread and the phone screen asks on
+            // every render; reading two vendor XML files each time was needless work there. The
+            // answer only changes when one of the files does (a ROM update, the fix script).
+            val stamps = platform.lastModified() to mixer.lastModified()
+            vendorFixCache?.let { (cachedStamps, present) -> if (cachedStamps == stamps) return present }
+            val present = vendorFixPresent(platformInfo = platform.readText(), mixerPaths = mixer.readText())
+            vendorFixCache = stamps to present
+            present
+        }.getOrDefault(false)
+    }
+
+    @Volatile private var vendorFixCache: Pair<Pair<Long, Long>, Boolean>? = null
 
     fun build(context: Context): JSONObject {
         val telecom = context.getSystemService(TelecomManager::class.java)

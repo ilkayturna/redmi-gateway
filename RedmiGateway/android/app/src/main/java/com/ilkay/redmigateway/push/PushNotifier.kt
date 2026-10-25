@@ -31,6 +31,9 @@ object PushNotifier : CallManager.CallListener, CallJournal.Listener, SmsJournal
     private const val KEY_SMS_CONTENT = "sms_content_in_push"
     private val PUSH_AAD = "phonebridge-push".toByteArray(Charsets.UTF_8)
     private val handler = Handler(Looper.getMainLooper())
+    /** How long a connected iPhone gets to fetch a new SMS or missed call before Apple is asked. */
+    private const val FALLBACK_DELAY_MS = 8_000L
+    private val wake = com.ilkay.redmigateway.service.ShortWake("PushFallback")
     private var started = false
     private var pushedCallId: String? = null
 
@@ -89,21 +92,24 @@ object PushNotifier : CallManager.CallListener, CallJournal.Listener, SmsJournal
 
     override fun onSmsJournalEntry(entry: SmsJournal.Entry) {
         if (!isPushableSms(entry.box, entry.read)) return
+        // The 8 s wait counts uptime; asleep in a pocket it could become minutes (ShortWake).
+        wake.stayAwakeFor(FALLBACK_DELAY_MS + 2_000L)
         handler.postDelayed({
             if (deliveredSmsSeq >= entry.seq || !ApnsSender.alertsReady) return@postDelayed
             val sender = contactName(entry.address) ?: entry.address.ifBlank { "Bilinmeyen" }
             val text = smsPushBody(smsContentInPush, entry.body)
             ApnsSender.sendAlert(sender, text, smsPushThreadId(entry.address), "sms-${entry.id}")
-        }, 8000)
+        }, FALLBACK_DELAY_MS)
     }
 
     override fun onCallJournalEntry(entry: CallJournal.Entry) {
         if (entry.type != "missed") return
+        wake.stayAwakeFor(FALLBACK_DELAY_MS + 2_000L)
         handler.postDelayed({
             if (deliveredCallSeq >= entry.seq || !ApnsSender.alertsReady) return@postDelayed
             val caller = contactName(entry.number) ?: entry.number.ifBlank { "Gizli numara" }
             ApnsSender.sendAlert("Cevapsız arama", caller, "missed", "call-${entry.logId}")
-        }, 8000)
+        }, FALLBACK_DELAY_MS)
     }
 
     private fun contactName(number: String): String? {

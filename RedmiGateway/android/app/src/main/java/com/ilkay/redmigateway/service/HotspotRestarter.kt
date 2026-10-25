@@ -78,6 +78,20 @@ internal object HotspotRestarter {
      * did not join": logcat has the lines but the file is what survives a day on the phone.
      */
     private fun record(message: String) {
+        // A hotspot that keeps failing is retried on every twenty-second pass; the same pair of
+        // lines each time would push the day's calls out of the 4000-line file. A repeat is kept
+        // once every two minutes so a long failure still shows up, and SmartHotspot's own line
+        // still marks every real start.
+        val now = android.os.SystemClock.elapsedRealtime()
+        synchronized(lastRecordedAt) {
+            val previous = lastRecordedAt[message]
+            if (previous != null && now - previous < REPEAT_RECORD_MS) return
+            lastRecordedAt[message] = now
+        }
         com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, message)
     }
+
+    private const val REPEAT_RECORD_MS = 2 * 60_000L
+    /** Keyed by the whole line: a retry writes "requested" and "failed" in turn. */
+    private val lastRecordedAt = HashMap<String, Long>()
 }

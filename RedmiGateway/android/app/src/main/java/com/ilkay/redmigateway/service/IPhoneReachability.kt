@@ -49,7 +49,7 @@ object IPhoneReachability {
             Level.PUSH -> Status(level, "Apple bildirimiyle ulaşılır", "iPhone · Apple bildirimiyle ulaşılır",
                 "iPhone uygulaması kapalı ya da iPhone uzakta. Çağrılar ve mesajlar Apple bildirimiyle iPhone'a gider; " +
                     "iPhone yakındaysa uygulama kendiliğinden yeniden bağlanır.")
-            Level.OFFLINE -> Status(level, "Bağlantı yok · uyandırılır", "iPhone uyandırılarak ulaşılır", buildString {
+            Level.OFFLINE -> Status(level, "Bağlantı yok · uyandırılır", "iPhone bağlı değil · uyandırılır", buildString {
                 append("iPhone uygulaması kapalı ya da iPhone uzakta. Çağrı ya da SMS gelince Redmi iPhone'u " +
                     "Bluetooth işaretiyle uyandırır; iPhone yakındaysa çalar ve bildirim gelir. Uygulama kısa sürede " +
                     "kendiliğinden yeniden bağlanır.")

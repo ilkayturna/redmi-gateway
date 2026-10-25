@@ -100,7 +100,7 @@ object ApnsSender {
             .put("alert", JSONObject().put("title", title).put("body", body))
             .put("sound", "default")
             .put("thread-id", threadId))
-        post("alert", BUNDLE_ID, KEY_ALERT_TOKEN, payload, collapseId)
+        post("alert", BUNDLE_ID, KEY_ALERT_TOKEN, payload, collapseId, retry = true)
     }
 
     /**
@@ -168,9 +168,15 @@ object ApnsSender {
         return true
     }
 
+    /**
+     * @param retry one more attempt on a fresh connection after a network failure. Seen on the
+     *   device on 24.10.2026 23:24 and 25.10.2026 10:12: the request hung until the 15 s timeout,
+     *   most likely on a pooled HTTP/2 connection the network had silently dropped, and the SMS
+     *   alert was simply lost. Only alerts use it; a late VoIP push could ring a call that ended.
+     */
     private fun post(
         type: String, topic: String, tokenKey: String, payload: JSONObject, collapseId: String?,
-        done: ((String?) -> Unit)? = null, priority: String = "10"
+        done: ((String?) -> Unit)? = null, priority: String = "10", retry: Boolean = false
     ) {
         val token = prefs.getString(tokenKey, null) ?: return done?.invoke("iPhone bildirim kaydı yok.") ?: Unit
         val jwt = providerToken() ?: return done?.invoke("Apple anahtarı okunamadı.") ?: Unit
@@ -187,7 +193,12 @@ object ApnsSender {
             .build()
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                Log.w(TAG, "APNs $type push failed: ${e.javaClass.simpleName}")
+                Log.w(TAG, "APNs $type push failed: ${e.javaClass.simpleName}" + if (retry) "; retrying on a new connection" else "")
+                if (retry) {
+                    client.connectionPool.evictAll()
+                    post(type, topic, tokenKey, payload, collapseId, done, priority, retry = false)
+                    return
+                }
                 done?.invoke("Apple'a ulaşılamadı (${e.javaClass.simpleName}).")
             }
 

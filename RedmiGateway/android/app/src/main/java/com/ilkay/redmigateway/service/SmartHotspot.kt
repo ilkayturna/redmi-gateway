@@ -58,6 +58,11 @@ object SmartHotspot {
 
     private val context: Context get() = RedmiGatewayApp.instance
     private val handler = Handler(Looper.getMainLooper())
+
+    /** The 5 s, 15 s and 30 s deadlines below must run on time with the screen off. */
+    private val wake = ShortWake(TAG)
+
+    private fun stayAwakeFor(ms: Long) = wake.stayAwakeFor(ms)
     @Volatile private var wifiNetwork: Network? = null
     private var wifiSince = 0L
     private var lostSince = 0L
@@ -129,6 +134,8 @@ object SmartHotspot {
         if (!started) return
         started = false
         handler.removeCallbacks(ticker)
+        handler.removeCallbacks(startHotspotCheck)
+        handler.removeCallbacks(stableCheck)
         val cm = (appContext?.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager) ?: connectivity()
         runCatching { cm.unregisterNetworkCallback(callback) }
             .onFailure { Log.w(TAG, "Wi-Fi callback not unregistered: ${it.javaClass.simpleName}") }
@@ -158,10 +165,20 @@ object SmartHotspot {
         val ssid = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) (caps.transportInfo as? WifiInfo)?.ssid else null
         handler.post {
             handler.removeCallbacks(startHotspotCheck)
-            if (wifiNetwork != network) Log.i(TAG, "Wi-Fi with internet joined")
+            val joined = wifiNetwork != network
+            if (joined) Log.i(TAG, "Wi-Fi with internet joined")
             wifiNetwork = network
             ssid?.let { remember(listOf(it)) }
             evaluate()
+            // The hotspot goes off once this network has held for STABLE_MS. Check exactly then
+            // instead of at the next tick, and stay awake for it (see [wakeLock]).
+            // A separate runnable, because every later capability update (signal level, for one)
+            // removes startHotspotCheck above.
+            if (joined && isHotspotOn()) {
+                stayAwakeFor(STABLE_MS + 2_000L)
+                handler.removeCallbacks(stableCheck)
+                handler.postDelayed(stableCheck, STABLE_MS + 300)
+            }
         }
     }
 
@@ -175,14 +192,18 @@ object SmartHotspot {
                 // makes the hotspot appear as soon as the rule allows, instead of whenever the
                 // twenty-second tick happens to land.
                 handler.removeCallbacks(startHotspotCheck)
+                stayAwakeFor(LOST_MS + 2_000L)
                 handler.postDelayed(startHotspotCheck, LOST_MS + 300)
             }
             evaluate()
         }
     }
 
-    /** Turns the hotspot on at the moment the rule allows it; see [wifiLost]. */
+    /** Runs the rules at the moment one of them becomes due; see [wifiLost] and [tryKnownNetwork]. */
     private val startHotspotCheck = Runnable { evaluate() }
+
+    /** The hotspot-off check once a new Wi-Fi network has held for [STABLE_MS]; see [wifiChanged]. */
+    private val stableCheck = Runnable { evaluate() }
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -302,9 +323,11 @@ object SmartHotspot {
         val scanEvery = if (clientConnected) CLIENT_SCAN_EVERY_MS else SCAN_EVERY_MS
 
         val fresh = now * 1000 - SCAN_MAX_AGE_MS * 1000
-        val candidate = runCatching { wifi.scanResults }.getOrDefault(emptyList())
+        val recent = runCatching { wifi.scanResults }.getOrDefault(emptyList())
+            .filter { it.timestamp >= fresh }
+        val candidate = recent
             .asSequence()
-            .filter { it.timestamp >= fresh && it.level >= MIN_LEVEL_DBM }
+            .filter { it.level >= MIN_LEVEL_DBM }
             .mapNotNull { result ->
                 @Suppress("DEPRECATION")
                 val ssid = result.SSID?.removeSurrounding("\"").orEmpty()
@@ -321,7 +344,10 @@ object SmartHotspot {
             // only gives way when the station can actually take over.
             if (!wifiEnabledByUser()) {
                 Log.i(TAG, "Saved network $candidate in range but Wi-Fi is switched off; hotspot stays")
-                com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Saved network $candidate in range but Wi-Fi is off; hotspot stays")
+                // Once per network, not once per twenty-second pass.
+                if (networkWaitingForWifi != candidate) {
+                    com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Saved network $candidate in range but Wi-Fi is off; hotspot stays")
+                }
                 setWaitingNetwork(candidate)
                 return
             }
@@ -337,8 +363,17 @@ object SmartHotspot {
             trying = candidate
             tryDeadline = now + TRY_MS
             stopHotspot()
+            // The iPhone has no network until the join succeeds or the hotspot returns, so the
+            // deadline is checked on time and awake, not at the next tick after a sleep.
+            stayAwakeFor(TRY_MS + 2_000L)
+            handler.removeCallbacks(startHotspotCheck)
+            handler.postDelayed(startHotspotCheck, TRY_MS + 300)
             return
         }
+
+        // A fresh scan without the network means the person has left it; the "turn Wi-Fi on" hint
+        // in the notification would otherwise stay until some Wi-Fi is joined again.
+        if (recent.isNotEmpty()) setWaitingNetwork(null)
 
         if (now - lastScanAt >= scanEvery) {
             lastScanAt = now

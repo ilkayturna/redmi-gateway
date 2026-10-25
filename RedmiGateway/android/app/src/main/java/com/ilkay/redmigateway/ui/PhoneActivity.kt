@@ -421,7 +421,10 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
 
     private fun updateStatus() {
         val status = IPhoneReachability.current()
-        binding.phoneStatusText.text = status.short
+        // The hotspot is the other half of "is the gateway doing its job": outside it is how the
+        // iPhone gets online at all, at home it should be off. Both were only visible in Settings.
+        val hotspotOn = com.ilkay.redmigateway.service.SmartHotspot.hotspotOn
+        binding.phoneStatusText.text = if (hotspotOn) "${status.short} · hotspot açık" else status.short
         val dot = when (status.level) {
             IPhoneReachability.Level.CONNECTED, IPhoneReachability.Level.BLUETOOTH -> R.color.status_good
             IPhoneReachability.Level.PUSH -> R.color.accent
@@ -429,7 +432,8 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
             IPhoneReachability.Level.UNPAIRED -> R.color.text_muted
         }
         binding.phoneStatusDot.backgroundTintList = ColorStateList.valueOf(views.color(dot))
-        binding.phoneStatus.contentDescription = "${status.short}. ${status.detail} Ayarlar için dokun."
+        binding.phoneStatus.contentDescription = "${status.short}. ${status.detail}" +
+            (if (hotspotOn) " Hotspot açık." else "") + " Ayarlar için dokun."
     }
 
     private fun updateAttention() {
@@ -451,6 +455,14 @@ class PhoneActivity : AppCompatActivity(), CallManager.CallListener {
                     startBridge()
                     handler.postDelayed({ renderChrome() }, 1500)
                 }
+            }
+            // AGENTS.md 6.5: when the iPhone has no sound this is the first thing to check, and a
+            // ROM update replaces /vendor silently. It was only visible deep in Settings.
+            !com.ilkay.redmigateway.server.DiagnosticsReport.vendorAudioFixPresent() -> {
+                card.visibility = View.VISIBLE
+                binding.attentionText.text = "iPhone ses düzeltmesi yok (sistem güncellemesi silmiş olabilir); aramalarda iPhone'da ses olmaz."
+                binding.attentionAction.text = "Ayrıntı"
+                binding.attentionAction.setOnClickListener { openSettings() }
             }
             else -> card.visibility = View.GONE
         }

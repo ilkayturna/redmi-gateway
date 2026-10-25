@@ -81,14 +81,51 @@ object CallUiNotifier : CallManager.CallListener {
                     return@post
                 }
                 manager?.cancel(NOTIFICATION_ID)
+                lastPostedSignature = null
                 return@post
             }
+            post(context, callId, state, number)
+        }
+    }
+
+    /**
+     * The Redmi's own ringer has started (the iPhone did not show the call, or there is no iPhone):
+     * now the full-screen call screen is wanted, so the ringing notification is posted again with it.
+     */
+    fun onRedmiRinging() {
+        mainHandler.post {
+            val context = appContext ?: return@post
+            if (CallManager.currentCallState != "ringing") return@post
+            post(context, CallManager.currentCallId ?: "none", "ringing", CallManager.currentPhoneNumber)
+        }
+    }
+
+    /**
+     * What the last posted notification showed. Telecom reports connecting, dialing, active and the
+     * same state again within a few hundred milliseconds, and each used to be a fresh post: Android
+     * allows five per second per app and silently dropped the rest ("Package enqueue rate is 6.95.
+     * Shedding", 23.10.2026 20:11), which can leave a stale row behind. Those states all look the
+     * same in the notification, so an identical one is not posted again.
+     */
+    private var lastPostedSignature: String? = null
+
+    private fun post(context: Context, callId: String, state: String, number: String?) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        run {
             val isConf = CallManager.isConference
             val caller = when {
                 isConf -> number?.takeIf { it.isNotBlank() } ?: "Konferans Görüşme"
                 number.isNullOrBlank() -> "Gizli numara"
                 else -> ContactResolver.getCached(number) ?: resolveCallerName(context, number)
             }
+            // Only a ringing Redmi takes over its screen. While the iPhone is being given its few
+            // seconds to show the call, this phone is in a pocket and a full-screen intent would
+            // light it up with Answer and Reject exposed (23.10.2026 16:53). RedmiRinger calls
+            // onRedmiRinging the moment it decides to ring here, which adds the screen.
+            val fullScreen = state == "ringing" && RedmiRinger.isRinging
+            val signature = if (state == "ringing") "ring|$callId|$caller|$fullScreen" else "call|$callId|$caller|$isConf"
+            if (signature == lastPostedSignature) return
+            lastPostedSignature = signature
             val person = Person.Builder().setName(caller).setImportant(true).build()
             val screen = PendingIntent.getActivity(
                 context, 1,
@@ -105,7 +142,7 @@ object CallUiNotifier : CallManager.CallListener {
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setOngoing(true)
 
-            if (state == "ringing") {
+            if (state == "ringing" && fullScreen) {
                 builder.setStyle(
                     NotificationCompat.CallStyle.forIncomingCall(
                         person,
@@ -113,6 +150,13 @@ object CallUiNotifier : CallManager.CallListener {
                         action(context, "answer", callId, 3)
                     )
                 ).setFullScreenIntent(screen, true)
+            } else if (state == "ringing") {
+                // A plain row, not CallStyle: Android refuses a CallStyle notification that has no
+                // full-screen intent unless it belongs to a foreground service.
+                builder.setContentTitle(caller)
+                    .setContentText("Gelen arama · iPhone'a iletiliyor")
+                    .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Reddet", action(context, "reject", callId, 2))
+                    .addAction(android.R.drawable.sym_action_call, "Cevapla", action(context, "answer", callId, 3))
             } else {
                 builder.setContentTitle(caller)
                     .setContentText(if (isConf) "Konferans görüşmesi sürüyor" else "Görüşme sürüyor")
@@ -123,7 +167,10 @@ object CallUiNotifier : CallManager.CallListener {
                     )
             }
             runCatching { manager.notify(NOTIFICATION_ID, builder.build()) }
-                .onFailure { CallManager.log("Arama bildirimi gösterilemedi: ${it.message}") }
+                .onFailure {
+                    lastPostedSignature = null
+                    CallManager.log("Arama bildirimi gösterilemedi: ${it.message}")
+                }
         }
     }
 

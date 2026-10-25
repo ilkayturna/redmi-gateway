@@ -1047,10 +1047,12 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
             }
             lastControlSeq = seq
         } else {
-            if (!PairingStore.legacyAuthAllowed) return controlReply(null, "unknown", "", 0, false, "unauthorized")
-            json = try { JSONObject(String(value, Charsets.UTF_8)) } catch (_: Exception) {
-                return controlReply(null, "unknown", "", 0, false, "malformed")
-            }
+            // No keyed pairing: nothing to check a command against. Protocol 1 accepted plain JSON
+            // here, which let any Bluetooth device in range answer, reject or end a call during a
+            // fresh install or after "eşleşmeyi kaldır". Every iPhone build since 1.0 (33) pairs
+            // over the network socket first, so this path has no legitimate user left.
+            Log.w(TAG, "Rejected a BLE command: no keyed pairing")
+            return controlReply(null, "unknown", "", 0, false, "unauthorized")
         }
         val action = (json.optString("a").ifBlank { json.optString("action") }).lowercase()
         val callId = json.optString("id").ifBlank { json.optString("callId") }
@@ -1117,18 +1119,9 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         if (key != null) {
             return byteArrayOf(SEALED_VERSION) + BridgeCrypto.seal(key, state.toString().toByteArray(Charsets.UTF_8), BLE_STATE_AAD)
         }
-        if (!PairingStore.legacyAuthAllowed) return ByteArray(0)
-        // Protocol 1 layout for iPhone builds up to 1.0 (33).
-        val legacy = JSONObject()
-            .put("state", CallManager.currentCallState)
-            .put("callId", CallManager.currentCallId ?: "")
-            .put("number", CallManager.currentPhoneNumber ?: "")
-            .put("seq", state.getLong("q"))
-            .put("ts", state.getLong("t"))
-            .put("conf", isConf)
-        CallManager.waitingCallId?.let { legacy.put("wid", it) }
-        CallManager.waitingNumber?.takeIf { it.isNotBlank() }?.let { legacy.put("wn", it) }
-        return legacy.toString().toByteArray(Charsets.UTF_8)
+        // Unpaired: the protocol 1 layout sent the caller's number in clear text to anything in
+        // range. Nothing reads it any more (see handleCallControlWrite), so nothing is sent.
+        return ByteArray(0)
     }
 
     private fun notifyCharacteristicToSubscribers(

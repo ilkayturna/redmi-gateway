@@ -128,6 +128,23 @@ Yani **arayan taraf çağrıyı 112 ms'de kapatmıştı**; uygulama doğru davra
 o yazdı). **Ders:** "Bozdun mu?" sorusunun cevabı savunma değil, **iki okuma**dır: kendi izin +
 platformun gerekçesi.
 
+## 0.5 adb Wi-Fi üzerinden bağlıyken Wi-Fi'a DOKUNMA
+
+**Hata (25.10.2026 10:51):** adb Wi-Fi üzerinden (`192.168.1.111:5555`) bağlıydı. Hotspot süresini
+ölçmek için cihazda kendini geri alan bir komut başlattım:
+`nohup sh -c "svc wifi disable; sleep 40; svc wifi enable" &`. `adb shell` oturumu kapanınca
+**arka plandaki süreç öldürüldü** (`/data/local/tmp/wifitest.txt` içinde yalnızca `start` satırı
+vardı). Wi-Fi kapalı kaldı, Redmi ağdan düştü ve **kullanıcı telefonu eline alıp Wi-Fi'ı açmak
+zorunda kaldı.** `teslim-kapisi.ps1 -Hotspot` de aynı hatayı yapar: `finally` içindeki
+`svc wifi enable` Wi-Fi kapalıyken cihaza ulaşamaz.
+
+**KURAL:**
+1. adb Wi-Fi üzerindeyken `svc wifi disable`, `cmd wifi set-wifi-enabled disabled`, ağ ayarı
+   değişikliği **YAPILMAZ.** Bu testler yalnızca **USB** ile yapılır.
+2. `adb shell` ile başlatılan `nohup ... &` sürecine **güvenilmez**; oturum bitince ölebilir.
+3. Kendini geri alması gereken her cihaz işleminin geri alma adımı, bağlantı koptuğunda da
+   çalışacağı **kanıtlanmadan** başlatılmaz.
+
 ## Genel ders
 **Not almak = düzeltmek değildir.** Kural, **kullanılmadıkça** hiçbir şeyi engellemez.
 Bu yüzden bu bölüm dosyanın **en başında**, kural 0'ın içinde duruyor: her oturumda,

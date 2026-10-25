@@ -62,12 +62,14 @@ object IphoneDiagnostics {
         } else {
             message
         }
-        val line = "${stamp.format(Date())} $tag: $text"
+        // Formatted on the log thread; see DiagnosticsLog.record for why.
+        val at = System.currentTimeMillis()
         // Mirrored to logcat so a live adb session shows it without waiting for the file.
         Log.i("IphoneDiag", "$tag: $text")
         runCatching {
             executor.execute {
                 runCatching {
+                    val line = "${stamp.format(Date(at))} $tag: $text"
                     target.parentFile?.mkdirs()
                     rotateIfNeeded(target)
                     target.appendText(line + "\n")

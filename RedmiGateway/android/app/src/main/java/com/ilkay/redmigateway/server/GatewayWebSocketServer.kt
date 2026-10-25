@@ -23,6 +23,8 @@ import android.telecom.Call
 import com.ilkay.redmigateway.telecom.CallManager
 import com.ilkay.redmigateway.telecom.IncomingCallPresenter
 import org.java_websocket.WebSocket
+import org.java_websocket.drafts.Draft
+import org.java_websocket.drafts.Draft_6455
 import org.java_websocket.handshake.ClientHandshake
 import org.java_websocket.server.WebSocketServer
 import com.ilkay.redmigateway.push.PushNotifier
@@ -41,11 +43,22 @@ import java.util.concurrent.ConcurrentHashMap
 class GatewayWebSocketServer(
     private val context: Context,
     port: Int = 8787
-) : WebSocketServer(InetSocketAddress("0.0.0.0", port)), CallManager.CallListener,
+) : WebSocketServer(
+    InetSocketAddress("0.0.0.0", port),
+    // The library's default frame limit is Integer.MAX_VALUE, and it allocates a buffer of the
+    // announced size before the payload arrives. One header claiming 2 GB from anyone on the same
+    // Wi-Fi would run the process out of memory, and a fatal error stops the whole server.
+    // onMessage already ignores anything above 16 KB, so 64 KB costs nothing real.
+    listOf<Draft>(Draft_6455(emptyList(), MAX_FRAME_BYTES))
+), CallManager.CallListener,
     CallAudioRelay.Listener, CallJournal.Listener, SmsJournal.Listener, CallManager.WaitingListener {
 
     companion object {
         private const val TAG = "GatewayWSServer"
+        private const val MAX_FRAME_BYTES = 64 * 1024
+        private const val MAX_UNDELIVERED_SMS_RESULTS = 20
+        /** Long enough for the iPhone to come back; a result much later only confuses. */
+        private const val UNDELIVERED_SMS_RESULT_MS = 30 * 60_000L
         const val PROTOCOL = 2
         const val MIN_PROTOCOL = 1
         private const val MAX_FAILURES = 5
@@ -68,6 +81,8 @@ class GatewayWebSocketServer(
         fun onServerStarted(port: Int)
         fun onClientCountChanged(authenticatedCount: Int)
         fun onServerError(error: String)
+        /** The server stopped without [stopServer]: a fatal error or a failed bind. */
+        fun onServerStoppedUnexpectedly()
     }
 
     private class Peer(val conn: WebSocket) {
@@ -352,6 +367,7 @@ class GatewayWebSocketServer(
         if (peer.protocol >= 2) sendAudioState(peer, CallAudioRelay.owner, CallAudioRelay.lastReason)
         val waiting = CallManager.waitingCallId
         if (peer.protocol >= 2 && waiting != null) send(peer, waitingMessage(waiting, CallManager.waitingNumber))
+        if (peer.protocol >= 2) flushSmsResults(peer)
     }
 
     // ---- Commands ----
@@ -517,10 +533,41 @@ class GatewayWebSocketServer(
                 .put("success", success)
             if (requestId.isNotBlank()) result.put("requestId", requestId)
             if (error != null) result.put("error", error)
-            if (peer.conn.isOpen) send(peer, result)
+            deliverSmsResult(peer, result)
         }
         val immediate = SmsSender.send(context, recipient, json.optString("message")) { ok, error -> reply(ok, error) }
         if (immediate != null) reply(false, immediate)
+    }
+
+    /**
+     * Results of SMS sends whose socket closed before the radio answered. iOS suspends the app a
+     * moment after it sends, so this was the common case: the SMS went out, the result was dropped
+     * with the socket, and the iPhone marked the message failed after 90 s. A person then resends a
+     * paid message that was already delivered. The iPhone matches a late result by requestId and
+     * turns "failed" back into "sent", so the result goes to the next authenticated socket.
+     */
+    private val undeliveredSmsResults = java.util.concurrent.ConcurrentLinkedQueue<Pair<Long, JSONObject>>()
+
+    private fun deliverSmsResult(requester: Peer, result: JSONObject) {
+        if (requester.conn.isOpen) {
+            send(requester, result)
+            return
+        }
+        val other = peers.values.firstOrNull { it.authenticated && it.protocol >= 2 && it.conn.isOpen }
+        if (other != null) {
+            send(other, result)
+            return
+        }
+        undeliveredSmsResults.add(SystemClock.elapsedRealtime() to result)
+        while (undeliveredSmsResults.size > MAX_UNDELIVERED_SMS_RESULTS) undeliveredSmsResults.poll()
+    }
+
+    private fun flushSmsResults(peer: Peer) {
+        val now = SystemClock.elapsedRealtime()
+        while (true) {
+            val (queuedAt, result) = undeliveredSmsResults.poll() ?: return
+            if (now - queuedAt <= UNDELIVERED_SMS_RESULT_MS) send(peer, result)
+        }
     }
 
     private fun sync(peer: Peer, callsAfter: Long, smsAfter: Long) {
@@ -719,20 +766,51 @@ class GatewayWebSocketServer(
 
     fun stopServer() {
         try {
-            if (current === this) current = null
-            CallManager.removeListener(this)
-            CallManager.removeWaitingListener(this)
-            CallAudioRelay.removeListener(this)
-            CallJournal.get(context).removeListener(this)
-            SmsJournal.get(context).removeListener(this)
+            stoppingOnPurpose = true
+            detach()
             audioOwner = null
             CallAudioRelay.disarm("gateway_stopped")
-            SmsReceiver.webSocketServer = null
             peers.clear()
             stop(1000)
             serverListener?.onClientCountChanged(0)
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping server", e)
+        }
+    }
+
+    /**
+     * Unhooks this server from the rest of the app without touching call audio, for a server that
+     * died on its own and is being replaced: the relay runs on its own UDP path and a running call
+     * keeps its audio while the control socket comes back.
+     */
+    fun detach() {
+        if (current === this) current = null
+        CallManager.removeListener(this)
+        CallManager.removeWaitingListener(this)
+        CallAudioRelay.removeListener(this)
+        CallJournal.get(context).removeListener(this)
+        SmsJournal.get(context).removeListener(this)
+        handler.removeCallbacks(repeatAudioState)
+        if (SmsReceiver.webSocketServer === this) SmsReceiver.webSocketServer = null
+    }
+
+    @Volatile private var stoppingOnPurpose = false
+    private val reportedStop = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * Every stop goes through here, including the library's own after a fatal error in a worker or
+     * a failed bind. Before this, such a stop only produced a log line: the service kept running,
+     * its notification kept saying all was well, and no audio_start, SMS or sync reached this phone
+     * until a reboot.
+     */
+    override fun stop(timeout: Int, closeMessage: String) {
+        try {
+            super.stop(timeout, closeMessage)
+        } finally {
+            if (!stoppingOnPurpose && reportedStop.compareAndSet(false, true)) {
+                Log.e(TAG, "WebSocket server stopped unexpectedly: $closeMessage")
+                serverListener?.onServerStoppedUnexpectedly()
+            }
         }
     }
 }

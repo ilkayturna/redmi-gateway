@@ -45,6 +45,11 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
          */
         private const val NOTIFICATION_MIN_INTERVAL_MS = 15_000L
 
+        private const val PORT = 8787
+        private const val SERVER_RESTART_FIRST_MS = 2_000L
+        private const val SERVER_RESTART_MAX_MS = 60_000L
+        private const val SERVER_HEALTHY_MS = 5 * 60_000L
+
         const val ACTION_START = "com.ilkay.redmigateway.ACTION_START"
         const val ACTION_STOP = "com.ilkay.redmigateway.ACTION_STOP"
 
@@ -75,6 +80,11 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     }
 
     private var webSocketServer: GatewayWebSocketServer? = null
+    // Main thread only, like the notification fields below.
+    private var peripheralsStarted = false
+    private var serverStartedAt = 0L
+    private var serverRestarts = 0
+    private val restartWake = ShortWake("ServerRestart")
     private var nsdDiscoveryManager: NsdDiscoveryManager? = null
     private var bleServerManager: BleServerManager? = null
     private val handler = Handler(Looper.getMainLooper())
@@ -154,10 +164,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
                     bleManager.updateActiveIp(newIp)
                 }
             }
-            webSocketServer = GatewayWebSocketServer(this, 8787).apply {
-                serverListener = this@GatewayService
-                start()
-            }
+            webSocketServer = newWebSocketServer()
             CallJournal.get(this).start()
             SmsJournal.get(this).start()
             com.ilkay.redmigateway.push.PushNotifier.start(this)
@@ -172,9 +179,50 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
         }
     }
 
+    private fun newWebSocketServer() = GatewayWebSocketServer(this, PORT).apply {
+        serverListener = this@GatewayService
+        start()
+    }
+
+    /**
+     * The control server died on its own (see GatewayWebSocketServer.stop). A new one is started on
+     * the same port, sooner the first time and backing off if it keeps failing, so a fault that
+     * repeats does not spin. Bluetooth and Bonjour keep running: they only announce the port.
+     */
+    override fun onServerStoppedUnexpectedly() {
+        handler.post {
+            if (!isRunning) return@post
+            val now = SystemClock.elapsedRealtime()
+            // A server that ran for a while before failing starts the backoff from the beginning.
+            if (serverStartedAt != 0L && now - serverStartedAt > SERVER_HEALTHY_MS) serverRestarts = 0
+            val delay = minOf(SERVER_RESTART_MAX_MS, SERVER_RESTART_FIRST_MS shl minOf(serverRestarts, 5))
+            serverRestarts++
+            CallManager.log("WebSocket server stopped unexpectedly; restarting in ${delay / 1000} s (attempt $serverRestarts)")
+            restartWake.stayAwakeFor(delay + 3_000L)
+            handler.removeCallbacks(restartServer)
+            handler.postDelayed(restartServer, delay)
+        }
+    }
+
+    private val restartServer = Runnable {
+        if (!isRunning) return@Runnable
+        webSocketServer?.detach()
+        try {
+            webSocketServer = newWebSocketServer()
+            CallManager.log("WebSocket server restarted")
+        } catch (e: Exception) {
+            Log.e(TAG, "WebSocket server restart failed", e)
+            CallManager.log("WebSocket server restart failed: ${e.javaClass.simpleName}")
+            onServerStoppedUnexpectedly()
+        }
+    }
+
     private fun stopGateway() {
         Log.i(TAG, "Stopping Gateway Service...")
         handler.removeCallbacks(restoreHotspot)
+        handler.removeCallbacks(restartServer)
+        peripheralsStarted = false
+        serverRestarts = 0
         SmartHotspot.stop(this)
         IPhoneReachability.removeListener(reachabilityListener)
         nsdDiscoveryManager?.stop()
@@ -196,10 +244,15 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
 
     override fun onServerStarted(port: Int) {
         handler.post {
+            serverStartedAt = SystemClock.elapsedRealtime()
             val currentIp = com.ilkay.redmigateway.ble.NetworkUtils.getLocalIPv4Address()
             if (currentIp != null) {
                 bleServerManager?.updateActiveIp(currentIp)
             }
+            // A restarted server keeps the same port; starting Bluetooth again would register its
+            // receivers twice.
+            if (peripheralsStarted) return@post
+            peripheralsStarted = true
             nsdDiscoveryManager?.start(port)
             bleServerManager?.start(port)
         }

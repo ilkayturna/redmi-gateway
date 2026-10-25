@@ -201,7 +201,10 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
             val isNear = distance < maxRange && distance < 5f
             val isSpeaker = GatewayInCallService.isSpeakerOn()
 
-            if (isNear && !isSpeaker && CallManager.currentCallState in setOf("active", "dialing", "connecting")) {
+            // Ringing is included: the Redmi rings in a pocket, and a lit screen there shows 72 dp
+            // Answer and Reject buttons to the fabric. Taken out of the pocket it reads far and the
+            // screen comes back at once.
+            if (isNear && !isSpeaker && CallManager.currentCallState in setOf("ringing", "active", "dialing", "connecting", "holding")) {
                 if (proximityWakeLock?.isHeld == false) {
                     proximityWakeLock?.acquire(10 * 60 * 1000L) // 10 minutes max
                 }
@@ -429,6 +432,10 @@ class CallActivity : AppCompatActivity(), CallManager.CallListener, CallAudioRel
             // While the iPhone owns the call, Redmi mute/speaker would act on a muted device.
             binding.mute.isEnabled = !onIPhone
             binding.speaker.isEnabled = !onIPhone
+            // The person talks on the iPhone and this phone is in a pocket: let its screen time out
+            // instead of keeping a lit hang-up button against the fabric for the whole call.
+            if (onIPhone) window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            else window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             val iPhoneConnected = iPhoneAudioLinkUp()
             when (owner) {
                 CallAudioRelay.Owner.IPHONE -> {
