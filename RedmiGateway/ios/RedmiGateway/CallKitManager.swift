@@ -28,6 +28,9 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     /// Calls already running on the Redmi that this iPhone took over ("iPhone'a al").
     private var pickups: Set<UUID> = []
     private var answeredHere: Set<UUID> = []
+    /// Incoming calls the Redmi itself reported as ringing, over the link or Bluetooth. A call shown
+    /// only because of an Apple push is not in here until the Redmi confirms it; see startRingWatchdog.
+    private var ringConfirmed: Set<UUID> = []
     private var connectedOutgoing: Set<UUID> = []
     private var autoRetries: [UUID: Int] = [:]
     private var pendingOutgoing: UUID?
@@ -96,6 +99,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
 
         switch state {
         case "ringing":
+            ringConfirmed.insert(uuid)
             if !incoming.contains(uuid) && !outgoing.contains(uuid) {
                 incoming.insert(uuid)
                 reportIncoming(uuid: uuid, rawId: rawId, number: numbers[uuid])
@@ -207,6 +211,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         outgoing.remove(uuid)
         pickups.remove(uuid)
         answeredHere.remove(uuid)
+        ringConfirmed.remove(uuid)
         connectedOutgoing.remove(uuid)
         autoRetries.removeValue(forKey: uuid)
         if pendingOutgoing == uuid { pendingOutgoing = nil }
@@ -525,6 +530,9 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     /// A second call rings during the current one; iOS shows its own call-waiting choices.
     func handleWaitingCall(callId: String, number: String?, ringing: Bool) {
         if ringing {
+            // Already shown, for example from an Apple push: this is the Redmi confirming that it
+            // rings (the Redmi repeats the waiting call on every authentication).
+            if let known = uuidByCallId[callId] { ringConfirmed.insert(known) }
             guard !callId.isEmpty, uuidByCallId[callId] == nil else { return }
             let uuid = UUID()
             uuidByCallId[callId] = uuid
@@ -582,6 +590,23 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             }
             return
         }
+        if !rawId.isEmpty, let ended = endedCallIds[rawId], Date().timeIntervalSince(ended) < 300 {
+            // The call is already over here (the Redmi ended it, or it was declined) and the push
+            // only arrived late. iOS still requires a CallKit report for every VoIP push, so it is
+            // reported and closed at once instead of ringing for a call nobody is on.
+            GatewayConnection.shared.log("VoIP push for a call that already ended; reported and closed at once")
+            let late = UUID()
+            provider.reportNewIncomingCall(with: late, update: callUpdate(number: number)) { error in
+                Task { @MainActor in
+                    if let error {
+                        GatewayConnection.shared.log("CallKit refused the late pushed call: \((error as NSError).code)")
+                    }
+                    CallKitManager.shared.end(late, reason: .remoteEnded)
+                    completion()
+                }
+            }
+            return
+        }
         let uuid = UUID()
         if !rawId.isEmpty {
             uuidByCallId[rawId] = uuid
@@ -604,11 +629,57 @@ final class CallKitManager: NSObject, CXProviderDelegate {
                     manager.end(uuid, reason: .failed)
                 } else {
                     GatewayConnection.shared.sendRingingAck(callId: rawId)
+                    manager.startRingWatchdog(uuid: uuid)
                 }
                 completion()
             }
         }
         GatewayConnection.shared.reconnectNow(reason: "incoming call push")
+    }
+
+    /// How long a call shown only because of an Apple push may ring without the Redmi confirming it.
+    private static let unconfirmedRingLimit: TimeInterval = 45
+
+    /// Ends a pushed ring that the Redmi never confirmed.
+    ///
+    /// A push only says that a call started. When the caller gives up before this iPhone reaches the
+    /// Redmi (away from home, the VPN slow to come back), nothing ever says the call ended and the
+    /// iPhone rang on for good. After 45 s without the Redmi reporting the call as ringing it is
+    /// ended as unanswered; a call the Redmi did confirm is left to the Redmi's own state. The id is
+    /// not kept as ended, so a "ringing" that still arrives from the Redmi presents the call again
+    /// instead of being refused as a repeat.
+    private func startRingWatchdog(uuid: UUID) {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.unconfirmedRingLimit * 1_000_000_000))
+            guard let self else { return }
+            let ringing = self.incoming.contains(uuid) && self.states[uuid] == "ringing"
+            let stillRinging = ringing && !self.answeredHere.contains(uuid)
+            if !stillRinging {
+                GatewayConnection.shared.log("Ring watchdog: the pushed call was answered or has ended")
+            } else if self.ringConfirmed.contains(uuid) {
+                GatewayConnection.shared.log("Ring watchdog: the Redmi confirmed the pushed call; it keeps ringing")
+            } else {
+                let rawId = self.callIdByUuid[uuid]
+                GatewayConnection.shared.log("Ring watchdog: the Redmi never confirmed the pushed call in \(Int(Self.unconfirmedRingLimit)) s; ending it as unanswered")
+                self.end(uuid, reason: .unanswered)
+                if let rawId { self.endedCallIds.removeValue(forKey: rawId) }
+            }
+        }
+    }
+
+    /// The Redmi's own state says no call is live: a state reply without a call, or Bluetooth "idle".
+    ///
+    /// A call that reached this iPhone only as an Apple push never became the link's current call,
+    /// so the "disconnected" that ends the current call never reached it, and a caller who hung up
+    /// before the socket authenticated left this iPhone ringing for good. Every incoming call still
+    /// ringing here is over, including one answered here that the Redmi never confirmed as active.
+    /// Outgoing calls are left alone: a call just dialled may not exist on the Redmi yet.
+    func endRingingCallsWithoutRedmiCall(source: String) {
+        let stale = incoming.filter { states[$0] == "ringing" }
+        if !stale.isEmpty {
+            GatewayConnection.shared.log("The Redmi reports no call (\(source)); ending \(stale.count) ringing call(s) shown here")
+            for uuid in stale { end(uuid, reason: .remoteEnded) }
+        }
     }
 
     func handleDialFailed() {
@@ -643,6 +714,8 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     private func reportIncoming(uuid: UUID, rawId: String, number: String?) {
+        // Every caller acts on the Redmi's own report of a ringing call.
+        ringConfirmed.insert(uuid)
         // The CallKit report goes first. It is the ring the person sees and the confirmation the
         // Redmi waits for, and a background wake has a short budget: anything slow in front of it
         // (the voice-processing setup used to be here) can delay or swallow the ring itself.
@@ -737,6 +810,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         outgoing.removeAll()
         pickups.removeAll()
         answeredHere.removeAll()
+        ringConfirmed.removeAll()
         connectedOutgoing.removeAll()
         pendingOutgoing = nil
     }
@@ -747,7 +821,14 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         let rawId = callIdByUuid[uuid] ?? ""
         guard !rawId.isEmpty, states[uuid] == "ringing",
               connection.isAuthenticated || BLECentralManager.shared.isReady else {
+            // This refusal used to leave no trace. The answer itself is not kept for later: an
+            // answer that lands after the person gave up would connect a call nobody holds.
+            connection.log("Answer refused here: callId known=\(!rawId.isEmpty) state=\(states[uuid] ?? "none") link=\(connection.isAuthenticated) bluetooth=\(BLECentralManager.shared.isReady)")
             connection.lastCallError = "Redmi'ye ulaşılamadı; arama Redmi'de çalıyor."
+            if !rawId.isEmpty, states[uuid] == "ringing" {
+                // The call still rings on the Redmi: bring the link back so the next tap can reach it.
+                connection.reconnectNow(reason: "answer without a link")
+            }
             action.fail()
             return
         }
@@ -784,23 +865,58 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     /// Bounded on purpose: six attempts two seconds apart covers the Redmi's eight second arm window
     /// twice, and a call that never accepts the transfer must not leave a timer running for its whole
     /// length. Every attempt is logged so the phone's own log answers "was it tried at all".
+    ///
+    /// A tick without the network link, or before the link has reported the call, waits instead of
+    /// ending the retry: an answer sent over Bluetooth while the app was suspended reaches this loop
+    /// before the socket is back, and the old guard ended it on the first tick, for good. Waiting is
+    /// bounded too (60 s) and does not use up the six attempts; when it runs out, the link-up path
+    /// (handleGatewayLinkRestored) still asks for the audio once.
     private func startAudioRetry(uuid: UUID) {
         audioRetryTask?.cancel()
         audioRetryTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            for attempt in 1...6 {
+            var attempt = 0
+            var waitingTicks = 0
+            while attempt < 6 {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 if Task.isCancelled { return }
-                guard self.answeredHere.contains(uuid),
-                      self.states[uuid] != nil,
-                      GatewayConnection.shared.isAuthenticated,
-                      GatewayConnection.shared.audioLocation != .iphone,
-                      GatewayConnection.shared.currentCall != nil else { return }
-                GatewayConnection.shared.log("Audio is still on the Redmi; asking again (attempt \(attempt))")
+                let connection = GatewayConnection.shared
+                if !self.answeredHere.contains(uuid) || self.states[uuid] == nil {
+                    connection.log("Audio retry ended: the call is no longer answered here")
+                    return
+                }
+                if connection.audioLocation == .iphone {
+                    connection.log("Audio retry ended: the audio is on this iPhone")
+                    return
+                }
+                if !connection.isAuthenticated || connection.currentCall == nil {
+                    waitingTicks += 1
+                    if waitingTicks == 1 || waitingTicks % 5 == 0 {
+                        connection.log("Audio is still on the Redmi; waiting for the link to carry the call (\(waitingTicks * 2) s)")
+                    }
+                    if waitingTicks >= 30 {
+                        connection.log("Audio retry ended: no link carrying the call for 60 s; the link-up path asks again")
+                        return
+                    }
+                    continue
+                }
+                attempt += 1
+                connection.log("Audio is still on the Redmi; asking again (attempt \(attempt))")
                 self.audioRequested = true
-                GatewayConnection.shared.sendAudioStart()
+                connection.sendAudioStart()
             }
         }
+    }
+
+    /// The Redmi refused audio_start (no_call or audio_busy).
+    ///
+    /// That request is over, so the flag that stops duplicates is cleared. Left set, it made every
+    /// later request - the next call event, the retry, "iPhone'a al" - look like a repeat of one the
+    /// Redmi had already turned down, and nothing asked again. The duplicate protection for a request
+    /// still waiting for its answer is unchanged.
+    func audioStartRefused(code: String) {
+        audioPathLog("audio_start refused by the Redmi (\(code)); a later request may ask again")
+        audioRequested = false
     }
 
     /// The audio is confirmed on this iPhone: stop asking.

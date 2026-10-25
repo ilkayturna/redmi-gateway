@@ -519,8 +519,15 @@ public final class GatewayConnection: ObservableObject {
 
     private func scheduleReconnect(delay custom: Double? = nil) {
         guard pairing != nil || pendingPairCode != nil else { return }
-        // In the background only a call justifies reconnecting; Bluetooth covers the rest.
-        guard UIApplication.shared.applicationState != .background || currentCall != nil else { return }
+        // In the background only a call justifies reconnecting; Bluetooth covers the rest. A call
+        // CallKit shows counts even before the link knows it: a ring from an Apple push has no
+        // current call yet, and giving up after one failed attempt left it ringing with no way to
+        // learn that the caller had hung up.
+        let callInProgress = currentCall != nil || CallKitManager.shared.hasCalls
+        guard UIApplication.shared.applicationState != .background || callInProgress else {
+            log("Reconnect not scheduled: in the background without a call")
+            return
+        }
         cancelReconnect()
         let delay = custom ?? min(Double(1 << min(reconnectAttempt + 1, 5)), 30)
         reconnectTask = Task { @MainActor [weak self] in
@@ -655,7 +662,13 @@ public final class GatewayConnection: ObservableObject {
                 send(reply)
             }
         case "error":
-            if let error = decode(ErrorMessage.self, data) { log("Redmi error: \(error.code ?? error.message ?? "unknown")") }
+            if let error = decode(ErrorMessage.self, data) {
+                log("Redmi error: \(error.code ?? error.message ?? "unknown")")
+                // These two codes answer audio_start only (docs/PROTOCOL.md).
+                if let code = error.code, code == "no_call" || code == "audio_busy" {
+                    CallKitManager.shared.audioStartRefused(code: code)
+                }
+            }
         default:
             break
         }
@@ -923,8 +936,13 @@ public final class GatewayConnection: ObservableObject {
     private func handleStateResponse(_ response: StateResponseMessage) {
         if let call = response.call {
             applyCallEvent(CallEventMessage(state: call.state, number: call.number, callId: call.callId, direction: call.direction))
-        } else if let previous = currentCall {
-            applyCallEvent(CallEventMessage(state: "disconnected", number: nil, callId: previous.rawCallId))
+        } else {
+            if let previous = currentCall {
+                applyCallEvent(CallEventMessage(state: "disconnected", number: nil, callId: previous.rawCallId))
+            }
+            // A ring that came only from an Apple push is not the current call, so the line above
+            // never reaches it.
+            CallKitManager.shared.endRingingCallsWithoutRedmiCall(source: "state")
         }
         // The state answers the get_state sent right after authentication, so this is the first
         // moment a kept decline or hang-up can be checked against the Redmi's real call.
@@ -950,6 +968,8 @@ public final class GatewayConnection: ObservableObject {
             if let previous = currentCall {
                 applyCallEvent(CallEventMessage(state: "disconnected", number: nil, callId: previous.rawCallId))
             }
+            // Including a ring that came only from an Apple push and never became the current call.
+            CallKitManager.shared.endRingingCallsWithoutRedmiCall(source: "Bluetooth")
             return
         }
         if let wid = update.waitingCallId, !wid.isEmpty {
