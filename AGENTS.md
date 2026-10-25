@@ -145,6 +145,23 @@ zorunda kaldı.** `teslim-kapisi.ps1 -Hotspot` de aynı hatayı yapar: `finally`
 3. Kendini geri alması gereken her cihaz işleminin geri alma adımı, bağlantı koptuğunda da
    çalışacağı **kanıtlanmadan** başlatılmaz.
 
+## 0.6 Kurulumdan ve test aramasından ÖNCE: telefonda arama VAR MI — iki SIM yuvası birden
+
+**Hata (25.10.2026 15:05):** 2.0.10'u kurmadan önce `dumpsys telephony.registry | grep -m1 mCallState`
+ile "arama yok" dedim. `-m1` **ilk** telefonu (boş SIM yuvası 1) okudu; SIM yuva 2'deydi ve orada
+15:01'den beri **gerçek bir görüşme** sürüyordu (ses iPhone'da). Kurulum süreci yeniden başlattı, üstüne
+532 test aramasını açtım; kullanıcının görüşmesi 15:05:37'de `ERROR` ile **düştü**, 15:06:33'te
+geri arayan kişi bekleyen çağrıda kalıp **cevapsız** oldu.
+
+**KURAL:** Cihaza yazan her işlemden (install, test araması, ayar) hemen önce:
+```
+adb -s <seri> shell 'dumpsys telecom | sed -n "/^  mCalls:/,/^  mCallAudioManager/p"'
+```
+Liste **boş** değilse işlem **yapılmaz**. Ek kanıt: tanılama dosyasının son satırlarında
+`RELAY_HEALTH owner=IPHONE` varsa görüşme sürüyordur. `mCallState` okunacaksa **tüm** satırlar okunur.
+Komut **hiç çıktı vermezse** bu "arama yok" değil **"bilinmiyor"**dur: işlem yapılmaz, kontrol tekrarlanır
+(25.10.2026 15:09'da betik boş döndü ve boş "0" sayıldı; o an şans eseri arama yoktu).
+
 ## Genel ders
 **Not almak = düzeltmek değildir.** Kural, **kullanılmadıkça** hiçbir şeyi engellemez.
 Bu yüzden bu bölüm dosyanın **en başında**, kural 0'ın içinde duruyor: her oturumda,

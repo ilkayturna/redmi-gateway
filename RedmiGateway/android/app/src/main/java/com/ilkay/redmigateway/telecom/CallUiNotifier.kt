@@ -20,7 +20,9 @@ import java.util.concurrent.ConcurrentHashMap
 /** The default dialer's visible call controls. Telecom continues to own the ringtone. */
 object CallUiNotifier : CallManager.CallListener {
     private const val CHANNEL = "cellular_calls"
+    private const val QUIET_CHANNEL = "cellular_calls_quiet"
     private const val MISSED_CHANNEL = "missed_calls"
+    private const val MISSED_QUIET_CHANNEL = "missed_calls_quiet"
     private const val NOTIFICATION_ID = 4301
     private val mainHandler = Handler(Looper.getMainLooper())
     private var appContext: Context? = null
@@ -134,11 +136,16 @@ object CallUiNotifier : CallManager.CallListener {
                 ),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
-            val builder = NotificationCompat.Builder(context, CHANNEL)
+            // Everything except a ringing Redmi goes to the quiet channel. The ROM's ambient display
+            // lights the screen for every interruptive notification: measured on 25.10.2026 at
+            // 12:17:39 (incoming call shown on the iPhone) and 12:18:03 (outgoing call), the Redmi's
+            // screen came on in the pocket with no wake-up behind it, only this row on the high channel.
+            val builder = NotificationCompat.Builder(context, if (fullScreen) CHANNEL else QUIET_CHANNEL)
                 .setSmallIcon(android.R.drawable.sym_action_call)
                 .setContentIntent(screen)
                 .setCategory(NotificationCompat.CATEGORY_CALL)
-                .setPriority(NotificationCompat.PRIORITY_MAX)
+                .setPriority(if (fullScreen) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_LOW)
+                .setSilent(!fullScreen)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setOngoing(true)
 
@@ -221,14 +228,19 @@ object CallUiNotifier : CallManager.CallListener {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val builder = NotificationCompat.Builder(context, MISSED_CHANNEL)
+        // With a paired iPhone the missed call is shown there (journal and Apple push), and on the
+        // Redmi this row only lit the screen in the pocket (25.10.2026 15:06:59). Without a pairing
+        // the Redmi is the only place to see it, so it keeps its normal channel.
+        val quiet = com.ilkay.redmigateway.security.PairingStore.pairedClient() != null
+        val builder = NotificationCompat.Builder(context, if (quiet) MISSED_QUIET_CHANNEL else MISSED_CHANNEL)
             .setSmallIcon(android.R.drawable.sym_call_missed)
             .setContentTitle("Cevapsız Arama")
             .setContentText(caller)
             .setContentIntent(contentIntent)
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_MISSED_CALL)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(if (quiet) NotificationCompat.PRIORITY_LOW else NotificationCompat.PRIORITY_HIGH)
+            .setSilent(quiet)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
 
         if (!number.isNullOrBlank()) {
@@ -263,14 +275,35 @@ object CallUiNotifier : CallManager.CallListener {
             // Android Telecom rings the handset. A second notification tone would duplicate it.
             setSound(null, null)
         }
+        // A call the iPhone carries, and any call in progress: shown in the shade and on the lock
+        // screen, but never interruptive, so the ambient display does not light the pocket.
+        val quietChannel = NotificationChannel(
+            QUIET_CHANNEL, "Süren aramalar", NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "iPhone'a iletilen ve süren aramalar; ekranı yakmaz"
+            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            setSound(null, null)
+            enableVibration(false)
+            setShowBadge(false)
+        }
+        manager.createNotificationChannel(quietChannel)
         val missedChannel = NotificationChannel(
             MISSED_CHANNEL, "Cevapsız aramalar", NotificationManager.IMPORTANCE_DEFAULT
         ).apply {
             description = "Redmi'deki cevapsız arama bildirimleri"
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
         }
+        val missedQuietChannel = NotificationChannel(
+            MISSED_QUIET_CHANNEL, "Cevapsız aramalar (iPhone'da da)", NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "iPhone eşliyken Redmi'deki cevapsız aramalar; ekranı yakmaz"
+            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            setSound(null, null)
+            enableVibration(false)
+        }
         manager.createNotificationChannel(callChannel)
         manager.createNotificationChannel(missedChannel)
+        manager.createNotificationChannel(missedQuietChannel)
     }
 }
 
