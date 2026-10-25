@@ -384,7 +384,12 @@ class GatewayWebSocketServer(
                 val callId = json.optString("callId").ifBlank { null }
                 val hold = json.optBoolean("hold", true)
                 val call = if (callId != null) CallManager.getCall(callId) else CallManager.activeCall
-                val ok = if (call != null) {
+                val ok = if (CallManager.isMerging) {
+                    // The network merges one active and one held call. CallKit may change the hold
+                    // of the calls it groups; passing that on would swap them in the middle of it.
+                    CallManager.log("hold_call (${if (hold) "hold" else "resume"}) during a merge; left to the merge")
+                    true
+                } else if (call != null) {
                     runCatching {
                         if (hold) call.hold() else call.unhold()
                         true

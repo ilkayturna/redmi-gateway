@@ -299,12 +299,17 @@ private struct OtherCallCard: View {
 }
 
 /// "Çağrı ekle": dials a second call while this one goes on hold, as in the iPhone's Phone app.
+///
+/// Contacts are listed inside this sheet. Apple's contact picker, presented over it either as a
+/// nested sheet (build 146) or from UIKit (build 149), closed this sheet as well when a contact was
+/// chosen, so the number never reached Ara.
 private struct AddCallSheet: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var connection = GatewayConnection.shared
     @ObservedObject private var directory = PhoneContactDirectory.shared
     @State private var number = ""
-    @State private var showingPicker = false
+    @State private var showingContacts = false
+    @State private var query = ""
 
     private let rows = [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["*", "0", "#"]]
     private let letters: [String: String] = [
@@ -314,87 +319,145 @@ private struct AddCallSheet: View {
 
     var body: some View {
         NavigationView {
-            // Scrolls only when a large text size makes the pad taller than the sheet.
-            ScrollView {
-                VStack(spacing: 16) {
-                    VStack(spacing: 4) {
-                        Text(number.isEmpty ? " " : number)
-                            .font(.largeTitle.monospacedDigit())
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.5)
-                            .truncationMode(.head)
-                        Text(matchName ?? " ")
-                            .font(.subheadline)
-                            .foregroundColor(.accentColor)
-                            .multilineTextAlignment(.center)
-                        if let error = connection.lastCallError {
-                            Text(error)
-                                .font(.footnote)
-                                .foregroundColor(.red)
-                                .multilineTextAlignment(.center)
-                        }
+            Group {
+                if showingContacts { contactList } else { keypad }
+            }
+            .navigationTitle(showingContacts ? "Kişiler" : "Çağrı ekle")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    if showingContacts {
+                        Button("Tuş takımı") { closeContacts() }
+                    } else {
+                        Button("Vazgeç") { dismiss() }
                     }
-                    .padding(.horizontal)
-                    ForEach(rows, id: \.self) { row in
-                        HStack(spacing: 24) {
-                            ForEach(row, id: \.self) { digit in
-                                KeypadButton(digit: digit, letters: letters[digit] ?? "") {
-                                    number.append(digit)
-                                } onLongPress: {
-                                    if digit == "0" { number.append("+") }
-                                }
+                }
+            }
+        }
+        .onAppear { directory.ensureLoaded() }
+    }
+
+    private var keypad: some View {
+        // Scrolls only when a large text size makes the pad taller than the sheet.
+        ScrollView {
+            VStack(spacing: 16) {
+                VStack(spacing: 4) {
+                    Text(number.isEmpty ? " " : number)
+                        .font(.largeTitle.monospacedDigit())
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
+                        .truncationMode(.head)
+                    Text(matchName ?? " ")
+                        .font(.subheadline)
+                        .foregroundColor(.accentColor)
+                        .multilineTextAlignment(.center)
+                    if let error = connection.lastCallError {
+                        Text(error)
+                            .font(.footnote)
+                            .foregroundColor(.red)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+                .padding(.horizontal)
+                ForEach(rows, id: \.self) { row in
+                    HStack(spacing: 24) {
+                        ForEach(row, id: \.self) { digit in
+                            KeypadButton(digit: digit, letters: letters[digit] ?? "") {
+                                number.append(digit)
+                            } onLongPress: {
+                                if digit == "0" { number.append("+") }
                             }
                         }
                     }
-                    HStack(spacing: 24) {
-                        Button { showingPicker = true } label: {
-                            Image(systemName: "person.crop.circle")
-                                .font(.title2)
-                                .foregroundColor(.accentColor)
-                                .frame(width: 80, height: 80)
-                        }
-                        .accessibilityLabel("Kişilerden seç")
-                        Button(action: call) {
-                            Image(systemName: "phone.fill")
-                                .font(.system(size: 30))
-                                .foregroundColor(.white)
-                                .frame(width: 76, height: 76)
-                                .background(Circle().fill(canCall ? Color.green : Color.green.opacity(0.4)))
-                        }
-                        .frame(width: 80, height: 80)
-                        .disabled(!canCall)
-                        .accessibilityLabel("Ara")
-                        Button {
-                            if !number.isEmpty { number.removeLast() }
-                        } label: {
-                            Image(systemName: "delete.left")
-                                .font(.title2)
-                                .foregroundColor(.secondary)
-                                .frame(width: 80, height: 80)
-                        }
-                        .opacity(number.isEmpty ? 0 : 1)
-                        .disabled(number.isEmpty)
-                        .simultaneousGesture(LongPressGesture(minimumDuration: 0.5).onEnded { _ in number = "" })
-                        .accessibilityLabel("Sil")
-                        .accessibilityHint("Basılı tutunca numaranın tamamını siler")
+                }
+                HStack(spacing: 24) {
+                    Button { showingContacts = true } label: {
+                        Image(systemName: "person.crop.circle")
+                            .font(.title2)
+                            .foregroundColor(.accentColor)
+                            .frame(width: 80, height: 80)
+                    }
+                    .accessibilityLabel("Kişilerden seç")
+                    Button(action: call) {
+                        Image(systemName: "phone.fill")
+                            .font(.system(size: 30))
+                            .foregroundColor(.white)
+                            .frame(width: 76, height: 76)
+                            .background(Circle().fill(canCall ? Color.green : Color.green.opacity(0.4)))
+                    }
+                    .frame(width: 80, height: 80)
+                    .disabled(!canCall)
+                    .accessibilityLabel("Ara")
+                    Button {
+                        if !number.isEmpty { number.removeLast() }
+                    } label: {
+                        Image(systemName: "delete.left")
+                            .font(.title2)
+                            .foregroundColor(.secondary)
+                            .frame(width: 80, height: 80)
+                    }
+                    .opacity(number.isEmpty ? 0 : 1)
+                    .disabled(number.isEmpty)
+                    .simultaneousGesture(LongPressGesture(minimumDuration: 0.5).onEnded { _ in number = "" })
+                    .accessibilityLabel("Sil")
+                    .accessibilityHint("Basılı tutunca numaranın tamamını siler")
+                }
+            }
+            .padding(.vertical, 24)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    /// One row per number, so a contact with several numbers needs no second screen.
+    @ViewBuilder
+    private var contactList: some View {
+        if !directory.canRead {
+            VStack(spacing: 12) {
+                Text("Kişilere erişim yok").font(.headline)
+                Text("Numarayı tuş takımından yazabilir ya da Kişiler iznini açabilirsin.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                Button(directory.authorization == .notDetermined ? "İzin ver" : "Ayarları aç") {
+                    if directory.authorization == .notDetermined {
+                        directory.reload()
+                    } else if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
                     }
                 }
-                .padding(.vertical, 24)
-                .frame(maxWidth: .infinity)
             }
-            .navigationTitle("Çağrı ekle")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) { Button("Vazgeç") { dismiss() } }
-            }
-            // Not a nested .sheet: the picker's own dismissal closed this sheet with it.
-            .background(
-                ContactPickerPresenter(isPresented: $showingPicker) { picked in
-                    number = picked.filter { "0123456789*#+".contains($0) }
+            .padding(24)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            List {
+                ForEach(directory.matching(query)) { contact in
+                    ForEach(contact.numbers, id: \.self) { candidate in
+                        Button {
+                            number = candidate.filter { "0123456789*#+".contains($0) }
+                            closeContacts()
+                        } label: {
+                            HStack(spacing: 12) {
+                                ContactAvatar(name: contact.name, thumbnail: contact.thumbnail, size: 36)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(contact.name).foregroundColor(.primary)
+                                    Text(PhoneIdentity.formatted(candidate))
+                                        .font(.footnote.monospacedDigit())
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                        .accessibilityLabel("\(contact.name), \(PhoneIdentity.formatted(candidate))")
+                    }
                 }
-            )
+            }
+            .listStyle(.plain)
+            .searchable(text: $query, prompt: "Ad veya numara")
         }
-        .onAppear { directory.ensureLoaded() }
+    }
+
+    private func closeContacts() {
+        query = ""
+        showingContacts = false
     }
 
     private var matchName: String? {

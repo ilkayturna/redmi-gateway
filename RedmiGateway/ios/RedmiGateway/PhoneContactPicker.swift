@@ -83,6 +83,17 @@ final class PhoneContactDirectory: ObservableObject {
     }
 
     func contact(for number: String) -> PhoneContact? { byKey[PhoneIdentity.key(number)] }
+
+    /// Contacts whose name contains the query, or one of whose numbers contains its digits.
+    func matching(_ query: String) -> [PhoneContact] {
+        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return contacts }
+        let digits = text.filter { $0.isNumber }
+        return contacts.filter { contact in
+            contact.name.localizedCaseInsensitiveContains(text)
+                || (!digits.isEmpty && contact.numbers.contains { $0.filter { $0.isNumber }.contains(digits) })
+        }
+    }
     func name(for number: String) -> String? { contact(for: number)?.name }
 
     func displayName(for number: String) -> String {
@@ -241,51 +252,6 @@ struct PhoneContactPicker: UIViewControllerRepresentable {
 
         func contactPicker(_ picker: CNContactPickerViewController, didSelect contactProperty: CNContactProperty) {
             if let number = contactProperty.value as? CNPhoneNumber { onSelect(number.stringValue) }
-        }
-    }
-}
-
-/// The same picker for use inside a sheet, presented by UIKit instead of as a sheet of its own.
-///
-/// The picker dismisses itself after a choice. Shown with SwiftUI's `.sheet` over another sheet,
-/// that dismissal closed the sheet underneath as well: "Çağrı ekle" vanished with the chosen
-/// number before Ara could be pressed (25.10.2026, build 146). Presented from here, the picker's
-/// own dismissal closes only the picker.
-struct ContactPickerPresenter: UIViewControllerRepresentable {
-    @Binding var isPresented: Bool
-    let onSelect: (String) -> Void
-
-    func makeUIViewController(context: Context) -> UIViewController { UIViewController() }
-
-    func updateUIViewController(_ host: UIViewController, context: Context) {
-        context.coordinator.parent = self
-        guard isPresented, host.presentedViewController == nil else { return }
-        let picker = PhoneContactPicker.makePicker()
-        picker.delegate = context.coordinator
-        host.present(picker, animated: true)
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
-
-    final class Coordinator: NSObject, CNContactPickerDelegate {
-        var parent: ContactPickerPresenter
-
-        init(parent: ContactPickerPresenter) {
-            self.parent = parent
-        }
-
-        func contactPicker(_ picker: CNContactPickerViewController, didSelect contact: CNContact) {
-            parent.isPresented = false
-            if let number = contact.phoneNumbers.first?.value.stringValue { parent.onSelect(number) }
-        }
-
-        func contactPicker(_ picker: CNContactPickerViewController, didSelect contactProperty: CNContactProperty) {
-            parent.isPresented = false
-            if let number = contactProperty.value as? CNPhoneNumber { parent.onSelect(number.stringValue) }
-        }
-
-        func contactPickerDidCancel(_ picker: CNContactPickerViewController) {
-            parent.isPresented = false
         }
     }
 }

@@ -122,6 +122,26 @@ object CallManager {
     private fun mergeInProgress() = mergeRequestedAt != 0L &&
         android.os.SystemClock.elapsedRealtime() - mergeRequestedAt < MERGE_WINDOW_MS
 
+    /**
+     * How long a call that Telecom adds already connected may wait for the call it replaces to end.
+     *
+     * Such a call was neither dialled nor answered here: it is how a network that moves our call
+     * elsewhere shows up. When a friend merges this phone into their conference, the conference
+     * server may send a new session that replaces ours; Telecom adds it as a new, already active
+     * call and the old one ends. The iPhone knows only the old id: seen as a new call, it ended its
+     * CallKit call and stopped the audio, and the conversation was left on the Redmi in the pocket.
+     * So the new call stays out of the list for this long; if the other call ends meanwhile it goes
+     * on under that call's id, otherwise it shows up as a call of its own.
+     */
+    private const val REPLACE_WINDOW_MS = 5_000L
+    @Volatile private var replacing: Call? = null
+    private var replacedCall: Call? = null
+    private var replacedId: String? = null
+    private var replacedNumber: String? = null
+    /** The number the iPhone already shows, kept for a call that took over another call's id. */
+    private val keptNumbers = ConcurrentHashMap<Call, String>()
+    private val releaseReplacing = Runnable { releaseReplacingNow() }
+
     val isConference: Boolean
         get() = isConference(activeCall) || calls.any { isConference(it) && isCallLive(it) }
 
@@ -275,13 +295,25 @@ object CallManager {
             return
         }
 
-        val callId = reuseId ?: UUID.randomUUID().toString()
+        // Added already connected, not as a conference or a part of one, and not during a merge asked
+        // for here: possibly a call replacing another one, see REPLACE_WINDOW_MS.
+        val unannounced = reuseId == null && (call.state == Call.STATE_ACTIVE || call.state == Call.STATE_HOLDING) &&
+            call.parent == null && !isConference(call) && !mergeInProgress()
+        // The call it replaces has already gone and its end is still inside the grace: the same id,
+        // so the iPhone never hears that it ended.
+        val continuesId = if (unannounced && endPending) currentCallId else null
+        val callId = reuseId ?: continuesId ?: UUID.randomUUID().toString()
+        if (continuesId != null) {
+            for (other in calls) if (callIds[other] == continuesId) callIds.remove(other)
+            currentPhoneNumber?.let { keptNumbers[call] = it }
+        }
         callIds[call] = callId
         calls.add(call)
 
         val mappedState = mapCallState(call.state)
         val isConf = isConference(call)
-        log("Call Added: ID=$callId, State=$mappedState, IsConference=$isConf, TotalCalls=${calls.size}")
+        log("Call Added: ID=$callId, State=$mappedState, IsConference=$isConf, TotalCalls=${calls.size}" +
+            (if (continuesId != null) " (added already connected; continues the call that just ended)" else ""))
         // The conference exists: the merge is done, and normal call ends need no long grace again.
         if (isConf) mergeRequestedAt = 0L
 
@@ -359,9 +391,37 @@ object CallManager {
                 log("onConferenceableCallsChanged on ID=${callIds[c]}, count=${conferenceableCalls.size}")
                 updatePrimaryCallAndNotify("conferenceable_changed")
             }
+
+            // Merges, remote holds and the like arrive as connection events. No merge with real
+            // people has been seen yet, so each one is kept in the file (the name only, no extras).
+            override fun onConnectionEvent(c: Call, event: String, extras: Bundle?) {
+                log("Connection event on ID=${callIds[c]}: $event")
+                if (event == android.telecom.Connection.EVENT_CALL_MERGE_FAILED && mergeInProgress()) {
+                    // Otherwise the iPhone showed "Birleştiriliyor" and refused Değiştir for 45 s.
+                    log("The network refused the merge; the calls stay as they were")
+                    mergeRequestedAt = 0L
+                    notifyStateChanged()
+                }
+            }
         }
         callCallbacks[call] = callback
         call.registerCallback(callback)
+
+        if (unannounced && continuesId == null) {
+            val others = calls.filter { it !== call && it !== waitingCall && isCallLive(it) }
+            if (others.size == 1 && waitingCall == null && replacing == null) {
+                val old = others[0]
+                replacing = call
+                replacedCall = old
+                replacedId = callIds[old]
+                replacedNumber = keptNumbers[old] ?: extractPhoneNumber(old)
+                mainHandler.removeCallbacks(releaseReplacing)
+                mainHandler.postDelayed(releaseReplacing, REPLACE_WINDOW_MS)
+                log("Call $callId was added already connected while call $replacedId is live; " +
+                    "kept out of the list for up to $REPLACE_WINDOW_MS ms in case it replaces that call")
+                return
+            }
+        }
 
         // Check if there is already an active/connected call and this is a second incoming ringing call
         val hasActiveLiveCall = calls.any { it !== call && isCallLive(it) && it.state != Call.STATE_RINGING }
@@ -400,6 +460,8 @@ object CallManager {
         }
         calls.remove(call)
         callIds.remove(call)
+        keptNumbers.remove(call)
+        if (call === replacing) clearReplacing()
 
         updatePrimaryCallAndNotify("call_removed")
         // Telecom settles the remaining call first; a merge in flight is left alone.
@@ -425,6 +487,7 @@ object CallManager {
      */
     @Synchronized
     fun snapshot(): List<CallInfo> = calls.mapNotNull { call ->
+        if (call === replacing) return@mapNotNull null
         val id = callIds[call] ?: return@mapNotNull null
         val state = mapCallState(call.state)
         if (state == "disconnected" || state == "idle") return@mapNotNull null
@@ -434,7 +497,7 @@ object CallManager {
         CallInfo(
             callId = id,
             state = state,
-            number = if (conf) getConferenceTitle(call) else extractPhoneNumber(call),
+            number = if (conf) getConferenceTitle(call) else keptNumbers[call] ?: extractPhoneNumber(call),
             direction = direction,
             conference = conf,
             parentId = call.parent?.let { callIds[it] },
@@ -445,7 +508,7 @@ object CallManager {
     val isMerging: Boolean get() = mergeInProgress()
 
     private fun selectPrimaryCall(): Call? {
-        val liveCalls = calls.filter { isCallLive(it) && it !== waitingCall }
+        val liveCalls = calls.filter { isCallLive(it) && it !== waitingCall && it !== replacing }
         if (liveCalls.isEmpty()) return null
 
         // 1. Live conference call (parent)
@@ -472,8 +535,49 @@ object CallManager {
         return liveCalls.firstOrNull()
     }
 
+    /**
+     * The call a possible replacement waited on has ended: the replacement goes on under that call's
+     * id and with the number the iPhone already shows. Runs before every primary-call evaluation.
+     */
+    private fun adoptReplacementIfDue() {
+        val candidate = replacing ?: return
+        if (!isCallLive(candidate)) {
+            clearReplacing()
+            return
+        }
+        val old = replacedCall
+        if (old != null && calls.contains(old) && isCallLive(old)) return
+        val oldId = replacedId
+        val number = replacedNumber
+        clearReplacing()
+        if (oldId == null) return
+        val newId = callIds[candidate]
+        // Only the replacement may answer to the old id now; a hangup must not find the ended call.
+        if (old != null && callIds[old] == oldId) callIds.remove(old)
+        callIds[candidate] = oldId
+        number?.let { keptNumbers[candidate] = it }
+        log("Call $oldId ended and call $newId, added already connected, replaces it; it goes on as $oldId")
+    }
+
+    private fun clearReplacing() {
+        replacing = null
+        replacedCall = null
+        replacedId = null
+        replacedNumber = null
+        mainHandler.removeCallbacks(releaseReplacing)
+    }
+
+    @Synchronized
+    private fun releaseReplacingNow() {
+        val candidate = replacing ?: return
+        log("Call ${callIds[candidate]} replaced no call within $REPLACE_WINDOW_MS ms; it is a call of its own")
+        clearReplacing()
+        updatePrimaryCallAndNotify("replacement_window_over")
+    }
+
     @Synchronized
     private fun updatePrimaryCallAndNotify(reason: String) {
+        adoptReplacementIfDue()
         val primary = selectPrimaryCall()
         if (primary != null && endPending) {
             mainHandler.removeCallbacks(confirmEnd)
@@ -495,7 +599,7 @@ object CallManager {
             val number = if (isConf) {
                 getConferenceTitle(primary)
             } else {
-                extractPhoneNumber(primary) ?: currentPhoneNumber
+                keptNumbers[primary] ?: extractPhoneNumber(primary) ?: currentPhoneNumber
             }
             currentPhoneNumber = number
 

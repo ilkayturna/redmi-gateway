@@ -41,6 +41,9 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     /// Resumes asked of CallKit only to show what the Redmi already did; the provider does not send
     /// them back. See resumeInCallKitIfRedmiDid.
     private var callKitOnlyHoldChanges: Set<UUID> = []
+    /// Calls held in CallKit for "Çağrı ekle"; the Redmi holds them itself when it dials, so the
+    /// provider does not send hold_call for these. See startOutgoingCall.
+    private var heldForAddedCall: Set<UUID> = []
     /// When a hold or resume was last asked for each call through CallKit.
     private var holdRequestedAt: [UUID: Date] = [:]
     /// Waiting calls "Beklet ve yanıtla" is answering; the answer keeps the current call on hold.
@@ -246,6 +249,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         connectedOutgoing.remove(uuid)
         autoRetries.removeValue(forKey: uuid)
         callKitOnlyHoldChanges.remove(uuid)
+        heldForAddedCall.remove(uuid)
         holdRequestedAt.removeValue(forKey: uuid)
         answerHoldingCurrent.remove(uuid)
         holdAnswerAt.removeValue(forKey: uuid)
@@ -909,8 +913,10 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             connection.log("Dial refused here: \(refusal)")
             return
         }
-        // A second call ("Çağrı ekle"): CallKit asks this provider to hold the current call and the
-        // Redmi's Telecom holds it as well; the audio keeps running for the whole session.
+        // A second call ("Çağrı ekle"): the Redmi's Telecom holds the current call when it dials, and
+        // the audio keeps running for the whole session. CallKit has to be told as well, in the same
+        // transaction: it never holds a call by itself, and when the added call connected it ended
+        // the call it still saw as active (build 149, 25.10.2026 17:21:59 and 17:22:14).
         callIdsBeforeDial = Set(connection.calls.map { $0.callId })
         if let current = connection.currentCall {
             if !current.rawCallId.isEmpty { callIdsBeforeDial.insert(current.rawCallId) }
@@ -929,11 +935,22 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         outgoing.insert(uuid)
         pendingOutgoing = uuid
 
-        let action = CXStartCallAction(call: uuid, handle: CXHandle(type: .phoneNumber, value: clean))
-        callController.request(CXTransaction(action: action)) { error in
+        let presented = incoming.union(outgoing)
+        let toHold = callController.callObserver.calls
+            .filter { $0.uuid != uuid && !$0.isOnHold && !$0.hasEnded && presented.contains($0.uuid) }
+            .map { $0.uuid }
+        var actions: [CXAction] = toHold.map { CXSetHeldCallAction(call: $0, onHold: true) }
+        heldForAddedCall.formUnion(toHold)
+        if !toHold.isEmpty { connection.log("Adding a call: holding \(toHold.count) call(s) in CallKit first") }
+        actions.append(CXStartCallAction(call: uuid, handle: CXHandle(type: .phoneNumber, value: clean)))
+        callController.request(CXTransaction(actions: actions)) { error in
             Task { @MainActor in
                 let connection = GatewayConnection.shared
                 if error != nil {
+                    CallKitManager.shared.heldForAddedCall.subtract(toHold)
+                    if !toHold.isEmpty {
+                        connection.log("CallKit refused the added call: \(error.map { ($0 as NSError).code } ?? -1)")
+                    }
                     CallKitManager.shared.cleanup(uuid)
                     // Keep the tap effective even if iOS refuses its call screen.
                     connection.sendDial(number: clean)
@@ -1085,6 +1102,9 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     /// Only for a single remaining call that the Redmi reports active, and not right after a hold was
     /// asked for here: a list sent before that hold took effect must not undo it.
     private func resumeInCallKitIfRedmiDid(_ byId: [String: GatewayCallInfo]) {
+        // A call being added: the Redmi lists the current call as active until its dial goes out, and
+        // resuming it here would undo the hold that keeps CallKit from ending it.
+        if pendingOutgoing != nil { return }
         let presented = incoming.union(outgoing).filter { states[$0] != "ringing" && $0 != pendingOutgoing }
         if presented.count != 1 { return }
         guard let uuid = presented.first, let rawId = callIdByUuid[uuid], byId[rawId]?.state == "active",
@@ -1437,6 +1457,8 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         if callKitOnlyHoldChanges.remove(uuid) != nil {
             // Only shows in CallKit what the Redmi already did; sending it back would be an echo.
             connection.log("CallKit \(change) for call \(rawId.prefix(8)) mirrors the Redmi; not sent")
+        } else if action.isOnHold, heldForAddedCall.remove(uuid) != nil {
+            connection.log("CallKit hold for call \(rawId.prefix(8)) while a call is added; the Redmi holds it when it dials, not sent")
         } else if rawId.isEmpty || rawId == "gateway_call" || rawId.hasPrefix("outgoing_") {
             // The Redmi has not named this call yet and ignores hold_call for an unknown id.
             connection.log("CallKit \(change) for a call the Redmi has not named yet; left to the Redmi")
@@ -1450,6 +1472,29 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             ])
         }
         action.fulfill()
+        if !action.isOnHold { startAudioIfResumeLeftItOff(uuid) }
+    }
+
+    /// A resume after every call here was on hold. CallKit deactivated the session for the hold, and
+    /// the activation that should follow the resume does not always come (Apple DTS, forum 749202;
+    /// Linphone and Twilio start their audio from the resume itself). If it has not come half a
+    /// second later, the paused engine starts on its endpoint; the start activates the session.
+    private func startAudioIfResumeLeftItOff(_ uuid: UUID) {
+        guard !audioActivated, audioRequested, endpoint != nil else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard let self, !self.audioActivated, self.audioRequested, let endpoint = self.endpoint,
+                  self.callController.callObserver.calls.contains(where: { $0.uuid == uuid && !$0.isOnHold && !$0.hasEnded })
+            else { return }
+            if self.audioCallUuid.map({ self.states[$0] == nil }) ?? true { self.audioCallUuid = uuid }
+            guard let owner = self.audioCallUuid, self.isAudioEligible(owner) else {
+                self.audioPathLog("no didActivate after the resume, and no call here may carry the audio")
+                return
+            }
+            self.audioPathLog("no didActivate 0.5 s after the resume; starting the engine on the same endpoint")
+            self.startEngine(endpoint, force: true)
+            if AudioEngine.shared.isRunning { self.audioActivated = true }
+        }
     }
 
     /// Merge, from "Birleştir" or the system call screen. The network takes about 20 s to build the
@@ -1486,10 +1531,21 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     }
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
-        // The call count tells a deactivation inside a multi-call session (hold, swap, merge, hold and
-        // answer) apart from the end of a call; the stop itself is unchanged.
-        audioPathLog("didDeactivate received (\(incoming.union(outgoing).count) call(s) here); stopping call audio")
+        let here = incoming.union(outgoing).count
         audioActivated = false
+        // Every call left here is on hold: the other call ended a moment before the Redmi resumed this
+        // one (it waits 0.8 s), or a hold from the system screen. The Redmi keeps relaying for the
+        // session, so only the engine pauses and the next didActivate starts it on the same endpoint.
+        // Stopping the session too sent the conversation back to the Redmi in the pocket and then
+        // asked for it again. A pause longer than 1.8 s makes the Redmi take the audio back by itself.
+        if here > 0, audioRequested, endpoint != nil, let next = audioSuccessor() {
+            audioCallUuid = next
+            audioPathLog("didDeactivate received (\(here) call(s) here, none active); pausing the engine, the Redmi keeps the session")
+            AudioEngine.shared.stop(preservingControls: true)
+            runningEndpoint = nil
+            return
+        }
+        audioPathLog("didDeactivate received (\(here) call(s) here); stopping call audio")
         stopAudio()
     }
 }

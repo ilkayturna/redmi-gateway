@@ -503,15 +503,7 @@ struct ContactsView: View {
     let openMessages: (String) -> Void
     @State private var query = ""
 
-    private var filtered: [PhoneContact] {
-        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return directory.contacts }
-        let digits = text.filter { $0.isNumber }
-        return directory.contacts.filter { contact in
-            contact.name.localizedCaseInsensitiveContains(text)
-                || (!digits.isEmpty && contact.numbers.contains { $0.filter { $0.isNumber }.contains(digits) })
-        }
-    }
+    private var filtered: [PhoneContact] { directory.matching(query) }
 
     private struct ContactSection {
         let letter: String
