@@ -169,6 +169,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
             SmsJournal.get(this).start()
             com.ilkay.redmigateway.push.PushNotifier.start(this)
             SmartHotspot.start(this)
+            CallAudioRelay.clearStaleIsolation(this)
             IPhoneReachability.addListener(reachabilityListener)
             isRunning = true
             CallManager.log("Gateway Foreground Service started on port 8787")

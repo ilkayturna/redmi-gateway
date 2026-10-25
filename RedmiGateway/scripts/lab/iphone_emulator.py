@@ -188,9 +188,17 @@ async def sync(host):
     sms = await client.expect("sync_sms")
     print(f"  sync_calls items={len(calls['items'])} hasMore={calls['hasMore']} lastSeq={calls['lastSeq']}")
     print(f"  sync_sms items={len(sms['items'])} hasMore={sms['hasMore']} lastSeq={sms['lastSeq']}")
-    await client.send({"type": "sync", "callsAfter": calls["lastSeq"], "smsAfter": sms["lastSeq"]})
+    # A journal longer than one page answers hasMore; read to the end before the replay check.
+    last_calls, last_sms = calls["lastSeq"], sms["lastSeq"]
+    while calls["hasMore"] or sms["hasMore"]:
+        await client.send({"type": "sync", "callsAfter": last_calls, "smsAfter": last_sms})
+        calls = await client.expect("sync_calls")
+        sms = await client.expect("sync_sms")
+        last_calls, last_sms = calls["lastSeq"], sms["lastSeq"]
+    print(f"  read to the end: calls lastSeq={last_calls} sms lastSeq={last_sms}")
+    await client.send({"type": "sync", "callsAfter": last_calls, "smsAfter": last_sms})
     again = await client.expect("sync_calls")
-    ok = check("replay after lastSeq returns nothing new", len(again["items"]) == 0 and again["lastSeq"] == calls["lastSeq"])
+    ok = check("replay after lastSeq returns nothing new", len(again["items"]) == 0 and again["lastSeq"] == last_calls)
     fields = calls["items"][0].keys() if calls["items"] else []
     print(f"  call fields: {sorted(fields)}")
     await client.ws.close()
@@ -238,6 +246,23 @@ async def call_scenario(args):
             await report("soak", 5)
     media.tone = True
     await report("iphone_tone", 5)
+    if args.scenario == "reconnect":
+        # iOS replaces its control socket while the call audio keeps flowing on UDP. The new socket
+        # of the same iPhone must still be able to move the audio back (2.0.9).
+        await client.ws.close()
+        s.task.cancel()
+        await report("socket_closed_audio_flowing", 3)
+        client = await BridgeClient.connect(args.host)
+        s = Session(client)
+        print("reconnected on a new control socket")
+        await client.send({"type": "audio_to_redmi"})
+        ack = await s.wait_for("ack", 5)
+        ok_ack = check("audio_to_redmi accepted from the new socket", bool(ack) and ack.get("action") == "audio_to_redmi" and ack.get("success") is True)
+        await report("after_manual_redmi", 3)
+        owners = [(e.get("owner"), e.get("detail")) for e in s.events if e.get("type") == "audio_state"]
+        check("audio back on the Redmi", any(o == "redmi" and d == "manual_redmi" for o, d in owners))
+        if not ok_ack:
+            print("  ack:", ack)
     if args.scenario in ("handoff", "fallback"):
         media.sending = False  # iPhone microphone stops; keepalives continue
         await report("iphone_silent", 4)

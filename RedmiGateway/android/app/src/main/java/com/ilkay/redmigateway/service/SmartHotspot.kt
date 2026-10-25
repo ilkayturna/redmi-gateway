@@ -167,6 +167,11 @@ object SmartHotspot {
             handler.removeCallbacks(startHotspotCheck)
             val joined = wifiNetwork != network
             if (joined) Log.i(TAG, "Wi-Fi with internet joined")
+            // Android joins a saved network on its own (IMMUTABLE_RULES Kural 1), also mid-call.
+            // That moment preceded the 23.10.2026 drop and was nowhere in the file.
+            if (joined && CallManager.currentCallState !in setOf("idle", "disconnected")) {
+                com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Wi-Fi ${ssid ?: "?"} joined during a call; the hotspot stays until it ends")
+            }
             wifiNetwork = network
             ssid?.let { remember(listOf(it)) }
             evaluate()

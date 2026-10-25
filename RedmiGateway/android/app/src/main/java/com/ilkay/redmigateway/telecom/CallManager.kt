@@ -41,6 +41,8 @@ object CallManager {
 
     private val calls = CopyOnWriteArrayList<Call>()
     private val callIds = ConcurrentHashMap<Call, String>()
+    /** Whether each call last reported Wi-Fi calling; only changes are logged. */
+    private val callOnWifi = ConcurrentHashMap<Call, Boolean>()
     private val callCallbacks = ConcurrentHashMap<Call, Call.Callback>()
 
     @Volatile var activeCall: Call? = null
@@ -263,6 +265,16 @@ object CallManager {
             override fun onStateChanged(c: Call, state: Int) {
                 val mapped = mapCallState(state)
                 log("Call State Changed: ID=${callIds[c]}, State=$mapped")
+                if (state == Call.STATE_DISCONNECTED) {
+                    callOnWifi.remove(c)
+                    // Why the call ended, from the radio's side. On 23.10.2026 a call dropped 35 s
+                    // after the Redmi joined a Wi-Fi network mid-call, and only `dumpsys telecom`
+                    // still held the reason (ImsReasonInfo 1513 CODE_NETWORK_DETACH); it is gone
+                    // from there after a few dozen calls, so it is kept in the file as well.
+                    runCatching { c.details.disconnectCause }.getOrNull()?.let { cause ->
+                        log("Call ended: ID=${callIds[c]}, ${cause.toString().take(300)}")
+                    }
+                }
                 if (c === waitingCall) {
                     if (state == Call.STATE_DISCONNECTED) {
                         clearWaiting()
@@ -283,6 +295,20 @@ object CallManager {
                         notifyWaitingChanged()
                     }
                     return
+                }
+                // Which network carries the call, and when that changes: a move from the mobile
+                // network to Wi-Fi calling mid-call is the moment the 23.10.2026 drop followed.
+                // Only once the radio carries the call: while connecting the property is not set yet,
+                // and after the end a last details update would log the call again.
+                val carried = c.state in setOf(Call.STATE_DIALING, Call.STATE_RINGING, Call.STATE_ACTIVE, Call.STATE_HOLDING)
+                val onWifi = details.hasProperty(Call.Details.PROPERTY_WIFI)
+                val before = if (carried) callOnWifi.put(c, onWifi) else onWifi
+                if (carried && before != onWifi) {
+                    log("Call ID=${callIds[c]} " + when {
+                        before == null -> if (onWifi) "runs over Wi-Fi calling" else "runs over the mobile network"
+                        onWifi -> "moved to Wi-Fi calling"
+                        else -> "moved to the mobile network"
+                    })
                 }
                 updatePrimaryCallAndNotify("details_changed")
             }

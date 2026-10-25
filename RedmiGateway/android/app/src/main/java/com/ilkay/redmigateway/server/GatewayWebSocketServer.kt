@@ -408,15 +408,16 @@ class GatewayWebSocketServer(
             }
             "audio_start" -> startAudio(peer, json)
             "audio_stop" -> {
-                if (audioOwner === conn) {
+                if (claimAudioControl(peer)) {
                     audioOwner = null
                     CallAudioRelay.disarm("iphone_stopped")
                 }
                 sendAck(peer, "audio_stop", true)
             }
             "audio_to_redmi" -> {
-                if (audioOwner === conn) CallAudioRelay.transferAudioToRedmi()
-                sendAck(peer, "audio_to_redmi", audioOwner === conn)
+                val owns = claimAudioControl(peer)
+                if (owns) CallAudioRelay.transferAudioToRedmi()
+                sendAck(peer, "audio_to_redmi", owns)
             }
             "send_sms", "sms_send" -> sendSms(peer, json)
             "sync" -> sync(peer, json.optLong("callsAfter", 0), json.optLong("smsAfter", 0))
@@ -488,6 +489,26 @@ class GatewayWebSocketServer(
             }
             else -> send(peer, JSONObject().put("type", "error").put("code", "unknown_command").put("command", type))
         }
+    }
+
+    /**
+     * Whether [peer] may stop or move the call audio.
+     *
+     * Ownership belongs to the socket that sent audio_start, but iOS replaces that socket all the
+     * time while the audio itself keeps flowing on UDP (onClose deliberately keeps the session).
+     * The new socket of the same iPhone then had no say: "Redmi'ye al" got a failed ack and
+     * audio_stop was ignored, so the Redmi stayed muted until the silence fallback. Only the paired
+     * iPhone can authenticate with protocol 2, so such a peer takes over an owner whose socket is
+     * gone; a second live socket still cannot take the audio from the one that holds it.
+     */
+    private fun claimAudioControl(peer: Peer): Boolean {
+        val owner = audioOwner
+        if (owner === peer.conn) return true
+        if (peer.protocol < 2 || (owner != null && owner.isOpen)) return false
+        if (owner == null && CallAudioRelay.owner == CallAudioRelay.Owner.REDMI) return false
+        audioOwner = peer.conn
+        Log.i(TAG, "Call audio control passed to the iPhone's new socket")
+        return true
     }
 
     private fun startAudio(peer: Peer, json: JSONObject) {

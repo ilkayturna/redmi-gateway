@@ -1376,6 +1376,23 @@ object CallAudioRelay : CallManager.CallListener {
         }
     }
 
+    /**
+     * Clears a device_mute that an earlier process left in the audio HAL.
+     *
+     * The mute lives in the HAL, not in this process. A crash or an app update while the iPhone
+     * carried a call ended the relay without [clearIsolation], and the Redmi's own microphone and
+     * earpiece could stay muted for the next call answered on the Redmi. Called when the gateway
+     * starts; it does nothing while this process itself isolates the handset for the iPhone.
+     */
+    fun clearStaleIsolation(context: Context) {
+        handler.post {
+            if (appContext == null) appContext = context.applicationContext
+            if (isolationApplied || owner != Owner.REDMI) return@post
+            clearIsolation()
+            Log.i(TAG, "Cleared any handset mute left by an earlier process")
+        }
+    }
+
     private fun clearIsolation() {
         val audioManager = appContext?.getSystemService(AudioManager::class.java) ?: return
         runCatching { audioManager.setParameters("device_mute=false;direction=tx") }
