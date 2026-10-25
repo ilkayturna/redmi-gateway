@@ -59,6 +59,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     private var audioRetryTask: Task<Void, Never>?
     private var endpoint: (session: UInt32, port: UInt16, key: Data)?
     private var runningEndpoint: (host: String, session: UInt32, port: UInt16)?
+    private var duplicateStartLogged = false
     private var linkLostTask: Task<Void, Never>?
     /// Background time held while a transfer starts off screen; see beginTransferTask.
     private var transferTask: UIBackgroundTaskIdentifier = .invalid
@@ -199,7 +200,9 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         // voice-processing setup running after the button was pressed. Warming here (and again,
         // harmlessly, at the button) means the press only waits for CallKit to activate the session
         // and for the engine to start. Nothing captures audio until the engine starts.
-        if ["dialing", "connecting", "active"].contains(state) {
+        // Logged only when there is something to warm: the Redmi repeats a live call's state many
+        // times a second, and the repeats filled the log ring until the lines that mattered dropped.
+        if ["dialing", "connecting", "active"].contains(state), !AudioEngine.shared.isRunning {
             audioPathLog("live call; warming the audio graph")
             AudioEngine.shared.warmUp()
         }
@@ -386,9 +389,14 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         let host = GatewayConnection.shared.connectedHost
         if !force, AudioEngine.shared.isRunning, let running = runningEndpoint,
            running.host == host, running.session == endpoint.session, running.port == endpoint.port {
-            audioPathLog("engine already running for this endpoint; duplicate start ignored")
+            // Once per run: every repeated call state lands here.
+            if !duplicateStartLogged {
+                duplicateStartLogged = true
+                audioPathLog("engine already running for this endpoint; duplicate starts ignored")
+            }
             return
         }
+        duplicateStartLogged = false
         // The engine builds and starts synchronously here; its duration is the biggest single part
         // of the iPhone's firstPcm, so it is measured from the answer tap on both sides.
         audioPathLog("engine start called")
@@ -1361,6 +1369,8 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         let rawId = callIdByUuid[uuid] ?? ""
         let state = states[uuid] ?? "active"
         let connection = GatewayConnection.shared
+        // Ends asked by CallKit itself are not told apart from a tap; the line says which call it was.
+        connection.log("CallKit end for call \(rawId.prefix(8)) (\(state), \(incoming.union(outgoing).count) call(s) here)")
         if !rawId.isEmpty, !rawId.hasPrefix("outgoing_") {
             if state == "ringing" {
                 connection.sendReject(callId: rawId)
@@ -1368,8 +1378,17 @@ final class CallKitManager: NSObject, CXProviderDelegate {
                 connection.sendHangup(callId: rawId)
             }
             endedCallIds[rawId] = Date()
-        } else if rawId.hasPrefix("outgoing_"), let call = connection.currentCall {
-            connection.sendHangup(callId: call.rawCallId)
+        } else if rawId.hasPrefix("outgoing_") {
+            // The Redmi has not named this dial yet. Alone, the current call is this dial; while a
+            // call is being added, the current call is the one before it and must stay.
+            let before = callIdsBeforeDial
+            if before.isEmpty, let call = connection.currentCall {
+                connection.sendHangup(callId: call.rawCallId)
+            } else if let added = connection.calls.first(where: { !before.contains($0.callId) }) {
+                connection.sendHangup(callId: added.callId)
+            } else {
+                connection.log("Added call ended before the Redmi named it; the call before it is left alone")
+            }
         }
         cleanup(uuid)
         action.fulfill()
@@ -1377,6 +1396,16 @@ final class CallKitManager: NSObject, CXProviderDelegate {
 
     func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
         action.fulfill()
+        // A started call gets none of the capabilities an incoming call is reported with. Without
+        // holding, CallKit ended the call on hold the moment an added call connected (twice on
+        // 25.10.2026, build 146); without grouping it cannot merge.
+        let capabilities = CXCallUpdate()
+        capabilities.hasVideo = false
+        capabilities.supportsDTMF = true
+        capabilities.supportsHolding = true
+        capabilities.supportsGrouping = true
+        capabilities.supportsUngrouping = false
+        provider.reportCall(with: action.callUUID, updated: capabilities)
         if pickups.contains(action.callUUID) {
             provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: nil)
             provider.reportOutgoingCall(with: action.callUUID, connectedAt: nil)

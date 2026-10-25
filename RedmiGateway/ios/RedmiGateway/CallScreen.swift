@@ -387,12 +387,12 @@ private struct AddCallSheet: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) { Button("Vazgeç") { dismiss() } }
             }
-            .sheet(isPresented: $showingPicker) {
-                PhoneContactPicker { picked in
-                    showingPicker = false
+            // Not a nested .sheet: the picker's own dismissal closed this sheet with it.
+            .background(
+                ContactPickerPresenter(isPresented: $showingPicker) { picked in
                     number = picked.filter { "0123456789*#+".contains($0) }
                 }
-            }
+            )
         }
         .onAppear { directory.ensureLoaded() }
     }
