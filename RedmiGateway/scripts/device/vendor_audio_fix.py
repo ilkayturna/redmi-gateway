@@ -21,7 +21,8 @@ import sys
 import tempfile
 
 ADB = os.environ.get("ADB", r"C:\Users\ilkay.turna\platform-tools\adb.exe")
-SERIAL = os.environ.get("ADB_SERIAL", "17df6357")
+# USB serial by default; ADB_SERIAL (or adb's own ANDROID_SERIAL) for adb over Wi-Fi, e.g. 192.168.1.111:5555.
+SERIAL = os.environ.get("ADB_SERIAL") or os.environ.get("ANDROID_SERIAL") or "17df6357"
 MIXER = "/vendor/etc/mixer_paths_idp.xml"
 PLATFORM = "/vendor/etc/audio_platform_info_intcodec.xml"
 BACKUP_DIR = "/vendor/etc/phonebridge-backup"

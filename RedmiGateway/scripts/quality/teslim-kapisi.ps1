@@ -19,6 +19,8 @@ param(
     [switch]$Cihaz,
     [switch]$Hotspot,
     [string]$Adb = 'C:\Users\ilkay.turna\platform-tools\adb.exe',
+    # USB seri no; adb Wi-Fi uzerindeyse ornegin 192.168.1.111:5555 ver (evde TV de adb'de gorunur).
+    [string]$Seri = '17df6357',
     [string]$Repo = 'C:\Users\ilkay.turna\source\repos\redmi-gateway',
     [string]$BeklenenAndroidSurum = '2.0.9',
     [int]$BeklenenVersionCode = 209,
@@ -41,7 +43,7 @@ function Kapi([string]$ad, [string]$durum, [string]$kanit) {
 }
 
 function AdbCalistir([string]$komut) {
-    return (& $Adb shell $komut 2>$null) | Out-String
+    return (& $Adb -s $Seri shell $komut 2>$null) | Out-String
 }
 
 # ---------------------------------------------------------------- repo
@@ -144,7 +146,7 @@ if ($Cihaz) {
             Kapi 'cihaz baglantisi' 'KALDI' 'Redmi (17df6357) bagli degil'
         } else {
             Kapi 'cihaz baglantisi' 'GECTI' '17df6357 device'
-            $paket = (& $Adb shell 'dumpsys package com.ilkay.redmigateway' 2>$null) | Out-String
+            $paket = (& $Adb -s $Seri shell 'dumpsys package com.ilkay.redmigateway' 2>$null) | Out-String
             $surumSatiri = ($paket -split "`n" | Where-Object { $_ -match 'versionName=' } | Select-Object -First 1)
             $kodSatiri = ($paket -split "`n" | Where-Object { $_ -match 'versionCode=' } | Select-Object -First 1)
             if ($kodSatiri -match ('versionCode=' + $BeklenenVersionCode) -and $surumSatiri -match ('versionName=' + [regex]::Escape($BeklenenAndroidSurum))) {
@@ -166,7 +168,7 @@ if ($Cihaz) {
                 Kapi 'izinler' 'KALDI' ('eksik: ' + ($eksik -join ', '))
             }
 
-            $surec = (& $Adb shell 'ps -A -o PID,STIME,NAME | grep -i redmig' 2>$null) | Out-String
+            $surec = (& $Adb -s $Seri shell 'ps -A -o PID,STIME,NAME | grep -i redmig' 2>$null) | Out-String
             if ($surec -match 'com.ilkay.redmigateway') {
                 Kapi 'uygulama sureci' 'GECTI' ($surec.Trim() -replace '\s+', ' ')
             } else {
@@ -176,7 +178,7 @@ if ($Cihaz) {
             $tanilamaYolu = '/sdcard/Android/data/com.ilkay.redmigateway/files/diagnostics/call-diagnostics.log'
             # Toybox stat bu cihazda "%Y" desteklemiyor (denendi: "stat: '%Y': No such file").
             # ls -l tek satirda boyutu ve tarihi veriyor; yas cihazin kendi saatinden hesaplanir.
-            $satir = (& $Adb shell ('ls -l ' + $tanilamaYolu) 2>$null) | Out-String
+            $satir = (& $Adb -s $Seri shell ('ls -l ' + $tanilamaYolu) 2>$null) | Out-String
             $satir = $satir.Trim()
             $desen = '^\S+\s+\d+\s+\S+\s+\S+\s+(\d+)\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s'
             if ($satir -match $desen) {
@@ -195,7 +197,7 @@ if ($Cihaz) {
             # iPhone'un kendi log ve durum akisi (build 114+): iPhone'da USB hata ayiklama yok,
             # bu yuzden tek kanit yolu Redmi'ye ittigi telemetri dosyasi.
             $iphoneYolu = '/sdcard/Android/data/com.ilkay.redmigateway/files/diagnostics/iphone-diagnostics.log'
-            $iphoneSatir = (& $Adb shell ('ls -l ' + $iphoneYolu) 2>$null) | Out-String
+            $iphoneSatir = (& $Adb -s $Seri shell ('ls -l ' + $iphoneYolu) 2>$null) | Out-String
             $iphoneSatir = $iphoneSatir.Trim()
             if ($iphoneSatir -match $desen) {
                 $iphoneBayt = [int]$matches[1]
@@ -207,7 +209,7 @@ if ($Cihaz) {
                     Kapi 'iPhone telemetrisi' 'KALDI' ($iphoneBayt.ToString() + ' bayt, son yazim ' + $iphoneYas + ' dk once')
                 }
                 if ($BeklenenIphoneBuild) {
-                    $bagliSatir = (& $Adb shell ('tail -400 ' + $iphoneYolu) 2>$null) | Out-String
+                    $bagliSatir = (& $Adb -s $Seri shell ('tail -400 ' + $iphoneYolu) 2>$null) | Out-String
                     $bulunan = ''
                     if ($bagliSatir -match 'linked app=\S+ build=(\d+)') { $bulunan = $matches[1] }
                     if ($bulunan -eq $BeklenenIphoneBuild) {
@@ -224,14 +226,18 @@ if ($Cihaz) {
 }
 
 # ---------------------------------------------------------------- hotspot kabul testi
-if ($Cihaz -and $Hotspot -and (Test-Path $Adb)) {
+# AGENTS.md 0.5: adb Wi-Fi uzerindeyken Wi-Fi kapatilirsa 'svc wifi enable' cihaza ulasamaz ve
+# Redmi agdan duser (25.10.2026). Bu test yalnizca USB ile calisir.
+if ($Cihaz -and $Hotspot -and $Seri.Contains(':')) {
+    Kapi 'hotspot otomatik' 'ATLANDI' ('adb Wi-Fi uzerinden (' + $Seri + '); Wi-Fi testi yalnizca USB ile yapilir')
+} elseif ($Cihaz -and $Hotspot -and (Test-Path $Adb)) {
     Write-Host ''
     Write-Host '=== 5) HOTSPOT KABUL TESTI (Wi-Fi ~20 s kapanir) ===' -ForegroundColor Cyan
     $wifiGeriAcmali = $true
     try {
-        & $Adb logcat -c 2>$null
+        & $Adb -s $Seri logcat -c 2>$null
         $baslangic = Get-Date
-        & $Adb shell 'svc wifi disable' 2>$null
+        & $Adb -s $Seri shell 'svc wifi disable' 2>$null
         $onSatiri = $null
         $apSatiri = $null
         $kayipSatiri = $null
@@ -239,7 +245,7 @@ if ($Cihaz -and $Hotspot -and (Test-Path $Adb)) {
         while ($deneme -lt 20 -and -not ($onSatiri -and $apSatiri)) {
             Start-Sleep -Milliseconds 700
             $deneme++
-            $kayit = (& $Adb logcat -d -v time 2>$null) | Out-String
+            $kayit = (& $Adb -s $Seri logcat -d -v time 2>$null) | Out-String
             if (-not $kayipSatiri -and ($kayit -match 'SmartHotspot.*Wi-Fi lost')) {
                 $kayipSatiri = ([regex]::Match($kayit, '(\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\s+\w/SmartHotspot.*Wi-Fi lost')).Groups[1].Value
             }
@@ -264,13 +270,13 @@ if ($Cihaz -and $Hotspot -and (Test-Path $Adb)) {
         }
     } finally {
         if ($wifiGeriAcmali) {
-            & $Adb shell 'svc wifi enable' 2>$null
+            & $Adb -s $Seri shell 'svc wifi enable' 2>$null
             $geriDeneme = 0
             $geriGeldi = $false
             while ($geriDeneme -lt 40 -and -not $geriGeldi) {
                 Start-Sleep -Milliseconds 1000
                 $geriDeneme++
-                $durum = (& $Adb shell 'cmd wifi status' 2>$null) | Out-String
+                $durum = (& $Adb -s $Seri shell 'cmd wifi status' 2>$null) | Out-String
                 if ($durum -match 'connected to') { $geriGeldi = $true }
             }
             if ($geriGeldi) {
@@ -285,7 +291,7 @@ if ($Cihaz -and $Hotspot -and (Test-Path $Adb)) {
             while ($kapanmaDeneme -lt 45 -and -not $kapandi) {
                 Start-Sleep -Seconds 1
                 $kapanmaDeneme++
-                $kapanma = (& $Adb logcat -d -v time 2>$null) | Out-String
+                $kapanma = (& $Adb -s $Seri logcat -d -v time 2>$null) | Out-String
                 if ($kapanma -match 'Known Wi-Fi in use; hotspot off') { $kapandi = $true }
             }
             if ($kapandi) {

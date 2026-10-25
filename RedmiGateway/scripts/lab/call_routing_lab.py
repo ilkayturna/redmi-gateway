@@ -20,7 +20,8 @@ import bridge_client
 from bridge_client import BridgeClient
 
 ADB = os.environ.get("ADB", r"C:\Users\ilkay.turna\platform-tools\adb.exe")
-SERIAL = os.environ.get("ADB_SERIAL", "17df6357")
+# USB serial by default; ADB_SERIAL (or adb's own ANDROID_SERIAL) for adb over Wi-Fi, e.g. 192.168.1.111:5555.
+SERIAL = os.environ.get("ADB_SERIAL") or os.environ.get("ANDROID_SERIAL") or "17df6357"
 # Running ALSA PCM substreams and their hardware parameters (read-only).
 ASOUND = ("for f in /proc/asound/card0/pcm*/sub0/status; do "
           "if grep -q RUNNING $f; then d=${f%/sub0/status}; echo \"== $d $(cat $d/info | grep -E '^id:' )\"; "

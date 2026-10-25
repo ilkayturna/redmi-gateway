@@ -23,7 +23,8 @@ import websockets
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 ADB = os.environ.get("ADB", r"C:\Users\ilkay.turna\platform-tools\adb.exe")
-SERIAL = os.environ.get("ADB_SERIAL", "17df6357")
+# USB serial by default; ADB_SERIAL (or adb's own ANDROID_SERIAL) for adb over Wi-Fi, e.g. 192.168.1.111:5555.
+SERIAL = os.environ.get("ADB_SERIAL") or os.environ.get("ANDROID_SERIAL") or "17df6357"
 PACKAGE = "com.ilkay.redmigateway"
 PREFS = f"/data/data/{PACKAGE}/shared_prefs/redmi_gateway_prefs.xml"
 PREFS_BACKUP = "/data/local/tmp/phonebridge_prefs_backup.xml"
