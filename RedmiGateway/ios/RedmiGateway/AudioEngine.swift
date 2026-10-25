@@ -511,6 +511,14 @@ final class AudioEngine {
         }
     }
 
+    /// Every call is on hold and CallKit took the session away: stops as start() does, keeping mute
+    /// and speaker, and also drops a start still waiting for the microphone, which would otherwise
+    /// bring the engine up again while nothing may play.
+    func pause() {
+        formatWait = nil
+        stop(preservingControls: true)
+    }
+
     func stop(preservingControls: Bool = false) {
         // start() calls this with preservingControls before it builds the graph; only a real stop
         // (the call ended, CallKit deactivated the session) cancels a start waiting for the format.

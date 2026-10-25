@@ -144,6 +144,10 @@ zorunda kaldı.** `teslim-kapisi.ps1 -Hotspot` de aynı hatayı yapar: `finally`
 2. `adb shell` ile başlatılan `nohup ... &` sürecine **güvenilmez**; oturum bitince ölebilir.
 3. Kendini geri alması gereken her cihaz işleminin geri alma adımı, bağlantı koptuğunda da
    çalışacağı **kanıtlanmadan** başlatılmaz.
+4. **İş bitince adb Wi-Fi bağlantısı KESİLİR** (`adb disconnect <ip>:5555`). Bağlı kalan adb sunucusu
+   (PC 192.168.1.114) TCP keepalive ile Redmi'yi ~1,3 sn'de bir uyandırdı: 25.10.2026 10:16'dan
+   itibaren saatte 2.400+ uyanma, evde boşta tüketim ~2 saatte %1'den **~32 dakikada %1'e** çıktı
+   (4 kat). Kullanıcı bunu "pil çabuk bitiyor" diye yaşar. Varsayılan bağlantı USB'dir.
 
 ## 0.6 Kurulumdan ve test aramasından ÖNCE: telefonda arama VAR MI — iki SIM yuvası birden
 

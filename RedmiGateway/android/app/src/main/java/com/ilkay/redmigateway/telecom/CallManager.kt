@@ -135,12 +135,44 @@ object CallManager {
      */
     private const val REPLACE_WINDOW_MS = 5_000L
     @Volatile private var replacing: Call? = null
-    private var replacedCall: Call? = null
+    @Volatile private var replacedCall: Call? = null
     private var replacedId: String? = null
     private var replacedNumber: String? = null
     /** The number the iPhone already shows, kept for a call that took over another call's id. */
     private val keptNumbers = ConcurrentHashMap<Call, String>()
+    /**
+     * Calls that took over another call's id. Shown as active while Telecom still says dialling: the
+     * iPhone had that id as a connected call, and "dialing" would restart its outgoing-call setup.
+     */
+    private val continuations: MutableSet<Call> = ConcurrentHashMap.newKeySet()
+    /** Replacements of a call the person hung up, being ended; never shown. */
+    private val discarded: MutableSet<Call> = ConcurrentHashMap.newKeySet()
     private val releaseReplacing = Runnable { releaseReplacingNow() }
+
+    /**
+     * The end grace for a call that ended "locally" although nothing here asked for it: when another
+     * phone merges this one into its conference, our modem itself ends the old session (RFC 3891) and
+     * the replacing call can arrive up to about a second later, past [END_GRACE_MS].
+     */
+    private const val REPLACE_GRACE_MS = 2_500L
+    /** When this side last asked Telecom to end a call (hang up, or end and answer). */
+    @Volatile private var hangupAskedAt = 0L
+    /** The grace the pending end waits for. */
+    private var endGraceMs = 0L
+
+    /** The state the iPhone sees: a continuation is never shown as dialling again. */
+    private fun visibleState(call: Call): String {
+        val state = mapCallState(call.state)
+        return if (call in continuations && (state == "dialing" || state == "connecting")) "active" else state
+    }
+
+    /** The call that just ended was ended by our own modem without a hangup asked here. */
+    private fun endedWithoutHangupHere(call: Call?): Boolean {
+        val cause = runCatching { call?.details?.disconnectCause }.getOrNull() ?: return false
+        val asked = android.os.SystemClock.elapsedRealtime() - hangupAskedAt < 5_000L
+        return !asked && (cause.code == android.telecom.DisconnectCause.LOCAL ||
+            cause.reason?.contains("IMS_MERGED_SUCCESSFULLY") == true)
+    }
 
     val isConference: Boolean
         get() = isConference(activeCall) || calls.any { isConference(it) && isCallLive(it) }
@@ -295,17 +327,26 @@ object CallManager {
             return
         }
 
-        // Added already connected, not as a conference or a part of one, and not during a merge asked
-        // for here: possibly a call replacing another one, see REPLACE_WINDOW_MS.
-        val unannounced = reuseId == null && (call.state == Call.STATE_ACTIVE || call.state == Call.STATE_HOLDING) &&
+        // Added already connected, or as a Telecom "unknown" call (no direction; AOSP attaches it as
+        // dialling first), not as a conference or a part of one, and not during a merge asked for
+        // here: possibly a call replacing another one, see REPLACE_WINDOW_MS. Calls dialled here are
+        // outgoing and calls answered here ring first, so neither is taken for one.
+        val unknownDirection = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            call.details?.callDirection == Call.Details.DIRECTION_UNKNOWN
+        val arrivedConnected = call.state == Call.STATE_ACTIVE || call.state == Call.STATE_HOLDING ||
+            (unknownDirection && (call.state == Call.STATE_DIALING || call.state == Call.STATE_CONNECTING))
+        val unannounced = reuseId == null && arrivedConnected &&
             call.parent == null && !isConference(call) && !mergeInProgress()
         // The call it replaces has already gone and its end is still inside the grace: the same id,
         // so the iPhone never hears that it ended.
-        val continuesId = if (unannounced && endPending) currentCallId else null
+        val hungUpHere = android.os.SystemClock.elapsedRealtime() - hangupAskedAt < 5_000L
+        val continuesId = if (unannounced && endPending && !hungUpHere) currentCallId else null
         val callId = reuseId ?: continuesId ?: UUID.randomUUID().toString()
         if (continuesId != null) {
             for (other in calls) if (callIds[other] == continuesId) callIds.remove(other)
-            currentPhoneNumber?.let { keptNumbers[call] = it }
+            // A conference title would stick to a plain call.
+            if (!isConference(activeCall)) currentPhoneNumber?.let { keptNumbers[call] = it }
+            continuations.add(call)
         }
         callIds[call] = callId
         calls.add(call)
@@ -407,6 +448,14 @@ object CallManager {
         callCallbacks[call] = callback
         call.registerCallback(callback)
 
+        if (unannounced && endPending && hungUpHere) {
+            // The person just hung up, and the network's replacement for that call arrived inside
+            // the end grace: it is the conversation the person left.
+            log("Call $callId arrived connected right after a hangup here; ending it too")
+            discarded.add(call)
+            runCatching { call.disconnect() }
+            return
+        }
         if (unannounced && continuesId == null) {
             val others = calls.filter { it !== call && it !== waitingCall && isCallLive(it) }
             if (others.size == 1 && waitingCall == null && replacing == null) {
@@ -461,6 +510,8 @@ object CallManager {
         calls.remove(call)
         callIds.remove(call)
         keptNumbers.remove(call)
+        continuations.remove(call)
+        discarded.remove(call)
         if (call === replacing) clearReplacing()
 
         updatePrimaryCallAndNotify("call_removed")
@@ -487,9 +538,9 @@ object CallManager {
      */
     @Synchronized
     fun snapshot(): List<CallInfo> = calls.mapNotNull { call ->
-        if (call === replacing) return@mapNotNull null
+        if (call === replacing || call in discarded) return@mapNotNull null
         val id = callIds[call] ?: return@mapNotNull null
-        val state = mapCallState(call.state)
+        val state = visibleState(call)
         if (state == "disconnected" || state == "idle") return@mapNotNull null
         val conf = isConference(call)
         val direction = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
@@ -508,7 +559,7 @@ object CallManager {
     val isMerging: Boolean get() = mergeInProgress()
 
     private fun selectPrimaryCall(): Call? {
-        val liveCalls = calls.filter { isCallLive(it) && it !== waitingCall && it !== replacing }
+        val liveCalls = calls.filter { isCallLive(it) && it !== waitingCall && it !== replacing && it !in discarded }
         if (liveCalls.isEmpty()) return null
 
         // 1. Live conference call (parent)
@@ -547,6 +598,13 @@ object CallManager {
         }
         val old = replacedCall
         if (old != null && calls.contains(old) && isCallLive(old)) return
+        if (android.os.SystemClock.elapsedRealtime() - hangupAskedAt < 5_000L) {
+            // The person hung up the old call (hangup() ends the replacement with it); a replacement
+            // that is somehow still there shows up as a call of its own instead of reviving the id.
+            log("Call $replacedId was hung up here; call ${callIds[candidate]} does not take over its id")
+            clearReplacing()
+            return
+        }
         val oldId = replacedId
         val number = replacedNumber
         clearReplacing()
@@ -556,6 +614,7 @@ object CallManager {
         if (old != null && callIds[old] == oldId) callIds.remove(old)
         callIds[candidate] = oldId
         number?.let { keptNumbers[candidate] = it }
+        continuations.add(candidate)
         log("Call $oldId ended and call $newId, added already connected, replaces it; it goes on as $oldId")
     }
 
@@ -587,7 +646,7 @@ object CallManager {
         if (primary != null) {
             activeCall = primary
             currentCallId = callIds[primary] ?: UUID.randomUUID().toString().also { callIds[primary] = it }
-            val realState = mapCallState(primary.state)
+            val realState = visibleState(primary)
             // An answer already announced to the other phone stands until Telecom confirms it. A
             // "ringing" event arriving in that window is stale: publishing it would restart the
             // ringer on the phone that just answered.
@@ -627,10 +686,21 @@ object CallManager {
             // A waiting call keeps the old immediate path: "end and answer" promotes it from here.
             if ((activeCall != null || currentCallState != "idle") && waitingCall == null) {
                 if (!endPending) {
-                    val grace = if (mergeInProgress()) MERGE_GRACE_MS else END_GRACE_MS
+                    val grace = when {
+                        mergeInProgress() -> MERGE_GRACE_MS
+                        endedWithoutHangupHere(activeCall) -> REPLACE_GRACE_MS
+                        else -> END_GRACE_MS
+                    }
                     endPending = true
+                    endGraceMs = grace
                     log("No live call ($reason); waiting $grace ms for a merged or replacing call before ending")
                     mainHandler.postDelayed(confirmEnd, grace)
+                } else if (endGraceMs < REPLACE_GRACE_MS && endedWithoutHangupHere(activeCall)) {
+                    // The disconnect cause arrives with DISCONNECTED, after the grace was chosen.
+                    endGraceMs = REPLACE_GRACE_MS
+                    mainHandler.removeCallbacks(confirmEnd)
+                    mainHandler.postDelayed(confirmEnd, REPLACE_GRACE_MS)
+                    log("The call ended without a hangup asked here; waiting $REPLACE_GRACE_MS ms for a replacing call")
                 }
                 return
             }
@@ -766,6 +836,7 @@ object CallManager {
             if (current == null) {
                 promoteWaiting()
             } else if (current.state != Call.STATE_DISCONNECTED && current.state != Call.STATE_DISCONNECTING) {
+                hangupAskedAt = android.os.SystemClock.elapsedRealtime()
                 runCatching { current.disconnect() }
             }
             return true
@@ -904,8 +975,16 @@ object CallManager {
 
         if (call != null && isCallLive(call)) {
             log("Executing HANGUP / DISCONNECT on call: ${callIds[call]} (conference=${isConference(call)})")
+            hangupAskedAt = android.os.SystemClock.elapsedRealtime()
+            // A call that may be replacing this one is still kept out of the list; the person hung up
+            // the conversation, so it goes too.
+            val replacement = replacing?.takeIf { call === replacedCall && isCallLive(it) }
             return try {
                 call.disconnect()
+                replacement?.let {
+                    log("Also ending call ${callIds[it]}, which may have been replacing it")
+                    runCatching { it.disconnect() }
+                }
                 if (isConference(call)) {
                     for (child in call.children.orEmpty()) {
                         if (isCallLive(child)) {
@@ -920,6 +999,7 @@ object CallManager {
             }
         } else if (calls.any { isCallLive(it) }) {
             log("Executing HANGUP on all remaining live calls (${calls.size})")
+            hangupAskedAt = android.os.SystemClock.elapsedRealtime()
             var anyDisconnected = false
             for (c in calls) {
                 if (isCallLive(c)) {
