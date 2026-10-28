@@ -71,8 +71,6 @@ final class AudioEngine {
     private var recoveryRequested = false
     /// Playback budget drops are silent; the diagnostics log has to show them to be fixable.
     private var loggedPlaybackDrops = 0
-    /// True once voice processing has been configured early, so warm-up never pays for it twice.
-    private var voiceProcessingWarmed = false
     /// Repeat every uplink frame in the next packet; see setUplinkRedundancy.
     private var uplinkRedundancy = false
     private var lastSentPcm: Data?
@@ -148,7 +146,6 @@ final class AudioEngine {
 
     func resetSessionPrepared() {
         isSessionPrepared = false
-        voiceProcessingWarmed = false
     }
 
     /// Repeats every uplink frame once, in the packet that follows it.
@@ -176,11 +173,10 @@ final class AudioEngine {
         AVAudioSession.sharedInstance().recordPermission == .granted
     }
 
-    /// Builds the parts of the call-audio graph that do not depend on the active session, so the
-    /// start after CallKit activates it only has to run engine.start(). Nothing captures audio
-    /// here: the engine stays stopped, so there is no microphone use, no indicator and no CPU while
-    /// the phone is idle. The format-dependent steps stay in start(), because activating the
-    /// session can still change the input format.
+    /// Prepares the stopped graph without changing the input unit. Voice processing stays in
+    /// start(), after CallKit has activated the session, so warm-up cannot reconfigure the input
+    /// before activation. Nothing captures audio here: the engine stays stopped, so there is no
+    /// microphone use, no indicator and no CPU while the phone is idle.
     func warmUp() {
         guard !running else { return }
         // A start is waiting for the input format; touching the input node now is the churn that
@@ -191,19 +187,9 @@ final class AudioEngine {
         }
         let began = Date()
         _ = engine.inputNode
-        if !voiceProcessingWarmed {
-            do {
-                try engine.inputNode.setVoiceProcessingEnabled(true)
-                voiceProcessingWarmed = true
-            } catch {
-                // The session may not accept voice processing before CallKit activates it; the
-                // start path configures it exactly as it always did.
-                log("Audio path: voice processing warm-up skipped: \(error.localizedDescription)")
-            }
-        }
         engine.prepare()
         let ms = Int(Date().timeIntervalSince(began) * 1000)
-        log("Audio path: warm-up \(voiceProcessingWarmed ? "done" : "partial") in \(ms) ms (engine stopped)")
+        log("Audio path: warm-up done in \(ms) ms (voice processing deferred, engine stopped)")
     }
 
     /// CallKit activates the audio session; its policy is set before a call is reported.
@@ -293,11 +279,14 @@ final class AudioEngine {
         captureLock.unlock()
         do {
             let input = engine.inputNode
-            // Voice processing is the expensive part of this setup the first time (hundreds of
-            // milliseconds). warmUp() pays that while the phone is still ringing; this call stays
-            // unconditional, so a warm-up that the idle session refused changes nothing here.
             let vpBegan = Date()
-            try? input.setVoiceProcessingEnabled(true)
+            do {
+                try input.setVoiceProcessingEnabled(true)
+            } catch {
+                let vpError = error as NSError
+                log("Voice processing could not be enabled: code=\(vpError.code) " +
+                    "description=\(vpError.localizedDescription)")
+            }
             let vpMs = Int(Date().timeIntervalSince(vpBegan) * 1000)
             let inputFormat = input.outputFormat(forBus: 0)
             guard inputFormat.sampleRate > 0,
