@@ -96,6 +96,8 @@ final class AudioEngine {
     private(set) var isSessionPrepared = false
     /// The one start that is waiting for the input node to report a format; see start().
     private var formatWait: (host: String, port: UInt16, session: UInt32, key: Data, force: Bool)?
+    /// Bounded wait for the engine's first render cycle before player.play(); see start().
+    private var playerStartWait: DispatchWorkItem?
     /// True while a start waits for this iPhone's microphone; asking the Redmi again cannot help then.
     var isWaitingForInput: Bool { formatWait != nil }
     /// The Swift flag can outlive the actual engine: an audio-route change stops AVAudioEngine
@@ -373,9 +375,8 @@ final class AudioEngine {
             let startBegan = Date()
             try engine.start()
             let startMs = Int(Date().timeIntervalSince(startBegan) * 1000)
-            player.play()
             running = true
-            log("Audio engine: vp=\(vpMs) ms start=\(startMs) ms")
+            startPlayerAfterFirstRender(generation: generation, vpMs: vpMs, startMs: startMs)
             if isSpeakerEnabled { try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker) }
         } catch {
             log("Audio engine start failed: \(error.localizedDescription)")
@@ -486,6 +487,46 @@ final class AudioEngine {
         }
     }
 
+    /// Starting the player in the same turn as the engine was what aborted build 153 on every
+    /// "iPhone'a al" (29.10.2026): play() raised "player did not see an IO cycle", an Objective-C
+    /// exception Swift cannot catch. The node's first render time says an IO cycle has happened,
+    /// and only then is play() safe. The wait is bounded and on the main queue; if no cycle comes,
+    /// recovery rebuilds the graph instead of risking the exception.
+    private func startPlayerAfterFirstRender(generation: UInt64, vpMs: Int, startMs: Int,
+                                             attempt: Int = 0) {
+        guard running, engine.isRunning else {
+            playerStartWait = nil
+            log("Audio player not started: the engine stopped while waiting for its first render")
+            return
+        }
+        captureLock.lock()
+        let currentGeneration = capturePacer.generation
+        captureLock.unlock()
+        guard currentGeneration == generation else {
+            playerStartWait = nil
+            log("Audio player not started: the call audio was rebuilt meanwhile")
+            return
+        }
+        guard player.lastRenderTime != nil else {
+            guard attempt < 200 else {
+                playerStartWait = nil
+                log("Audio player not started: no IO cycle within 2 s; asking recovery to rebuild")
+                requestRecovery("the player saw no IO cycle")
+                return
+            }
+            let work = DispatchWorkItem { [weak self] in
+                self?.startPlayerAfterFirstRender(generation: generation, vpMs: vpMs,
+                                                  startMs: startMs, attempt: attempt + 1)
+            }
+            playerStartWait = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01, execute: work)
+            return
+        }
+        playerStartWait = nil
+        player.play()
+        log("Audio engine: vp=\(vpMs) ms start=\(startMs) ms render wait=\(attempt * 10) ms")
+    }
+
     /// One deliberate reset of the input unit while it reports no format: a clean voice-processing
     /// unit instead of the state that repeated on/off switching left behind. Done twice per wait.
     private func resetInputUnit(attempt: Int) {
@@ -512,6 +553,8 @@ final class AudioEngine {
         // start() calls this with preservingControls before it builds the graph; only a real stop
         // (the call ended, CallKit deactivated the session) cancels a start waiting for the format.
         if !preservingControls { formatWait = nil }
+        playerStartWait?.cancel()
+        playerStartWait = nil
         captureLock.lock()
         capturePacer.reset()
         // schedulePlayback uses this lock too: no old receive can schedule a buffer
