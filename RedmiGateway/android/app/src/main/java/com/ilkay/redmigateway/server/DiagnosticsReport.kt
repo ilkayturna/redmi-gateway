@@ -3,13 +3,17 @@ package com.ilkay.redmigateway.server
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.telecom.TelecomManager
 import com.ilkay.redmigateway.BuildConfig
 import com.ilkay.redmigateway.audio.CallAudioRelay
 import com.ilkay.redmigateway.ble.BleServerManager
 import com.ilkay.redmigateway.security.PairingStore
 import com.ilkay.redmigateway.service.GatewayService
+import com.ilkay.redmigateway.service.HealthReporter
+import com.ilkay.redmigateway.service.InstallState
 import com.ilkay.redmigateway.telecom.CallManager
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
@@ -56,11 +60,22 @@ object DiagnosticsReport {
     fun build(context: Context): JSONObject {
         val telecom = context.getSystemService(TelecomManager::class.java)
         val paired = PairingStore.pairedClient()
+        val problems = HealthReporter.problems(context)
         return JSONObject()
             .put("app", JSONObject()
                 .put("version", BuildConfig.VERSION_NAME)
                 .put("build", BuildConfig.VERSION_CODE)
                 .put("protocol", GatewayWebSocketServer.PROTOCOL))
+            // The ROM identifies itself nowhere else in the report, and "which build was this?"
+            // is the first question after a silent update took the vendor fix away.
+            .put("rom", JSONObject()
+                .put("incremental", Build.VERSION.INCREMENTAL)
+                .put("display", Build.DISPLAY)
+                .put("fingerprint", Build.FINGERPRINT)
+                .put("sdk", Build.VERSION.SDK_INT))
+            .put("install", JSONObject()
+                .put("privApp", InstallState.privAppPresent())
+                .put("systemApp", (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0))
             .put("service", JSONObject()
                 .put("running", GatewayService.isRunning)
                 .put("clients", GatewayService.authenticatedClientCount())
@@ -84,6 +99,9 @@ object DiagnosticsReport {
                 .put("key", com.ilkay.redmigateway.push.ApnsSender.hasKey)
                 .put("iphoneRegistered", com.ilkay.redmigateway.push.ApnsSender.hasDeviceToken)
                 .put("alertsRegistered", com.ilkay.redmigateway.push.ApnsSender.hasAlertToken))
+            // Stable codes, not sentences: this is what a support reader greps for, and it says
+            // what is broken without the settings screen having to be photographed.
+            .put("problems", JSONArray(problems.map { it.code }))
             .put("permissions", JSONObject().apply {
                 for (k in permissionKeys()) put(k, context.checkSelfPermission(permissionFor(k)) == PackageManager.PERMISSION_GRANTED)
             })

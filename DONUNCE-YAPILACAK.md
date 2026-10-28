@@ -43,6 +43,21 @@ başlatıyor → eski **"helikopter" sesi** (= kullanıcının "cızırtı" dedi
 
 **ROM güncellemesi `/vendor`'u değiştirirse düzeltme kaybolur.**
 
+### 2.0.15'ten sonra: kayıp artık sessiz değil
+
+- Uygulama her açılışta (boot / güncelleme / servis başlangıcı) `/vendor` düzeltmesini, priv-app
+  kurulumunu ve ayrıcalıklı izinleri kendisi denetler.
+- Eksik varsa **yüksek öncelikli bildirim** çıkar: "iPhone sesi çalışmaz" + hangi parça eksik.
+  Ayarlar ekranının en üstünde kırmızı şerit ve **"Onarım paketini oluştur"** düğmesi olur.
+- Paket `İndirilenler/RedmiGateway-Onarim-<sürüm>.zip` olarak yazılır; içinde `apply.sh`,
+  `vendor_audio_fix.py`, uygulamanın kendi APK'sı, `privapp-permissions` dosyası ve ROM
+  derleyicisi için `device.mk` parçası vardır.
+- Uygulama `/vendor` veya `/system` yazamaz (root yok); bu yüzden paket **kurtarma modunda**
+  `bash apply.sh` ile uygulanır. ROM'a gömülürse bir daha gerek kalmaz.
+- 28.10.2026'da bu OTA yaşandı ve aynı gün onarıldı: ölçümler, kurtarma dersleri ve adımlar
+  `docs/OTA-ONARIM-20261028.md`. Bootloader kilitli değil (`verifiedbootstate=orange`); kilit
+  sanılan şey root'un olmamasıydı.
+
 ### Kontrol (iki yol, biri yeter)
 
 **A) Redmi ekranından:** Ayarlar (sağ üstteki dişli) → **"iPhone ses kanalı (SIM 2)"**
@@ -57,6 +72,8 @@ cd C:\Users\ilkay.turna\source\repos\redmi-gateway\RedmiGateway
 python scripts\device\vendor_audio_fix.py status
 ```
 Beklenen: `mixer path fixed: True; platform mapping fixed: True`
+
+`status` **root istemez** (yalnızca `/vendor` okur); `apply`/`revert` root ister.
 
 **Düzeltme yoksa:**
 ```

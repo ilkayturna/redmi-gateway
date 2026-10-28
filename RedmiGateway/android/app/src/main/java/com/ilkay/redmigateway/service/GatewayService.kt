@@ -131,6 +131,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
                     handler.removeCallbacks(restoreHotspot)
                     handler.postDelayed(restoreHotspot, 10_000L)
                 }
+                reportHealth()
             }
             ACTION_STOP -> stopGateway()
         }
@@ -272,6 +273,22 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
             val manager = getSystemService(NotificationManager::class.java)
             manager?.createNotificationChannel(channel)
         }
+    }
+
+    /**
+     * Once per service start: did the ROM change, and can the phone still carry call audio?
+     *
+     * This is the only place the loss of a precondition is announced without the user opening a
+     * screen. A failure here must not take the service down with it — the gateway still carries
+     * calls without the sound, and a crash would take those away too.
+     */
+    private fun reportHealth() {
+        runCatching {
+            val build = "${Build.VERSION.INCREMENTAL}|${Build.DISPLAY}"
+            val romChanged = UpdateWatch.check(this, build)
+            if (romChanged) CallManager.log("ROM build changed: $build")
+            HealthReporter.publish(this, romChanged)
+        }.onFailure { Log.w(TAG, "Health check failed", it) }
     }
 
     private fun buildNotification(text: String): Notification {

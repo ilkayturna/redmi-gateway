@@ -10,10 +10,16 @@ The fix makes slot 2 use the same, already-valid front end as slot 1:
   audio_platform_info_intcodec.xml: add USECASE_INCALL_MUSIC_UPLINK2 -> PCM 27
   mixer_paths_idp.xml:              incall_music_uplink2 -> Incall_Music_2 Audio Mixer MultiMedia9
 
-Needs adb running as root with /vendor mounted read-write (true on this ROM).
-Originals are kept on the device in /vendor/etc/phonebridge-backup/ and restored by "revert".
+Needs adb running as root with the vendor partition mounted read-write.
+Originals are kept on the device in <vendor>/etc/phonebridge-backup/ and restored by "revert".
+
+In recovery the real vendor partition must not be mounted over /vendor: recovery's
+/system/bin/sh is a symlink to /vendor/bin/sh, and the vendor image's /vendor/bin/sh points
+back to /system/bin/sh, so a stacked mount turns the shell into a symlink loop (measured
+2026-10-28). The repair kit mounts the partition at /mnt/rg-vendor and passes VENDOR_ROOT.
 
 usage: python vendor_audio_fix.py status|apply|revert
+       VENDOR_ROOT=/mnt/rg-vendor python vendor_audio_fix.py apply
 """
 import os
 import subprocess
@@ -23,9 +29,10 @@ import tempfile
 ADB = os.environ.get("ADB", r"C:\Users\ilkay.turna\platform-tools\adb.exe")
 # USB serial by default; ADB_SERIAL (or adb's own ANDROID_SERIAL) for adb over Wi-Fi, e.g. 192.168.1.111:5555.
 SERIAL = os.environ.get("ADB_SERIAL") or os.environ.get("ANDROID_SERIAL") or "17df6357"
-MIXER = "/vendor/etc/mixer_paths_idp.xml"
-PLATFORM = "/vendor/etc/audio_platform_info_intcodec.xml"
-BACKUP_DIR = "/vendor/etc/phonebridge-backup"
+VENDOR_ROOT = (os.environ.get("VENDOR_ROOT") or "/vendor").rstrip("/") or "/vendor"
+MIXER = VENDOR_ROOT + "/etc/mixer_paths_idp.xml"
+PLATFORM = VENDOR_ROOT + "/etc/audio_platform_info_intcodec.xml"
+BACKUP_DIR = VENDOR_ROOT + "/etc/phonebridge-backup"
 LABEL = "u:object_r:vendor_configs_file:s0"
 
 MIXER_OLD = '<ctl name="Incall_Music_2 Audio Mixer MultiMedia2" value="1" />'
@@ -80,9 +87,14 @@ def restart_audio_hal():
 
 def main():
     action = sys.argv[1] if len(sys.argv) > 1 else "status"
-    if "root" not in shell("id"):
-        sys.exit("adb is not running as root")
-    if shell("mount | grep -c -E 'mixer_paths_idp|audio_platform_info'", check=False).strip() not in ("", "0"):
+    if action not in ("status", "apply", "revert"):
+        sys.exit(__doc__)
+    # status only reads /vendor, which is world-readable: after a ROM update the phone is
+    # unrooted, and that is exactly when someone needs to ask whether the fix survived. apply and
+    # revert write /vendor and still need adb running as root.
+    if action != "status" and "root" not in shell("id"):
+        sys.exit("adb is not running as root; 'status' works without root, apply/revert do not")
+    if action != "status" and shell("mount | grep -c -E 'mixer_paths_idp|audio_platform_info'", check=False).strip() not in ("", "0"):
         sys.exit("temporary bind mounts are active; unmount them first")
     mixer, platform, mixer_fixed, platform_fixed = state()
     print(f"mixer path fixed: {mixer_fixed}; platform mapping fixed: {platform_fixed}")
@@ -105,13 +117,15 @@ def main():
         indent = prefix.rsplit("\n", 1)[1] if "\n" in prefix else prefix
         push(platform.replace(PLATFORM_ANCHOR, PLATFORM_ANCHOR + "\n" + indent + PLATFORM_LINE), PLATFORM)
         shell("sync")
-        restart_audio_hal()
+        if VENDOR_ROOT == "/vendor":
+            restart_audio_hal()
     elif action == "revert":
         shell(f"test -f {BACKUP_DIR}/mixer_paths_idp.xml && test -f {BACKUP_DIR}/audio_platform_info_intcodec.xml")
         for name, path in (("mixer_paths_idp.xml", MIXER), ("audio_platform_info_intcodec.xml", PLATFORM)):
             shell(f"cat {BACKUP_DIR}/{name} > {path} && chcon {LABEL} {path}")
         shell("sync")
-        restart_audio_hal()
+        if VENDOR_ROOT == "/vendor":
+            restart_audio_hal()
     else:
         sys.exit(__doc__)
     _, _, mixer_fixed, platform_fixed = state()

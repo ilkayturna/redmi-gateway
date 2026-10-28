@@ -46,6 +46,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var codeView: TextView
     private lateinit var pairedView: TextView
     private lateinit var statusList: LinearLayout
+    private lateinit var healthBanner: MaterialCardView
+    private lateinit var healthTitle: TextView
+    private lateinit var healthDetail: TextView
     private lateinit var remoteStatus: TextView
     private lateinit var iphoneTitle: TextView
     private lateinit var iphoneDetail: TextView
@@ -74,6 +77,34 @@ class MainActivity : AppCompatActivity() {
         title = "Ayarlar"
 
         content.addView(heading("Ayarlar"))
+
+        // The preconditions for iPhone audio live outside the app, in partitions a ROM update
+        // replaces. When one is gone this is the first thing on the screen, above the normal
+        // status, because every row below it can look healthy while calls have no sound.
+        healthBanner = MaterialCardView(this).apply {
+            radius = dp(16).toFloat()
+            cardElevation = 0f
+            strokeWidth = dp(2)
+            strokeColor = color(R.color.status_bad)
+            setCardBackgroundColor(color(R.color.bg_card))
+            layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(16) }
+            visibility = View.GONE
+        }
+        val healthInner = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(12))
+        }
+        healthTitle = TextView(this).apply {
+            setTextAppearance(com.google.android.material.R.style.TextAppearance_MaterialComponents_Headline6)
+            setTextColor(color(R.color.status_bad))
+        }
+        healthDetail = body("")
+        healthInner.addView(healthTitle)
+        healthInner.addView(healthDetail)
+        healthInner.addView(button("Ne yapmalıyım?", outlined = true) { showHealthSteps() })
+        healthInner.addView(button("Onarım paketini oluştur", outlined = false) { exportRepairKit() })
+        healthBanner.addView(healthInner)
+        content.addView(healthBanner)
 
         // How the iPhone is reached right now (network, Bluetooth while it sleeps, or Apple push).
         val link = section("iPhone bağlantısı")
@@ -187,12 +218,8 @@ class MainActivity : AppCompatActivity() {
         val status = section("Durum")
         statusList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         status.addView(statusList)
-        status.addView(button("Tanılama raporunu kopyala", outlined = true) {
-            val report = DiagnosticsReport.build(this).toString(2)
-            getSystemService(ClipboardManager::class.java)
-                .setPrimaryClip(ClipData.newPlainText("Telefon Geçidi tanılama", report))
-            Toast.makeText(this, "Rapor kopyalandı (numara ve mesaj içermez)", Toast.LENGTH_SHORT).show()
-        })
+        status.addView(button("Tanılama raporunu kopyala", outlined = true) { copyDiagnostics() })
+        status.addView(button("Onarım paketini oluştur", outlined = true) { exportRepairKit() })
         status.addView(button("Geçidi yeniden başlat", outlined = true) { restartGateway() })
 
         // Call diagnostics: the phone travels without the computer, so the log has to be
@@ -272,6 +299,13 @@ class MainActivity : AppCompatActivity() {
             "Eşleşmiş: ${paired.name} · ${DateFormat.format("d MMM yyyy HH:mm", Date(paired.pairedAt))}"
 
         val report = DiagnosticsReport.build(this)
+        val problems = com.ilkay.redmigateway.service.HealthReporter.problems(this)
+        healthBanner.visibility = if (problems.isEmpty()) View.GONE else View.VISIBLE
+        if (problems.isNotEmpty()) {
+            val audioBroken = com.ilkay.redmigateway.service.HealthCheck.audioCritical(problems).isNotEmpty()
+            healthTitle.text = if (audioBroken) "iPhone sesi çalışmaz" else "Eksik ayar var"
+            healthDetail.text = problems.joinToString("\n") { "• ${it.title}" }
+        }
         statusList.removeAllViews()
         val service = report.getJSONObject("service")
         val audio = report.getJSONObject("audio")
@@ -284,6 +318,17 @@ class MainActivity : AppCompatActivity() {
         row("Görüşme sesi", ownerText(audio.optString("owner")), true)
         val fix = audio.optBoolean("vendorFix")
         row("iPhone ses kanalı (SIM 2)", if (fix) "Hazır" else "Düzeltme yok — iPhone sesi çalışmaz", fix)
+        val privApp = com.ilkay.redmigateway.service.InstallState.privAppPresent()
+        val privilegedMissing = com.ilkay.redmigateway.service.HealthCheck.missingPrivileged(
+            com.ilkay.redmigateway.service.HealthCheck.requiredPrivilegedPermissions.associateWith {
+                checkSelfPermission(it) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            }
+        )
+        row("Ayrıcalıklı kurulum", if (privApp) "Evet" else "Hayır — ses izinleri verilemez", privApp)
+        row("Ses izinleri (ayrıcalıklı)",
+            if (privilegedMissing.isEmpty()) "Tamam" else "Eksik: ${privilegedMissing.joinToString { it.substringAfterLast('.') }}",
+            privilegedMissing.isEmpty())
+        row("ROM", "${Build.VERSION.INCREMENTAL} · ${Build.DISPLAY}", true)
         row("Bluetooth", if (ble.optBoolean("running")) "Açık · ${ble.optInt("centrals")} bağlantı" else "Kapalı", ble.optBoolean("running"))
         row("Ağ bağlantısı", if (service.getInt("clients") > 0) "Açık" else "Uykuda (iPhone açınca kurulur)", true)
         val battery = getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
@@ -308,6 +353,53 @@ class MainActivity : AppCompatActivity() {
 
     private fun missingPermissions(permissions: JSONObject): String =
         permissions.keys().asSequence().filter { !permissions.getBoolean(it) }.joinToString(", ")
+
+    private fun copyDiagnostics() {
+        val report = DiagnosticsReport.build(this).toString(2)
+        getSystemService(ClipboardManager::class.java)
+            .setPrimaryClip(ClipData.newPlainText("Telefon Geçidi tanılama", report))
+        Toast.makeText(this, "Rapor kopyalandı (numara ve mesaj içermez)", Toast.LENGTH_SHORT).show()
+    }
+
+    /** What the red banner's problems mean and what puts each of them back. */
+    private fun showHealthSteps() {
+        val problems = com.ilkay.redmigateway.service.HealthReporter.problems(this)
+        if (problems.isEmpty()) return
+        val message = problems.joinToString("\n\n") { "${it.title}\n${it.detail}\n→ ${it.fix}" }
+        AlertDialog.Builder(this)
+            .setTitle("Eksikleri giderme")
+            .setMessage(message)
+            .setPositiveButton("Tamam", null)
+            .show()
+    }
+
+    /**
+     * Writes the repair package to Downloads.
+     *
+     * Building it copies the installed APK (7 MB), so it runs off the main thread; the screen
+     * keeps refreshing while it is written.
+     */
+    private fun exportRepairKit() {
+        Toast.makeText(this, "Onarım paketi hazırlanıyor…", Toast.LENGTH_SHORT).show()
+        val problems = com.ilkay.redmigateway.service.HealthReporter.problems(this)
+        Thread {
+            val result = runCatching { com.ilkay.redmigateway.service.RepairKit.write(this, problems) }
+            runOnUiThread {
+                result.onSuccess {
+                    AlertDialog.Builder(this)
+                        .setTitle("Onarım paketi hazır")
+                        .setMessage("İndirilenler klasöründe RedmiGateway-Onarim-" +
+                            "${com.ilkay.redmigateway.BuildConfig.VERSION_NAME}.zip\n\n" +
+                            "Telefonu kurtarma modunda açıp bilgisayarda paketin içindeki apply.sh " +
+                            "dosyasını çalıştır. Adımlar paketin README.txt dosyasında.")
+                        .setPositiveButton("Tamam", null)
+                        .show()
+                }.onFailure { error ->
+                    Toast.makeText(this, "Paket oluşturulamadı: ${error.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
 
     private fun restartGateway() {
         startService(Intent(this, GatewayService::class.java).setAction(GatewayService.ACTION_STOP))
