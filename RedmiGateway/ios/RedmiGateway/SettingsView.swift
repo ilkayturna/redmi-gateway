@@ -117,6 +117,7 @@ struct SettingsView: View {
                         LabeledRow(title: "Eşleşme", value: pairing.pairedAt.formatted(date: .abbreviated, time: .omitted))
                     }
                 }
+                RedmiStatusSection()
                 Section(header: Text("Aramalar"),
                         footer: Text("Konum iznini \"Her Zaman\" yaparsan, uygulamayı kaydırıp kapatsan bile gelen aramalar iPhone'da çalar. Yalnızca Redmi'nin yakınlığı algılanır; konumun okunmaz ve kaydedilmez.")) {
                     LabeledRow(title: "Uygulama kapalıyken aramalar", value: wakeText,
@@ -213,6 +214,105 @@ struct SettingsView: View {
     }
 }
 
+/// "Redmi durumu": what the Redmi last reported about itself, and how long this TestFlight build
+/// still opens. The Redmi stays in a pocket and nobody reads its screen, so its problems, battery,
+/// ROM and updater are read here; RedmiHealthBanner points here when something needs action.
+struct RedmiStatusSection: View {
+    @ObservedObject private var connection = GatewayConnection.shared
+
+    var body: some View {
+        Section(header: Text("Redmi durumu"),
+                footer: Text("TestFlight sürümü yüklendikten 90 gün sonra açılmaz; süre bitmeden yeni sürüm yüklenmeli.")) {
+            if let health = connection.redmiHealth {
+                rows(for: health)
+            } else {
+                Text("Redmi henüz durum bildirmedi. Redmi uygulaması güncellenince sorunlar, pil ve ROM burada görünür.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+            LabeledRow(title: "iPhone uygulamasının süresi", value: testFlightText, valueColor: testFlightColor)
+        }
+    }
+
+    @ViewBuilder
+    private func rows(for health: RedmiHealth) -> some View {
+        if health.problems.isEmpty {
+            LabeledRow(title: "Sorun", value: "Yok", valueColor: .green)
+        } else {
+            ForEach(Array(health.problems.enumerated()), id: \.offset) { _, problem in
+                RedmiProblemRow(problem: problem)
+            }
+        }
+        LabeledRow(title: "Pil", value: batteryText(health),
+                   valueColor: health.batteryNeedsCharging ? .orange : .secondary)
+        LabeledRow(title: "ROM", value: health.romDisplay ?? "Bilinmiyor")
+        if let changed = health.romChangedAt {
+            LabeledRow(title: "ROM değişimi", value: changed.formatted(date: .abbreviated, time: .shortened))
+        }
+        LabeledRow(title: "Sistem güncelleyici", value: updaterText(health),
+                   valueColor: health.updater?.enabled == true ? .orange : .secondary)
+        if health.updater?.enabled == true {
+            Text("Otomatik ROM güncellemesi Redmi'deki ses düzeltmesini siler. Güncelleyiciyi kapalı tut.")
+                .font(.footnote)
+                .foregroundColor(.orange)
+        }
+        if let adbWifi = health.adbWifi {
+            LabeledRow(title: "Kablosuz hata ayıklama", value: adbWifi ? "Açık" : "Kapalı")
+        }
+        if let evaluated = health.evaluatedAt {
+            LabeledRow(title: "Son bilgi", value: evaluated.formatted(date: .omitted, time: .shortened))
+        }
+    }
+
+    private func batteryText(_ health: RedmiHealth) -> String {
+        guard let level = health.battery?.level else { return "Bilinmiyor" }
+        return health.battery?.charging == true ? "%\(level) · şarj oluyor" : "%\(level)"
+    }
+
+    private func updaterText(_ health: RedmiHealth) -> String {
+        guard let updater = health.updater else { return "Bilinmiyor" }
+        if updater.present == false { return "Yok" }
+        switch updater.enabled {
+        case .some(true): return "Açık"
+        case .some(false): return "Kapalı"
+        case .none: return "Bilinmiyor"
+        }
+    }
+
+    private var testFlightText: String {
+        guard let days = GatewayConnection.testFlightDaysLeft else { return "Bilinmiyor" }
+        return days > 0 ? "\(days) gün" : "Süresi doldu"
+    }
+
+    private var testFlightColor: Color {
+        guard let days = GatewayConnection.testFlightDaysLeft else { return .secondary }
+        if days <= 7 { return .red }
+        if days <= 21 { return .orange }
+        return .secondary
+    }
+}
+
+/// One problem the Redmi reported: what it is, what it breaks and how to fix it.
+private struct RedmiProblemRow: View {
+    let problem: RedmiHealth.Problem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(problem.title ?? problem.code ?? "Sorun",
+                  systemImage: problem.audioCritical ? "exclamationmark.triangle.fill" : "exclamationmark.circle")
+                .foregroundColor(problem.audioCritical ? .red : .orange)
+            if let detail = problem.detail, !detail.isEmpty {
+                Text(detail).font(.footnote)
+            }
+            if let fix = problem.fix, !fix.isEmpty {
+                Text(fix).font(.footnote).foregroundColor(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// Advanced and Diagnostics: technical detail and the manual address. Never needed day to day.
 struct DiagnosticsView: View {
     @ObservedObject private var connection = GatewayConnection.shared
@@ -299,6 +399,7 @@ struct DiagnosticsView: View {
     private var fullReport: String {
         var lines = ["Telefon Geçidi iPhone \(appVersion)", "state=\(connection.state.rawValue) protocol=\(protocolText)",
                      "wifi=\(connection.isWiFiConnected) ble=\(ble.isConnected)"]
+        if let health = connection.redmiHealth { lines.append("redmiHealth " + health.summary) }
         if let report = connection.remoteDiagnostics { lines.append(report) }
         lines.append(contentsOf: connection.logs)
         return lines.joined(separator: "\n")

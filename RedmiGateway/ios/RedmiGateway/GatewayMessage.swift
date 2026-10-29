@@ -66,11 +66,169 @@ public struct CallEventMessage: Codable {
 struct ErrorMessage: Decodable {
     let code: String?
     let message: String?
+    /// The command an `unknown_command` error answers.
+    let command: String?
 }
 
 struct AckMessage: Decodable {
     let action: String
     let success: Bool
+    /// `client_diag` acks name the payload and the part they confirm, and why a part was refused.
+    let id: String?
+    let part: Int?
+    let error: String?
+}
+
+/// The Redmi's health (`health`, Redmi -> iPhone, docs/PROTOCOL.md): the problems it found, its
+/// ROM, battery and system updater. Sent right after authentication and again on every change.
+///
+/// Read leniently: every field is optional and a field of an unexpected type is skipped, so a
+/// newer Redmi that adds or reshapes something never costs the whole snapshot.
+struct RedmiHealth: Decodable, Equatable {
+    struct Problem: Decodable, Equatable {
+        let code: String?
+        /// Call audio on the iPhone does not work while this problem exists.
+        let audioCritical: Bool
+        let title: String?
+        let detail: String?
+        let fix: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case code, audioCritical, title, detail, fix
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            code = try? container.decodeIfPresent(String.self, forKey: .code)
+            audioCritical = (try? container.decodeIfPresent(Bool.self, forKey: .audioCritical)) ?? false
+            title = try? container.decodeIfPresent(String.self, forKey: .title)
+            detail = try? container.decodeIfPresent(String.self, forKey: .detail)
+            fix = try? container.decodeIfPresent(String.self, forKey: .fix)
+        }
+    }
+
+    struct Rom: Decodable, Equatable {
+        /// `Build.VERSION.INCREMENTAL|Build.DISPLAY`.
+        let build: String?
+        let previous: String?
+        /// When the Redmi first saw this build (ms since 1970).
+        let changedAt: Int64?
+
+        private enum CodingKeys: String, CodingKey {
+            case build, previous, changedAt
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            build = try? container.decodeIfPresent(String.self, forKey: .build)
+            previous = try? container.decodeIfPresent(String.self, forKey: .previous)
+            changedAt = try? container.decodeIfPresent(Int64.self, forKey: .changedAt)
+        }
+    }
+
+    struct Battery: Decodable, Equatable {
+        let level: Int?
+        let charging: Bool?
+
+        private enum CodingKeys: String, CodingKey {
+            case level, charging
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            level = try? container.decodeIfPresent(Int.self, forKey: .level)
+            charging = try? container.decodeIfPresent(Bool.self, forKey: .charging)
+        }
+    }
+
+    /// The ROM's own updater (an OTA wipes the Redmi's audio fix).
+    struct Updater: Decodable, Equatable {
+        let present: Bool?
+        let enabled: Bool?
+
+        private enum CodingKeys: String, CodingKey {
+            case present, enabled
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            present = try? container.decodeIfPresent(Bool.self, forKey: .present)
+            enabled = try? container.decodeIfPresent(Bool.self, forKey: .enabled)
+        }
+    }
+
+    /// When the Redmi evaluated this snapshot (ms since 1970).
+    let at: Int64?
+    let problems: [Problem]
+    let rom: Rom?
+    let battery: Battery?
+    let updater: Updater?
+    let adbWifi: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case at, problems, rom, battery, updater, adbWifi
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        at = try? container.decodeIfPresent(Int64.self, forKey: .at)
+        let listed: [LenientElement<Problem>]? = try? container.decodeIfPresent([LenientElement<Problem>].self, forKey: .problems)
+        problems = (listed ?? []).compactMap { $0.value }
+        rom = try? container.decodeIfPresent(Rom.self, forKey: .rom)
+        battery = try? container.decodeIfPresent(Battery.self, forKey: .battery)
+        updater = try? container.decodeIfPresent(Updater.self, forKey: .updater)
+        adbWifi = try? container.decodeIfPresent(Bool.self, forKey: .adbWifi)
+    }
+
+    /// The audio-critical problem codes, sorted and without repeats: one notification per new set.
+    var audioCriticalCodes: [String] {
+        Array(Set(problems.filter { $0.audioCritical }.map { $0.code ?? "unknown" })).sorted()
+    }
+
+    var hasAudioCriticalProblem: Bool { problems.contains { $0.audioCritical } }
+
+    /// The band the Redmi warns about: 20 % or less and not charging.
+    var batteryNeedsCharging: Bool {
+        guard let level = battery?.level else { return false }
+        return level <= 20 && battery?.charging != true
+    }
+
+    /// The readable half of the ROM build (`Build.DISPLAY`), or the whole string.
+    var romDisplay: String? {
+        guard let build = rom?.build, !build.isEmpty else { return nil }
+        let parts = build.split(separator: "|", maxSplits: 1).map(String.init)
+        if parts.count == 2, !parts[1].isEmpty { return parts[1] }
+        return build
+    }
+
+    var evaluatedAt: Date? { at.map { Date(timeIntervalSince1970: Double($0) / 1000) } }
+    var romChangedAt: Date? { rom?.changedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) } }
+
+    /// One log line; it changes only when something the owner would care about changes.
+    var summary: String {
+        let codes = problems.map { ($0.code ?? "unknown") + ($0.audioCritical ? "!" : "") }
+        var parts = ["problems=" + (codes.isEmpty ? "none" : codes.joined(separator: ","))]
+        if let level = battery?.level {
+            parts.append("battery=\(level)%" + (battery?.charging == true ? " charging" : ""))
+        }
+        if let updater {
+            let present = updater.present.map { $0 ? "present" : "absent" } ?? "?"
+            let enabled = updater.enabled.map { $0 ? "enabled" : "disabled" } ?? "?"
+            parts.append("updater=\(present)/\(enabled)")
+        }
+        if let adbWifi { parts.append("adbWifi=\(adbWifi ? 1 : 0)") }
+        if let build = rom?.build { parts.append("rom=\(build)") }
+        return parts.joined(separator: " ")
+    }
+}
+
+/// Decodes one element of a list, or nothing, so one malformed entry never drops the whole list.
+struct LenientElement<Value: Decodable>: Decodable {
+    let value: Value?
+
+    init(from decoder: Decoder) throws {
+        value = try? Value(from: decoder)
+    }
 }
 
 struct AudioReadyMessage: Decodable {

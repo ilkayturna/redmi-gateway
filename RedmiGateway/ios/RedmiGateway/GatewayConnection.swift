@@ -1,8 +1,11 @@
 import AVFoundation
+import CallKit
 import Combine
+import CoreLocation
 import Foundation
 import Network
 import UIKit
+import UserNotifications
 
 public enum ConnectionState: String {
     case disconnected, connecting, connected, authenticated, failed
@@ -615,7 +618,10 @@ public final class GatewayConnection: ObservableObject {
         case "state":
             if let response = decode(StateResponseMessage.self, data) { handleStateResponse(response) }
         case "ack":
-            if let ack = decode(AckMessage.self, data) { handleAck(ack) }
+            if let ack = decode(AckMessage.self, data) {
+                // Report parts have acks of their own; the call command watchdogs never see them.
+                if ack.action == "client_diag" { DiagnosticsOutbox.shared.handleAck(ack) } else { handleAck(ack) }
+            }
         case "audio_ready":
             if let ready = decode(AudioReadyMessage.self, data) {
                 CallKitManager.shared.handleAudioReady(session: ready.session, port: ready.port,
@@ -684,7 +690,13 @@ public final class GatewayConnection: ObservableObject {
                 if let code = error.code, code == "no_call" || code == "audio_busy" {
                     CallKitManager.shared.audioStartRefused(code: code)
                 }
+                // An older Redmi does not know the report type; the outbox waits for a newer one.
+                if error.code == "unknown_command", error.command == "client_diag" {
+                    DiagnosticsOutbox.shared.handleUnsupported()
+                }
             }
+        case "health":
+            handleHealth(data)
         default:
             break
         }
@@ -1593,13 +1605,14 @@ public final class GatewayConnection: ObservableObject {
     /// background, and iOS can kill it before anyone copies the memory ring: on 22.10.2026 a whole
     /// failed incoming call left nothing readable behind.
     func log(_ message: String) {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        let line = "[\(formatter.string(from: Date()))] \(message)"
+        // Milliseconds, so a line here can be matched against the Redmi's call log; one stamp for
+        // the screen, the file and the Redmi copy.
+        let stamp = DiagnosticsFormat.timestamp(Date())
+        let line = "[\(stamp)] \(message)"
         logs.append(line)
         if logs.count > 200 { logs.removeFirst(logs.count - 200) }
         LogFile.append(line + "\n")
-        appendTelemetryLine(message)
+        appendTelemetryLine(message, stamp: stamp)
     }
 
     // MARK: - Telemetry to the Redmi
@@ -1613,12 +1626,24 @@ public final class GatewayConnection: ObservableObject {
     private var clientLogDelivered = 0
     /// Lines dropped because the ring wrapped before they were sent.
     private var clientLogDropped = 0
+    /// Lines appended to the on-disk backlog since it was last rewritten; see trimTelemetryRing.
+    private var clientLogBacklogLines = 0
     private var clientLogTimer: Timer?
     private var clientStatusTimer: Timer?
     private var lastClientLogSentAt = Date.distantPast
     private var telemetryObserversInstalled = false
+    /// Calls, audio and mute as the last client_status reported them. The 5 s tick sends a fresh
+    /// status when they change, so a call's start and end reach the Redmi within seconds and not
+    /// only with the 60 s status.
+    private var lastStatusSignature = ""
+    /// Read-only view of the calls iOS reports through CallKit; CallKitManager keeps its own and is
+    /// not touched from here.
+    private let telemetryCallObserver = CXCallObserver()
     private static let clientLogRingLimit = 300
-    private static let clientLogBatchLimit = 40
+    /// Batches a forced flush may send at once; see flushTelemetry.
+    private static let clientLogForcedBatches = 4
+    private static let phoneNumberPattern = try? NSRegularExpression(pattern: "\\+?\\d[\\d\\s]{6,}\\d")
+    private static let deviceModel = DiagnosticsFormat.machineIdentifier()
 
     private var appVersionNumber: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
@@ -1628,50 +1653,113 @@ public final class GatewayConnection: ObservableObject {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
     }
 
+    /// When CI built this app (Info.plist `RGBuildDate`); nil for a build made elsewhere.
+    static var buildDateText: String? {
+        guard let text = Bundle.main.infoDictionary?["RGBuildDate"] as? String, !text.isEmpty else { return nil }
+        return text
+    }
+
+    /// Days until TestFlight stops opening this build, or nil when the build date is unknown.
+    static var testFlightDaysLeft: Int? {
+        guard let text = buildDateText, let built = DiagnosticsFormat.parseBuildDate(text) else { return nil }
+        return DiagnosticsFormat.testFlightDaysLeft(buildDate: built, now: Date())
+    }
+
     /// Removes anything that could identify a person before a line leaves the phone.
     static func sanitizeTelemetry(_ line: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: "\\+?\\d[\\d\\s]{6,}\\d") else { return line }
+        guard let regex = phoneNumberPattern else { return line }
         let range = NSRange(line.startIndex..., in: line)
         return regex.stringByReplacingMatches(in: line, range: range, withTemplate: "<numara>")
     }
 
-    private func appendTelemetryLine(_ message: String) {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        clientLogRing.append("[\(formatter.string(from: Date()))] \(GatewayConnection.sanitizeTelemetry(message))")
+    private func appendTelemetryLine(_ message: String, stamp: String) {
+        // A long entry (a stack, a report summary) is split before it enters the ring: the Redmi cuts
+        // a stored line at 4,000 chars, and one huge line could push a batch past its frame gate,
+        // where the whole batch vanishes without a trace.
+        let lines = DiagnosticsFormat.splitLine(GatewayConnection.sanitizeTelemetry(message)).map { "[\(stamp)] \($0)" }
+        clientLogRing.append(contentsOf: lines)
+        TelemetryBacklog.append(lines)
+        clientLogBacklogLines += lines.count
+        trimTelemetryRing()
+    }
+
+    /// Drops the oldest lines past the ring's limit; only lines the Redmi never got count as dropped.
+    private func trimTelemetryRing() {
         let overflow = clientLogRing.count - GatewayConnection.clientLogRingLimit
-        if overflow > 0 {
-            clientLogRing.removeFirst(overflow)
-            clientLogDelivered = max(0, clientLogDelivered - overflow)
-            clientLogDropped += overflow
+        guard overflow > 0 else { return }
+        clientLogRing.removeFirst(overflow)
+        clientLogDropped += max(0, overflow - clientLogDelivered)
+        clientLogDelivered = max(0, clientLogDelivered - overflow)
+        // Without a link the backlog file only grows. Once it holds twice the ring it is rewritten
+        // from the ring, so it stays near the ring's size however long the link is down.
+        if clientLogBacklogLines > 2 * GatewayConnection.clientLogRingLimit {
+            persistTelemetryBacklog()
         }
     }
 
-    /// Sends the part of the ring the Redmi has not seen yet.
+    /// Rewrites the backlog file with exactly the lines the Redmi has not been handed yet.
+    private func persistTelemetryBacklog() {
+        let pending = Array(clientLogRing[clientLogDelivered...])
+        TelemetryBacklog.replace(with: pending)
+        clientLogBacklogLines = pending.count
+    }
+
+    /// Puts the lines the previous run never sent in front of this run's, tagged "[prev]", so the
+    /// first batch after the relaunch carries them. Called once at launch.
+    func restoreUnsentTelemetry(_ lines: [String]) {
+        guard !lines.isEmpty else { return }
+        let tagged = lines.suffix(GatewayConnection.clientLogRingLimit).map { DiagnosticsFormat.taggedAsPrevious($0) }
+        clientLogRing.insert(contentsOf: tagged, at: clientLogDelivered)
+        trimTelemetryRing()
+        persistTelemetryBacklog()
+        log("Telemetry: \(tagged.count) line(s) the previous run did not send go first, tagged [prev]")
+    }
+
+    /// Shows the end of the previous run's log file in the on-screen ring only.
+    ///
+    /// Those lines are in the file already, and the ones never sent reach the Redmi through the
+    /// backlog. Logging them again wrote them into the file once more on every launch (background
+    /// relaunches included), so later launches replayed earlier replays, and it sent the Redmi lines
+    /// it already had.
+    func showPreviousRunLog(_ lines: [String]) {
+        guard !lines.isEmpty else { return }
+        let block = ["Previous run (last \(lines.count) log lines)"] + lines.map { "  " + $0 }
+        logs.insert(contentsOf: block, at: 0)
+        if logs.count > 200 { logs.removeFirst(logs.count - 200) }
+    }
+
+    /// Sends the part of the ring the Redmi has not seen yet, in batches sized for its frame gate.
     private func flushTelemetry(force: Bool = false) {
         guard state == .authenticated else { return }
-        let pending = clientLogRing.count - clientLogDelivered
-        guard pending > 0 else { return }
+        guard clientLogRing.count > clientLogDelivered else { return }
         let now = Date()
         if !force, now.timeIntervalSince(lastClientLogSentAt) < 2 { return }
-        let start = clientLogDelivered
-        let end = min(clientLogRing.count, start + GatewayConnection.clientLogBatchLimit)
-        let batch = Array(clientLogRing[start..<end])
-        send([
-            "type": "client_log",
-            "appVersion": appVersionNumber,
-            "appBuild": appBuildNumber,
-            "dropped": clientLogDropped,
-            "lines": batch
-        ])
-        clientLogDelivered = end
-        clientLogDropped = 0
+        // A forced flush (link up, app opened or leaving the screen) may be the only moment the socket
+        // is up after a background wake, so it may send a few batches. During a call, and on the
+        // timer, one batch is enough.
+        let callUp = currentCall != nil || CallKitManager.shared.hasCalls
+        let batches = (force && !callUp) ? GatewayConnection.clientLogForcedBatches : 1
+        for _ in 0..<batches {
+            let start = clientLogDelivered
+            let count = DiagnosticsFormat.batchCount(clientLogRing[start...])
+            guard count > 0 else { break }
+            send([
+                "type": "client_log",
+                "appVersion": appVersionNumber,
+                "appBuild": appBuildNumber,
+                "dropped": clientLogDropped,
+                "lines": Array(clientLogRing[start..<(start + count)])
+            ])
+            clientLogDelivered = start + count
+            clientLogDropped = 0
+        }
         lastClientLogSentAt = now
+        persistTelemetryBacklog()
     }
 
     private func sendClientStatus() {
         guard state == .authenticated else { return }
-        send([
+        var status: [String: Any] = [
             "type": "client_status",
             "appVersion": appVersionNumber,
             "appBuild": appBuildNumber,
@@ -1679,8 +1767,20 @@ public final class GatewayConnection: ObservableObject {
             "mic": GatewayConnection.microphonePermission,
             "battery": GatewayConnection.batteryText,
             "thermal": GatewayConnection.thermalText,
-            "lowPower": ProcessInfo.processInfo.isLowPowerModeEnabled
-        ])
+            "lowPower": ProcessInfo.processInfo.isLowPowerModeEnabled,
+            "os": UIDevice.current.systemVersion,
+            "model": GatewayConnection.deviceModel,
+            "callkit": callKitStatusText,
+            "audio": audioStatusText,
+            "notify": GatewayConnection.notificationStatusText,
+            "ble": GatewayConnection.bluetoothStatusText,
+            "network": networkStatusText,
+            "location": GatewayConnection.locationStatusText
+        ]
+        if let built = GatewayConnection.buildDateText { status["buildDate"] = built }
+        if let days = GatewayConnection.testFlightDaysLeft { status["tfDaysLeft"] = days }
+        send(status)
+        lastStatusSignature = callAudioSignature
     }
 
     private func startTelemetry() {
@@ -1691,7 +1791,7 @@ public final class GatewayConnection: ObservableObject {
         sendClientStatus()
         if clientLogTimer == nil {
             clientLogTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.flushTelemetry() }
+                Task { @MainActor [weak self] in self?.telemetryTick() }
             }
         }
         if clientStatusTimer == nil {
@@ -1699,6 +1799,18 @@ public final class GatewayConnection: ObservableObject {
                 Task { @MainActor [weak self] in self?.sendClientStatus() }
             }
         }
+        // Reports wait in the outbox for a link like this one.
+        DiagnosticsOutbox.shared.kick()
+    }
+
+    /// Every 5 s while the socket is up: send waiting lines, report a change in calls, audio or
+    /// mute at once, keep the run marker current and move the report outbox along. Each step
+    /// compares before it acts, so a quiet tick sends and writes nothing.
+    private func telemetryTick() {
+        flushTelemetry()
+        if callAudioSignature != lastStatusSignature { sendClientStatus() }
+        recordRunMarker()
+        DiagnosticsOutbox.shared.kick()
     }
 
     private func stopTelemetry() {
@@ -1706,6 +1818,19 @@ public final class GatewayConnection: ObservableObject {
         clientLogTimer = nil
         clientStatusTimer?.invalidate()
         clientStatusTimer = nil
+        DiagnosticsOutbox.shared.connectionClosed()
+    }
+
+    /// Keeps the run marker in step with the app (see ExitMarker); it is written on change only.
+    func recordRunMarker() {
+        let appState = UIApplication.shared.applicationState
+        let engine = AudioEngine.shared
+        ExitMarker.record(inForeground: appState != .background,
+                          appState: GatewayConnection.appStateName(appState),
+                          calls: callKitCallCount,
+                          audioRunning: engine.isRunning,
+                          muted: engine.isMuted,
+                          build: appBuildNumber)
     }
 
     private func installTelemetryObservers() {
@@ -1716,6 +1841,8 @@ public final class GatewayConnection: ObservableObject {
             Task { @MainActor [weak self] in
                 self?.flushTelemetry(force: true)
                 self?.sendClientStatus()
+                self?.recordRunMarker()
+                DiagnosticsOutbox.shared.kick()
             }
         }
         center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
@@ -1724,8 +1851,93 @@ public final class GatewayConnection: ObservableObject {
                 // only copy of the lines that explain a ring.
                 self?.flushTelemetry(force: true)
                 self?.sendClientStatus()
+                self?.recordRunMarker()
             }
         }
+        // Posted only when iOS ends an app it had not suspended. A hop to the main actor could run
+        // after the process is gone, so the marker and the backlog are finished right here.
+        center.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+            ExitMarker.recordTerminated()
+            TelemetryBacklog.drain()
+        }
+    }
+
+    /// Calls iOS reports and has not ended yet: the Redmi's calls shown here (this iPhone has no
+    /// cellular line of its own), and another app's call if one is up.
+    private var callKitCallCount: Int {
+        telemetryCallObserver.calls.filter { !$0.hasEnded }.count
+    }
+
+    /// What decides an early client_status: a call starting or ending, audio starting or stopping,
+    /// the microphone muted or unmuted.
+    private var callAudioSignature: String {
+        let engine = AudioEngine.shared
+        return "\(callKitCallCount)|\(CallKitManager.shared.hasCalls)|\(engine.isRunning)|\(engine.isMuted)"
+    }
+
+    private var callKitStatusText: String {
+        let callKit = CallKitManager.shared
+        return "calls=\(callKitCallCount) tracked=\(callKit.hasCalls ? 1 : 0) current=\(callKit.presentsCurrentCall ? 1 : 0)"
+    }
+
+    private var audioStatusText: String {
+        let engine = AudioEngine.shared
+        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs.map { $0.portType.rawValue }
+        var text = "engine=" + (engine.isRunning ? "running" : "stopped")
+        text += " muted=\(engine.isMuted ? 1 : 0) speaker=\(engine.isSpeakerEnabled ? 1 : 0)"
+        if engine.isWaitingForInput { text += " waitingInput=1" }
+        text += " route=" + (outputs.isEmpty ? "none" : outputs.joined(separator: "+"))
+        text += " owner=" + audioOwnerName
+        return text
+    }
+
+    private var audioOwnerName: String {
+        switch audioLocation {
+        case .redmi: return "redmi"
+        case .movingToIPhone: return "moving"
+        case .iphone: return "iphone"
+        }
+    }
+
+    private var networkStatusText: String {
+        var text = "link=" + (isRemoteLink ? "remote" : "local")
+        text += " wifi=\(isWiFiConnected ? 1 : 0) viable=\(isNetworkViable ? 1 : 0)"
+        // Whether the tokens exist, never their values.
+        text += " voipToken=\(pushToken == nil ? 0 : 1) alertToken=\(alertPushToken == nil ? 0 : 1)"
+        return text
+    }
+
+    private static var notificationStatusText: String {
+        switch Notifier.shared.authorization {
+        case .authorized: return "authorized"
+        case .denied: return "denied"
+        case .notDetermined: return "notDetermined"
+        case .provisional: return "provisional"
+        case .ephemeral: return "ephemeral"
+        default: return "unknown"
+        }
+    }
+
+    private static var bluetoothStatusText: String {
+        let ble = BLECentralManager.shared
+        guard ble.isBluetoothPoweredOn else { return "off" }
+        let seen = ble.lastSeenDate.map { "\(max(0, Int(Date().timeIntervalSince($0))))s" } ?? "never"
+        return "on connected=\(ble.isConnected ? 1 : 0) seen=\(seen)"
+    }
+
+    private static var locationStatusText: String {
+        let wake = CallWakeMonitor.shared
+        var text: String
+        switch wake.authorization {
+        case .authorizedAlways: text = "always"
+        case .authorizedWhenInUse: text = "whenInUse"
+        case .denied: text = "denied"
+        case .restricted: text = "restricted"
+        case .notDetermined: text = "notDetermined"
+        default: text = "unknown"
+        }
+        if wake.accuracy == .reducedAccuracy { text += " reduced" }
+        return text
     }
 
     private static func appStateName(_ state: UIApplication.State) -> String {
@@ -1767,6 +1979,24 @@ public final class GatewayConnection: ObservableObject {
         @unknown default: return "unknown"
         }
     }
+
+    // MARK: - Redmi health
+
+    /// What the Redmi last reported about itself (`health`): problems, ROM, battery, updater. Nil
+    /// until a Redmi that reports it connects; kept when the link drops, as the last thing known.
+    @Published private(set) var redmiHealth: RedmiHealth?
+
+    private func handleHealth(_ data: Data) {
+        guard let health = decode(RedmiHealth.self, data) else {
+            log("Dropped a health report that could not be read")
+            return
+        }
+        let previous = redmiHealth
+        redmiHealth = health
+        // Every authentication brings the current health again; the log keeps changes only.
+        if previous?.summary != health.summary { log("Redmi health: \(health.summary)") }
+        RedmiHealthAlert.evaluate(health)
+    }
 }
 
 /// The diagnostics log on disk, written off the main actor.
@@ -1805,14 +2035,13 @@ enum LogFile {
         }
     }
 
-    /// Puts the end of the previous run's file back into the memory ring at launch.
+    /// Puts the end of the previous run's file back on screen at launch, for Advanced > Diagnostics
+    /// and the copied report. Screen only; see GatewayConnection.showPreviousRunLog.
     @MainActor
     static func replayTail(_ lines: Int = 40) {
+        // No file yet: the first run of this install.
         guard let url, let text = try? String(contentsOf: url, encoding: .utf8) else { return }
-        let tail = text.split(separator: "\n").suffix(lines)
-        guard !tail.isEmpty else { return }
-        GatewayConnection.shared.log("Previous run (last \(tail.count) log lines)")
-        for line in tail { GatewayConnection.shared.log("  " + line) }
+        GatewayConnection.shared.showPreviousRunLog(text.split(separator: "\n").suffix(lines).map(String.init))
     }
 }
 
