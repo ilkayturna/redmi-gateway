@@ -33,6 +33,15 @@ class PcmLevelMeterTest {
         assertEquals(0, empty.activePercent)
     }
 
+    // Catches a muted iPhone (it keeps sending zeroed frames) being reported as a quiet voice.
+    @Test fun mutedUplinkReportsNoSpeech() {
+        val meter = PcmLevelMeter()
+        repeat(50) { meter.add(square(0)) }
+        val level = meter.takeLevel()
+        assertEquals(-99, level.speechRmsDbfs)
+        assertEquals(0, level.activePercent)
+    }
+
     /** One 20 ms frame of a +/- amplitude square wave, little-endian PCM16. */
     private fun square(amplitude: Int): ByteArray {
         val pcm = ByteArray(640)

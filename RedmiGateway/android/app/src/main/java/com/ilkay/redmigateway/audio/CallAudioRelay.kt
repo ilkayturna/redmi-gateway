@@ -243,6 +243,12 @@ object CallAudioRelay : CallManager.CallListener {
     // Sealed sessions only: last time the iPhone reported that it is receiving downlink.
     @Volatile private var lastIPhoneHearingAt = 0L
     private const val FLAG_IPHONE_HEARING = 0x01
+    // Sealed sessions only: the iPhone says its microphone is muted (builds that set bit 1). A muted
+    // iPhone still sends zeroed frames, so without this bit a silent uplink cannot be told apart
+    // from a dead microphone.
+    @Volatile private var iphoneMuted = false
+    private var loggedIphoneMuted = false
+    private const val FLAG_IPHONE_MUTED = 0x02
     private const val IPHONE_DEAF_LIMIT_MS = 2000L
 
     /**
@@ -287,6 +293,11 @@ object CallAudioRelay : CallManager.CallListener {
     private val downlinkShortReads = AtomicInteger()
     /** Loudness of what the iPhone is sent, reported once per health line. */
     private val downlinkLevel = PcmLevelMeter()
+    /**
+     * Loudness of the iPhone's voice as it is written into the call, reported once per health line.
+     * Only real frames are measured; concealment would pass for speech.
+     */
+    private val uplinkLevel = PcmLevelMeter()
     // Counters since the cutover began. The per second window above is reset on every roll, so it
     // cannot measure the first partial window; these two make the handover decision at
     // VERIFY_WINDOW_MS instead of at the next one second boundary.
@@ -611,6 +622,7 @@ object CallAudioRelay : CallManager.CallListener {
             val windowWriteMs = windowMaxWriteMs
             windowMaxWriteMs = 0
             val level = downlinkLevel.takeLevel()
+            val up = uplinkLevel.takeLevel()
             val health = "RELAY_HEALTH owner=$owner iphone=$windowIPhone/s uplink=$windowWrites/s " +
                 "pcm=$windowPcmWrites/s silence=$windowSilenceWrites/s partial=$windowPartialWrites/s " +
                 "downlink=$windowReads/s shortReads=$windowShortReads/s queued=${queue.queued} targetFrames=${queue.targetFrames} " +
@@ -620,9 +632,19 @@ object CallAudioRelay : CallManager.CallListener {
                 "maxAuthenticatedArrivalGapMs=${queue.maxAuthenticatedArrivalGapMs} " +
                 "maxAuthenticatedArrivalBurstFrames=${queue.maxAuthenticatedArrivalBurstFrames} " +
                 "downlinkSpeechDbfs=${level.speechRmsDbfs} downlinkPeakDbfs=${level.peakDbfs} " +
-                "downlinkActive=${level.activePercent}%"
+                "downlinkActive=${level.activePercent}% " +
+                "uplinkSpeechDbfs=${up.speechRmsDbfs} uplinkPeakDbfs=${up.peakDbfs} " +
+                "uplinkActive=${up.activePercent}% iphoneMuted=${if (iphoneMuted) 1 else 0}"
             Log.i(TAG, health)
             com.ilkay.redmigateway.journal.DiagnosticsLog.record("Audio", health)
+        }
+        // The receive thread only flips the flag; the file write happens here, once per change.
+        val muted = iphoneMuted
+        if (mediaRunning && muted != loggedIphoneMuted) {
+            loggedIphoneMuted = muted
+            val line = "IPHONE_MUTE muted=${if (muted) 1 else 0}"
+            Log.i(TAG, line)
+            com.ilkay.redmigateway.journal.DiagnosticsLog.record("Audio", line)
         }
         val live = isLiveCallState(CallManager.currentCallState)
         val iphoneFresh = lastIPhonePcmAt != 0L && now - lastIPhonePcmAt < silenceLimitMs
@@ -889,6 +911,7 @@ object CallAudioRelay : CallManager.CallListener {
                 }
                 lastRxCounter = counter
                 if (buffer[9].toInt() and FLAG_IPHONE_HEARING != 0) lastIPhoneHearingAt = SystemClock.elapsedRealtime()
+                iphoneMuted = buffer[9].toInt() and FLAG_IPHONE_MUTED != 0
                 when {
                     type == PAYLOAD_PCM16 && plain.size == FRAME_BYTES -> {
                         frame = plain
@@ -1053,6 +1076,8 @@ object CallAudioRelay : CallManager.CallListener {
         // 100-298 ms gaps (retriedTxPackets=9948): the iPhone's player underran every few seconds.
         acquireCallWifiLock(context)
         lastIPhoneHearingAt = 0L
+        iphoneMuted = false
+        loggedIphoneMuted = false
         plcConsecutiveFrames = 0
         hasValidPcmHistory = false
         uplinkQueue.reset(remoteLink, if (redundancyCapability() == 1) REDUNDANCY_MIN_DEPTH_FRAMES else 0)
@@ -1073,6 +1098,7 @@ object CallAudioRelay : CallManager.CallListener {
         // The meter is otherwise emptied only by a health line, so the first line of this call
         // would report the last seconds of the previous one.
         downlinkLevel.takeLevel()
+        uplinkLevel.takeLevel()
         track.play()
         record.startRecording()
         writerThread = Thread({ writeLoop(track) }, "CallAudio-Uplink").apply {
@@ -1107,6 +1133,8 @@ object CallAudioRelay : CallManager.CallListener {
 
             val playbackPcm: ByteArray
             if (frame != null && frame.size == FRAME_BYTES) {
+                // Measured before the ramp below, which rewrites the first samples in place.
+                uplinkLevel.add(frame)
                 // If returning from full silence, smooth beginning with RAMP_UP to eliminate phase discontinuity clicking
                 if (plcConsecutiveFrames >= 3) {
                     for (i in 0 until RAMP_SAMPLES) {
