@@ -424,6 +424,11 @@ announces its VPN address with the others. Wake-ups come through Apple:
 `unauthorized` (a command before authentication), `unknown_command`, `internal_error`,
 `no_call`, `audio_busy`, `lab_disabled`.
 
+`audio_busy` answers an `audio_start` while another open socket holds the call audio. Since Redmi
+2.0.22 a protocol 2 socket that authenticated after the holder takes the audio instead (the same
+paired iPhone on a newer connection, while its stalled old socket still looks open on the Redmi);
+an older socket never takes it from a newer one.
+
 New message types and fields are added without a protocol bump. An iPhone → Redmi type the Redmi
 does not know is answered with `{"type":"error","code":"unknown_command","command":<type>}`; a
 Redmi → iPhone type the iPhone does not know is ignored, and both sides ignore unknown fields.

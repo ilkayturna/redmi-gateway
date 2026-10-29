@@ -26,6 +26,7 @@ object HealthCheck {
     const val PRIVILEGED_APP = "privApp"
     const val PRIVILEGED_PERMISSIONS = "privilegedPermissions"
     const val DEFAULT_DIALER = "defaultDialer"
+    const val BLUETOOTH_PAIRING = "bluetoothPairing"
 
     /**
      * The signature|privileged permissions the call audio capture needs.
@@ -47,7 +48,8 @@ object HealthCheck {
         vendorFix: Boolean,
         privApp: Boolean,
         missingPrivileged: List<String>,
-        defaultDialer: Boolean
+        defaultDialer: Boolean,
+        bluetoothPairingStale: Boolean = false
     ): List<HealthProblem> = buildList {
         if (!vendorFix) add(
             HealthProblem(
@@ -84,6 +86,19 @@ object HealthCheck {
                 "Varsayılan telefon uygulaması bu uygulama değil",
                 "Aramalar geçit üzerinden yürümez; iPhone ne çalar ne de arama yapabilir.",
                 "Ayarlar'daki düğmeyle bu uygulamayı varsayılan telefon uygulaması yap.",
+                false
+            )
+        )
+        // Not audio-critical: calls still ring through the beacon and Apple push, only later.
+        if (bluetoothPairingStale) add(
+            HealthProblem(
+                BLUETOOTH_PAIRING,
+                "iPhone'daki eski Bluetooth eşleşmesi bağlantıyı koparıyor",
+                "iPhone, Redmi'ye eski bir eşleşmenin anahtarıyla bağlanmaya çalışıyor; Redmi'de o eşleşme " +
+                    "yok ve bağlantı hemen kopuyor. Gelen aramalar yine çalar ama Bluetooth yolu kapalı " +
+                    "kalır ve Redmi iPhone'u beş dakikada bir uyandırır.",
+                "iPhone'da Ayarlar > Bluetooth > Redmi Note 8 > (i) > Bu Aygıtı Unut. Uygulama Bluetooth'a " +
+                    "kendisi yeniden bağlanır; eşleştirme isteği çıkarsa kabul et.",
                 false
             )
         )

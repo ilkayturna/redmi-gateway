@@ -105,6 +105,9 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         /** Bluetooth links to this Redmi that still listen; in practice only the paired iPhone connects. */
         fun linkedCentrals(): Int = current?.listeningCentrals() ?: 0
 
+        /** The iPhone's Bluetooth links die at once, as with a pairing only the iPhone still has (BleBondWatch). */
+        fun pairingLooksStale(): Boolean = current?.let { server -> synchronized(server.bondWatch) { server.bondWatch.suspected } } == true
+
         /**
          * The iPhone is back on the control link. When a wake beacon was asking for it, this is the
          * moment the wake latency is measured to - the number the beacon exists for.
@@ -208,6 +211,27 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
     private val socketNudge = Runnable { socketNudgeScheduled = false; nudgeMissingSocket() }
 
     private fun listeningCentrals() = connectedDevices.count { it !in stoppedListening }
+
+    /** When each central connected, so a link that dies at once is told apart from a real one. */
+    private val connectedAt = ConcurrentHashMap<String, Long>()
+    /** Guarded by its own monitor: the GATT callbacks arrive on binder threads. */
+    private val bondWatch = BleBondWatch()
+
+    private fun noteLinkEnded(heldMs: Long?, reachedGatt: Boolean) {
+        val changed = synchronized(bondWatch) {
+            bondWatch.linkEnded(android.os.SystemClock.elapsedRealtime(), heldMs, reachedGatt)
+        }
+        if (!changed) return
+        CallManager.log("Bluetooth: the iPhone's link drops right after connecting; it probably keeps an old pairing for this Redmi (forget it in the iPhone's Bluetooth settings)")
+        mainHandler.post { runCatching { com.ilkay.redmigateway.service.HealthReporter.evaluate(context, "bluetooth pairing") } }
+    }
+
+    private fun noteLinkWorks() {
+        val changed = synchronized(bondWatch) { bondWatch.linkWorks() }
+        if (!changed) return
+        CallManager.log("Bluetooth: the iPhone's link works again")
+        mainHandler.post { runCatching { com.ilkay.redmigateway.service.HealthReporter.evaluate(context, "bluetooth pairing") } }
+    }
     private val clientLastSeq = ConcurrentHashMap<String, Long>()
     private val stateSeq = AtomicLong(0)
 
@@ -274,6 +298,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 Log.i(TAG, "BLE client connected: ${device.address}")
+                connectedAt[device.address] = android.os.SystemClock.elapsedRealtime()
                 connectedDevices.add(device)
                 linkChanged()
                 mainHandler.postDelayed({
@@ -284,12 +309,15 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
                 }, SUBSCRIBE_GRACE_MS)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 Log.i(TAG, "BLE client disconnected: ${device.address}")
+                val reachedGatt = mtuByDevice.containsKey(device.address) || subscribedDevices[device]?.isNotEmpty() == true
+                val heldMs = connectedAt.remove(device.address)?.let { android.os.SystemClock.elapsedRealtime() - it }
                 mtuByDevice.remove(device.address)
                 connectedDevices.remove(device)
                 subscribedDevices.remove(device)
                 stoppedListening.remove(device)
                 preparedWrites.remove(device)
                 linkChanged()
+                noteLinkEnded(heldMs, reachedGatt)
             }
         }
 
@@ -479,6 +507,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
                 if (charUuid == BleConstants.CHAR_STATE_UUID) {
                     Log.i(TAG, "BLE call-state updates ${if (enabled) "enabled" else "disabled"}")
                     if (enabled) stoppedListening.remove(device) else stoppedListening.add(device)
+                    if (enabled) noteLinkWorks()
                     linkChanged(quick = !enabled)
                 }
 

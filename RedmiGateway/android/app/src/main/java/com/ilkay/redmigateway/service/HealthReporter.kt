@@ -84,7 +84,8 @@ object HealthReporter {
             vendorFix = DiagnosticsReport.vendorAudioFixPresent(),
             privApp = InstallState.privAppPresent(),
             missingPrivileged = missing,
-            defaultDialer = telecom?.defaultDialerPackage == context.packageName
+            defaultDialer = telecom?.defaultDialerPackage == context.packageName,
+            bluetoothPairingStale = com.ilkay.redmigateway.ble.BleServerManager.pairingLooksStale()
         )
     }
 

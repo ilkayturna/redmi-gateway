@@ -543,12 +543,14 @@ class GatewayWebSocketServer(
      * The new socket of the same iPhone then had no say: "Redmi'ye al" got a failed ack and
      * audio_stop was ignored, so the Redmi stayed muted until the silence fallback. Only the paired
      * iPhone can authenticate with protocol 2, so such a peer takes over an owner whose socket is
-     * gone; a second live socket still cannot take the audio from the one that holds it.
+     * gone, or one that still looks open but authenticated before it ([supersedesAudioHolder]); an
+     * older socket still cannot take the audio from a newer one.
      */
     private fun claimAudioControl(peer: Peer): Boolean {
         val owner = audioOwner
         if (owner === peer.conn) return true
-        if (peer.protocol < 2 || (owner != null && owner.isOpen)) return false
+        if (peer.protocol < 2) return false
+        if (owner != null && owner.isOpen && !supersedes(peer, owner)) return false
         if (owner == null && CallAudioRelay.owner == CallAudioRelay.Owner.REDMI) return false
         audioOwner = peer.conn
         Log.i(TAG, "Call audio control passed to the iPhone's new socket")
@@ -564,9 +566,13 @@ class GatewayWebSocketServer(
             send(peer, JSONObject().put("type", "error").put("code", "no_call").put("message", "No current cellular call"))
             return
         }
-        if (audioOwner != null && audioOwner !== conn && audioOwner?.isOpen == true) {
-            send(peer, JSONObject().put("type", "error").put("code", "audio_busy").put("message", "Another client owns call audio"))
-            return
+        val holder = audioOwner
+        if (holder != null && holder !== conn && holder.isOpen) {
+            if (!supersedes(peer, holder)) {
+                send(peer, JSONObject().put("type", "error").put("code", "audio_busy").put("message", "Another client owns call audio"))
+                return
+            }
+            IphoneDiagnostics.record("iPhone-link", "audio_start on a newer socket while the older one still looked open; the newer one takes the audio")
         }
         // The iPhone advertises that it can rebuild a downlink frame from the copy in the next
         // packet. Only a build that sends this field gets type 2; an older iPhone would ignore the
@@ -587,6 +593,9 @@ class GatewayWebSocketServer(
             // link: the copy doubles the audio bitrate and a mobile data link must not pay for it.
             .put("redundancy", CallAudioRelay.redundancyCapability()))
     }
+
+    private fun supersedes(peer: Peer, holder: WebSocket): Boolean =
+        supersedesAudioHolder(peer.protocol, peer.authenticatedAt, peers[holder]?.authenticatedAt)
 
     // ---- iPhone diagnostics and Redmi health ----
 
@@ -1029,6 +1038,25 @@ internal fun classifyClose(
     sinceLastMessageMs > 30_000 -> "idle_then_closed"
     else -> "closed_quiet"
 }
+
+/**
+ * Whether a socket may take the call audio from a holder socket that still looks open.
+ *
+ * Only the paired iPhone authenticates with protocol 2, so a protocol 2 socket that authenticated
+ * after the holder is the same iPhone on a newer connection. Since iPhone build 170 the iPhone gives
+ * up on a stalled socket after 3 s, usually before this side notices: the stalled socket still
+ * looks open here, and audio_start on the new one would be refused as audio_busy until the
+ * library's keepalive closed the old one, 90 s or more later, leaving the conversation on the Redmi
+ * (found in review on 30.10.2026, not yet seen in a log).
+ * An older socket never takes the audio from a newer one: a frame held up in a stalled connection
+ * can arrive after the new connection has started. [holderAuthenticatedAt] is null when the holder
+ * is no longer a known connection.
+ */
+internal fun supersedesAudioHolder(
+    requesterProtocol: Int,
+    requesterAuthenticatedAt: Long,
+    holderAuthenticatedAt: Long?,
+): Boolean = requesterProtocol >= 2 && (holderAuthenticatedAt == null || requesterAuthenticatedAt > holderAuthenticatedAt)
 
 /**
  * The `health` frame for the iPhone: a copy of the HealthBus snapshot with its type set, so the

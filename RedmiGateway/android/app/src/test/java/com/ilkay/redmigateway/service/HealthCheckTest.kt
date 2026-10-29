@@ -20,8 +20,19 @@ class HealthCheckTest {
         vendorFix: Boolean = true,
         privApp: Boolean = true,
         missingPrivileged: List<String> = emptyList(),
-        defaultDialer: Boolean = true
-    ) = HealthCheck.problems(vendorFix, privApp, missingPrivileged, defaultDialer)
+        defaultDialer: Boolean = true,
+        bluetoothPairingStale: Boolean = false
+    ) = HealthCheck.problems(vendorFix, privApp, missingPrivileged, defaultDialer, bluetoothPairingStale)
+
+    @Test
+    fun aStaleBluetoothPairingIsReportedWithoutClaimingBrokenAudio() {
+        // 25-30.10.2026: the iPhone's link died in milliseconds for four days and nothing said so.
+        // Calls still rang through the beacon and push, so it must not raise the red audio banner.
+        val list = problems(bluetoothPairingStale = true)
+        assertEquals(listOf(HealthCheck.BLUETOOTH_PAIRING), list.map { it.code })
+        assertFalse(list.single().audioCritical)
+        assertTrue("the fix names the iPhone setting to use", list.single().fix.contains("Bu Aygıtı Unut"))
+    }
 
     @Test
     fun everythingPresentMeansNoProblems() {

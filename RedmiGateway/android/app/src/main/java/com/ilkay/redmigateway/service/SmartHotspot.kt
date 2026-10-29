@@ -170,7 +170,10 @@ object SmartHotspot {
             // Android joins a saved network on its own (IMMUTABLE_RULES Kural 1), also mid-call.
             // That moment preceded the 23.10.2026 drop and was nowhere in the file.
             if (joined && CallManager.currentCallState !in setOf("idle", "disconnected")) {
-                com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Wi-Fi ${ssid ?: "?"} joined during a call; the hotspot stays until it ends")
+                // Say whether a hotspot is involved: on 29.10.2026 21:35 the line claimed one while
+                // the Redmi had only re-joined home Wi-Fi after a firmware drop.
+                val detail = if (isHotspotOn()) "the hotspot stays until it ends" else "no hotspot running"
+                com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Wi-Fi ${ssid ?: "?"} joined during a call; $detail")
             }
             wifiNetwork = network
             ssid?.let { remember(listOf(it)) }
