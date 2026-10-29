@@ -23,6 +23,11 @@ struct CallScreen: View {
                     speaker = AudioEngine.shared.isSpeakerEnabled
                     updateProximity(call: call)
                 }
+                // A mute from CallKit's screen, AirPods or the watch: the button read the state only
+                // on appear and could show an open microphone that was muted.
+                .onReceive(NotificationCenter.default.publisher(for: AudioEngine.muteChanged)) { _ in
+                    muted = AudioEngine.shared.isMuted
+                }
                 .onDisappear { UIDevice.current.isProximityMonitoringEnabled = false }
         } else {
             Color(UIColor.systemBackground).ignoresSafeArea()

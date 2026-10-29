@@ -11,6 +11,10 @@ import Network
 final class AudioEngine {
     static let shared = AudioEngine()
 
+    /// Posted on the main queue whenever the microphone mute changes, whoever changed it: the app's
+    /// button, CallKit's own screen, AirPods or the watch. The call screen follows it.
+    static let muteChanged = Notification.Name("AudioEngine.muteChanged")
+
     /// Technical events for the diagnostics log; never shown as call UI.
     var onLog: ((String) -> Void)?
     var onNeedsRestart: (() -> Void)?
@@ -27,7 +31,10 @@ final class AudioEngine {
             if changed { capturePacer.discardPending() }
             captureLock.unlock()
             // Logged after the lock: log() hops to the main queue and must never run under it.
-            if changed { log("Audio path: microphone \(newValue ? "muted" : "unmuted")") }
+            if changed {
+                log("Audio path: microphone \(newValue ? "muted" : "unmuted")")
+                DispatchQueue.main.async { NotificationCenter.default.post(name: Self.muteChanged, object: nil) }
+            }
         }
     }
     private(set) var isSpeakerEnabled = false

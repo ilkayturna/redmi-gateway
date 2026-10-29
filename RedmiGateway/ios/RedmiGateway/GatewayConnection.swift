@@ -1661,7 +1661,12 @@ public final class GatewayConnection: ObservableObject {
         }
         closeAfterCatchUp = UIApplication.shared.applicationState == .background && currentCall == nil
         if state == .authenticated {
-            if UIApplication.shared.applicationState == .active || linkIsFresh {
+            // During a call CallKit keeps the app running and the call probe checks this socket every
+            // 2 s, so it is never one "kept from before suspension". Pongs are not frames, so a quiet
+            // call looked stale here, and a new SMS reported over Bluetooth would have closed and
+            // reopened the control link in the middle of the conversation.
+            let callInProgress = currentCall != nil || CallKitManager.shared.hasCalls
+            if UIApplication.shared.applicationState == .active || linkIsFresh || callInProgress {
                 requestSync()
                 return
             }
