@@ -23,8 +23,11 @@ final class AudioEngine {
         }
         set {
             captureLock.lock()
-            if captureMute.setMuted(newValue, now: Self.monotonicNow()) { capturePacer.discardPending() }
+            let changed = captureMute.setMuted(newValue, now: Self.monotonicNow())
+            if changed { capturePacer.discardPending() }
             captureLock.unlock()
+            // Logged after the lock: log() hops to the main queue and must never run under it.
+            if changed { log("Audio path: microphone \(newValue ? "muted" : "unmuted")") }
         }
     }
     private(set) var isSpeakerEnabled = false
@@ -79,6 +82,8 @@ final class AudioEngine {
     private var lastProducedFrames = 0
     private var lastSentFrames = 0
     private var lastCaptureHealthAt: Date?
+    /// Loudness of the sent microphone frames, reported with CAPTURE_HEALTH; network queue only.
+    private var micLevel = MicLevel()
     /// Timestamps for the "where did the first second go" diagnostics.
     private var engineStartedAt: Date?
     private var firstPcmLogged = false
@@ -283,7 +288,17 @@ final class AudioEngine {
             let input = engine.inputNode
             let vpBegan = Date()
             do {
-                try input.setVoiceProcessingEnabled(true)
+                // warmUp() prepares the graph, which initializes the input unit, and voice
+                // processing cannot be switched on an initialized unit. The first call after every
+                // launch got kAudioUnitErr_Initialized (-10849, 29.10.2026 01:27), ran without echo
+                // cancellation, never rendered the player and only recovered after a 2 s wait and a
+                // rebuild. Releasing what prepare() allocated first makes the first start do what
+                // that working rebuild did. The node keeps voice processing on afterwards, so later
+                // starts skip both steps (vp=0 ms in the 07:49 call).
+                if !input.isVoiceProcessingEnabled {
+                    engine.stop()
+                    try input.setVoiceProcessingEnabled(true)
+                }
             } catch {
                 let vpError = error as NSError
                 log("Voice processing could not be enabled: code=\(vpError.code) " +
@@ -402,6 +417,11 @@ final class AudioEngine {
                 self.lastRecoveredFrames = 0
                 self.lastMissingPackets = 0
             }
+            // stop() zeroed the pacer's counters; without this the first CAPTURE_HEALTH after a
+            // rebuild reported a negative produced/s.
+            self.lastProducedFrames = 0
+            self.lastCaptureHealthAt = nil
+            self.micLevel = MicLevel()
             self.lastSession = session
             self.lastKey = key
             self.sealer = MediaSealer(key: key, session: session)
@@ -634,12 +654,19 @@ final class AudioEngine {
         }
         var pcm = Data(capacity: samples.count * 2)
         let muted = isMuted
+        var frameSquares = 0.0
+        var framePeak = 0
         for sample in samples {
             // Muted frames keep flowing as silence so the Redmi still sees a live iPhone.
-            let bits = UInt16(bitPattern: muted ? 0 : sample)
+            let value: Int16 = muted ? 0 : sample
+            let bits = UInt16(bitPattern: value)
             pcm.append(UInt8(truncatingIfNeeded: bits))
             pcm.append(UInt8(truncatingIfNeeded: bits >> 8))
+            let magnitude = abs(Int(value))
+            if magnitude > framePeak { framePeak = magnitude }
+            frameSquares += Double(value) * Double(value)
         }
+        micLevel.add(squares: frameSquares, samples: samples.count, peak: framePeak)
         // Type 2 carries the frame before this one as well, so the Redmi can rebuild a frame that
         // was lost on the way. Type 1 stays the plain frame: an older Redmi never asks for the
         // copy, and the very first frame of a stream has nothing to repeat.
@@ -678,6 +705,8 @@ final class AudioEngine {
         let produced = capturePacer.acceptedFrames
         let expired = capturePacer.droppedExpired
         let overflow = capturePacer.droppedOverflow
+        // Read under the lock already held here; self.isMuted would take it again and deadlock.
+        let mutedNow = captureMute.isMuted
         captureLock.unlock()
         let producedPerSecond = Int(Double(produced - lastProducedFrames) / elapsed)
         let sentPerSecond = Int(Double(sentFrames - lastSentFrames) / elapsed)
@@ -690,7 +719,8 @@ final class AudioEngine {
         lastRecoveredFrames = recoveredFrames
         lastMissingPackets = missingPackets
         log("CAPTURE_HEALTH produced=\(producedPerSecond)/s sent=\(sentPerSecond)/s " +
-            "expired=\(expired) overflow=\(overflow) pending=\(pendingSends)")
+            "expired=\(expired) overflow=\(overflow) pending=\(pendingSends) " +
+            "\(micLevel.take()) muted=\(mutedNow ? 1 : 0)")
         log("DOWNLINK_HEALTH maxGap=\(playbackBuffer.maxArrivalGapMs)ms " +
             "underruns=\(playbackBuffer.underruns) dropped=\(playbackBuffer.droppedFrames) " +
             "scheduled=\(playbackBuffer.scheduledFrames) rx=\(receivedPerSecond)/s " +
@@ -703,7 +733,10 @@ final class AudioEngine {
         guard pendingSends < maximumPendingSends, let sealer, let socket = connection else { return false }
         txCounter &+= 1
         let hearing = lastDownlink.map { Date().timeIntervalSince($0) < 0.5 } ?? false
-        guard let packet = sealer.seal(type: type, flags: hearing ? MediaSealer.flagHearing : 0,
+        var flags: UInt8 = hearing ? MediaSealer.flagHearing : 0
+        // Tells the Redmi that a silent uplink is a mute, not a dead microphone.
+        if isMuted { flags |= MediaSealer.flagMuted }
+        guard let packet = sealer.seal(type: type, flags: flags,
                                        counter: txCounter, payload: pcm) else { return false }
         pendingSends += 1
         // A keepalive breaks the "the previous frame is in the last packet" chain. Without this the
@@ -811,5 +844,46 @@ final class AudioEngine {
 
     private func log(_ message: String) {
         DispatchQueue.main.async { [weak self] in self?.onLog?(message) }
+    }
+}
+
+/// Loudness of the sent microphone frames on the Redmi's PcmLevelMeter scale, so the iPhone's
+/// CAPTURE_HEALTH and the Redmi's uplink level in RELAY_HEALTH can be compared directly: a frame
+/// counts as speech when its own RMS is at least -50 dBFS, and silence reports -99.
+struct MicLevel {
+    private static let fullScale = 32768.0
+    private static let speechGateDbfs = -50.0
+    private var frames = 0
+    private var activeFrames = 0
+    private var activeSquares = 0.0
+    private var activeSamples = 0
+    private var peak = 0
+
+    mutating func add(squares: Double, samples: Int, peak framePeak: Int) {
+        guard samples > 0 else { return }
+        frames += 1
+        if framePeak > peak { peak = framePeak }
+        if Self.dbfs((squares / Double(samples)).squareRoot()) >= Self.speechGateDbfs {
+            activeFrames += 1
+            activeSquares += squares
+            activeSamples += samples
+        }
+    }
+
+    /// The window as "micSpeechDbfs=.. micPeakDbfs=.. micActive=..%", then starts a new one.
+    mutating func take() -> String {
+        let speech = activeSamples > 0 ? Self.rounded(Self.dbfs((activeSquares / Double(activeSamples)).squareRoot())) : -99
+        let peakDbfs = Self.rounded(Self.dbfs(Double(peak)))
+        let active = frames > 0 ? activeFrames * 100 / frames : 0
+        self = MicLevel()
+        return "micSpeechDbfs=\(speech) micPeakDbfs=\(peakDbfs) micActive=\(active)%"
+    }
+
+    private static func dbfs(_ amplitude: Double) -> Double {
+        amplitude > 0 ? 20 * log10(amplitude / fullScale) : -Double.infinity
+    }
+
+    private static func rounded(_ value: Double) -> Int {
+        value.isInfinite || value < -99 ? -99 : Int(value.rounded())
     }
 }

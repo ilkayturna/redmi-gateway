@@ -124,6 +124,8 @@ final class SecureChannel {
 struct MediaSealer {
     static let headerBytes = 10
     static let flagHearing: UInt8 = 0x01
+    /// The iPhone's microphone is muted; its frames are zeroed on purpose.
+    static let flagMuted: UInt8 = 0x02
     private static let uplinkTag = Data("UPLK".utf8)
     private static let downlinkTag = Data("DNLK".utf8)
 
