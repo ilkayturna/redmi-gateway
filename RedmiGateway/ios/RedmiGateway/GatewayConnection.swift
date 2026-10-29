@@ -1482,6 +1482,8 @@ public final class GatewayConnection: ObservableObject {
     /// Closes the idle link once the grace is over, or the moment the app is back on screen.
     private func endIdleLink(reason: String) {
         if idleLinkTask != .invalid {
+            // The grace may be the app's last background time; what changed must be on disk.
+            history.flush()
             UIApplication.shared.endBackgroundTask(idleLinkTask)
             idleLinkTask = .invalid
         }
@@ -1536,6 +1538,10 @@ public final class GatewayConnection: ObservableObject {
 
     private func finishCatchUp() {
         Notifier.shared.updateBadge()
+        // Ending the background time lets iOS suspend and later end the app: what the catch-up
+        // fetched must be on disk first, or the next sync announces it all again. On screen the
+        // usual delayed save is enough, and leaving the screen saves as well.
+        if UIApplication.shared.applicationState != .active { history.flush() }
         guard catchUpTask != .invalid else { return }
         if closeAfterCatchUp, UIApplication.shared.applicationState == .background, currentCall == nil {
             closeSocket()
