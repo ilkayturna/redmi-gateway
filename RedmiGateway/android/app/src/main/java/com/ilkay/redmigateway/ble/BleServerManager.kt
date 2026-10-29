@@ -55,19 +55,6 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         private const val ATT_HEADER_BYTES = 3
         private const val MAX_CONTROL_AGE_MS = 60_000L
         private const val SUBSCRIBE_GRACE_MS = 10_000L
-        /**
-     * Grace before the first reconnect pulse when the iPhone's link simply dropped.
-     *
-     * Twenty seconds was the old value and it turned a normal iOS suspension into a wake loop: the
-     * iPhone connects, iOS suspends it about fifty milliseconds later (measured 14:21:05 "iPhone
-     * linked again" and 22 ms later "iPhone has no link"), that drop was read as "the phone is away",
-     * and the pulse woke it again - 15 connections and 8 pulses in one idle hour. iOS suspension is
-     * the normal resting state, not a fault, and it costs nothing to leave it alone: an incoming or
-     * outgoing call lights the call beacon immediately, and SMS/missed calls pulse at once through
-     * wakeForNews. A phone that is genuinely away (from across the room, a Bluetooth restart, a
-     * reboot) still comes back within five minutes.
-     */
-    private const val RECONNECT_GRACE_MS = 5 * 60_000L
         private const val SWIPED_AWAY_GRACE_MS = 3_000L
         private const val BEACON_MAJORS = 4
         private const val PULSE_MS = 10_000L
@@ -833,6 +820,8 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
     @Volatile private var reconnectPulses = 0
     private var pulseUntil = 0L
     private val reachabilityListener: () -> Unit = { linkChanged() }
+    /** When the iPhone's current link came up, or null while it has none; main thread only. */
+    private var linkedSince: Long? = null
     private var pulseScheduled = false
     private val reconnectPulse = Runnable { pulseScheduled = false; pulse() }
 
@@ -859,19 +848,28 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         com.ilkay.redmigateway.service.IPhoneReachability.changed()
         mainHandler.post {
             val linked = iPhoneLinked()
+            val now = android.os.SystemClock.elapsedRealtime()
             if (linked || !shouldBeRunning || PairingStore.pairedClient() == null) {
                 if (reconnectPulses > 0 || pulseUntil != 0L) Log.i(TAG, "iPhone linked again; reconnect pulses stop")
                 mainHandler.removeCallbacks(reconnectPulse)
                 pulseScheduled = false
-                reconnectPulses = 0
+                // The count survives a link: only one that held starts the backoff over (below).
+                if (linked) { if (linkedSince == null) linkedSince = now } else reconnectPulses = 0
                 pulseUntil = 0L
                 updateCallBeacon()
-            } else if (quick) {
-                // The app turned call-state updates off: it was swiped away. Wake it at once.
-                schedulePulse(SWIPED_AWAY_GRACE_MS)
-            } else if (!pulseScheduled) {
-                // A short grace first: Bluetooth restarts and range blips reconnect by themselves.
-                schedulePulse(RECONNECT_GRACE_MS)
+            } else {
+                val heldMs = linkedSince?.let { now - it }
+                linkedSince = null
+                val (count, delay) = ReconnectPulsePolicy.afterLinkEnds(heldMs, reconnectPulses)
+                reconnectPulses = count
+                if (quick) {
+                    // The app turned call-state updates off: it was swiped away. Wake it at once.
+                    schedulePulse(SWIPED_AWAY_GRACE_MS)
+                } else if (!pulseScheduled) {
+                    // After a link that worked, a short grace: Bluetooth restarts and range blips
+                    // reconnect by themselves. After a woken app that iOS suspended again, the backoff.
+                    schedulePulse(delay)
+                }
             }
             // The Bluetooth link can be healthy while the socket is gone, in which case neither
             // the beacon nor the pulse above ever fires because iPhoneLinked() says linked. Ask
@@ -898,12 +896,7 @@ class BleServerManager(private val context: Context) : CallManager.CallListener,
         // once, and new SMS/missed calls still pulse immediately through wakeForNews.
         // So: a link that just blipped comes back in three minutes, a phone that is probably out of
         // the room waits ten, and one that has been gone for half an hour waits thirty.
-        val pause = when {
-            reconnectPulses < 3 -> 3 * 60_000L
-            reconnectPulses < 10 -> 10 * 60_000L
-            else -> 30 * 60_000L
-        }
-        schedulePulse(PULSE_MS + pause)
+        schedulePulse(PULSE_MS + ReconnectPulsePolicy.pauseAfterPulse(reconnectPulses))
         mainHandler.postDelayed({ updateCallBeacon() }, PULSE_MS + 100)
     }
 
