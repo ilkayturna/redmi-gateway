@@ -1468,6 +1468,14 @@ object CallAudioRelay : CallManager.CallListener {
     private fun stopMedia() {
         if (!mediaRunning && downlink == null && uplink == null) return
         mediaRunning = false
+        // The sender thread stops with the media; close the ringback line here (worker thread, like
+        // tick) so it does not surface at the start of the next call.
+        ringbackPlaying = false
+        if (loggedRingback) {
+            loggedRingback = false
+            Log.i(TAG, "RINGBACK off (media stopped)")
+            com.ilkay.redmigateway.journal.DiagnosticsLog.record("Audio", "RINGBACK off (media stopped)")
+        }
         releaseCallWifiLock()
         writerThread?.interrupt()
         writerThread?.join(300)
