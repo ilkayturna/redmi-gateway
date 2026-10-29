@@ -10,28 +10,36 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.provider.ContactsContract
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import com.ilkay.redmigateway.server.ContactResolver
 import com.ilkay.redmigateway.ui.CallActivity
 import com.ilkay.redmigateway.ui.PhoneActivity
-import java.util.concurrent.ConcurrentHashMap
 
-/** The default dialer's visible call controls. Telecom continues to own the ringtone. */
+/**
+ * The default dialer's visible call controls, and the Redmi's own missed-call and voicemail rows.
+ *
+ * The ringtone is RedmiRinger's (IN_CALL_SERVICE_RINGING), not Telecom's. Missed calls are no
+ * longer guessed here from "rang and never became active": that also counted calls declined on
+ * the iPhone and added a second row next to Telecom's (quiet-5). MissedCallsReceiver now follows
+ * Telecom's own missed-call count, and the rows below are shown only without a paired iPhone.
+ */
 object CallUiNotifier : CallManager.CallListener {
+    private const val TAG = "CallUiNotifier"
     private const val CHANNEL = "cellular_calls"
     private const val QUIET_CHANNEL = "cellular_calls_quiet"
     private const val MISSED_CHANNEL = "missed_calls"
+    /** Held the per-call rows posted while paired; deleted so those rows go with it. */
     private const val MISSED_QUIET_CHANNEL = "missed_calls_quiet"
     private const val NOTIFICATION_ID = 4301
+    private const val VOICEMAIL_NOTIFICATION_ID = 4302
+    /** One row for all unseen missed calls; the old per-call rows used 4400 + a hash. */
+    private const val MISSED_NOTIFICATION_ID = 4400
+    const val ACTION_MISSED_SEEN = "com.ilkay.redmigateway.call.missed_seen"
     private val mainHandler = Handler(Looper.getMainLooper())
     private var appContext: Context? = null
-
-    private val ringingCallNumbers = ConcurrentHashMap<String, String?>()
-    private val activeCallIds = ConcurrentHashMap.newKeySet<String>()
-    @Volatile private var lastRingingId: String? = null
-    @Volatile private var lastRingingNumber: String? = null
-    @Volatile private var lastWasActive: Boolean = false
+    @Volatile private var channelsReady = false
 
     fun start(context: Context) {
         if (appContext != null) return
@@ -52,33 +60,7 @@ object CallUiNotifier : CallManager.CallListener {
             val context = appContext ?: return@post
             val manager = context.getSystemService(NotificationManager::class.java)
 
-            if (state == "ringing") {
-                val key = if (callId.isNotBlank() && callId != "none") callId else "current"
-                val num = number ?: CallManager.currentPhoneNumber
-                ringingCallNumbers[key] = num
-                lastRingingId = key
-                lastRingingNumber = num
-                lastWasActive = false
-            } else if (state == "active") {
-                val key = if (callId.isNotBlank() && callId != "none") callId else "current"
-                activeCallIds.add(key)
-                lastWasActive = true
-            }
-
             if (state == "idle" || state == "disconnected" || state == "disconnecting") {
-                // Check if this was a missed call (rang without ever becoming active)
-                val key = callUiKey(callId, lastRingingId)
-                if (key != null) {
-                    val missedNum = ringingCallNumbers.remove(key) ?: lastRingingNumber
-                    val becameActive = activeCallIds.remove(key) || lastWasActive
-                    if (wasMissed(missedNum, becameActive)) {
-                        postMissedCallNotification(context, key, missedNum as String)
-                    }
-                }
-                lastRingingId = null
-                lastRingingNumber = null
-                lastWasActive = false
-
                 if (CallManager.isCallLive()) {
                     return@post
                 }
@@ -215,54 +197,110 @@ object CallUiNotifier : CallManager.CallListener {
         return number
     }
 
-    private fun postMissedCallNotification(context: Context, callId: String, number: String?) {
-        val manager = context.getSystemService(NotificationManager::class.java) ?: return
-        val caller = resolveCallerName(context, number)
-        val notifId = 4400 + (callId.hashCode() and 0x7FFF)
-        val contentIntent = PendingIntent.getActivity(
-            context,
-            notifId,
-            Intent(context, PhoneActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            },
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        // With a paired iPhone the missed call is shown there (journal and Apple push), and on the
-        // Redmi this row only lit the screen in the pocket (25.10.2026 15:06:59). Without a pairing
-        // the Redmi is the only place to see it, so it keeps its normal channel.
-        val quiet = com.ilkay.redmigateway.security.PairingStore.pairedClient() != null
-        val builder = NotificationCompat.Builder(context, if (quiet) MISSED_QUIET_CHANNEL else MISSED_CHANNEL)
+    /**
+     * Telecom's unseen missed calls, on the Redmi itself. Only called without a paired iPhone:
+     * then this phone is the one in the owner's hand, so it behaves like any dialer (one row that
+     * counts up, "Geri ara" through Telecom for a single call, swiping it marks the calls seen).
+     *
+     * @param count Telecom's count of unseen missed calls, at least 1
+     * @param number the latest caller, or null when hidden
+     * @param callBack Telecom's own call-back intent, sent only when [count] is 1
+     */
+    fun showMissedCalls(context: Context, count: Int, number: String?, callBack: PendingIntent?) {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: run {
+            Log.w(TAG, "No NotificationManager; missed calls not shown")
+            return
+        }
+        ensureChannels(context)
+        val caller = if (number.isNullOrBlank()) "Gizli numara" else resolveCallerName(context, number)
+        val builder = NotificationCompat.Builder(context, MISSED_CHANNEL)
             .setSmallIcon(android.R.drawable.sym_call_missed)
-            .setContentTitle("Cevapsız Arama")
-            .setContentText(caller)
-            .setContentIntent(contentIntent)
+            .setContentTitle(missedCallsTitle(count))
+            .setContentText(if (count > 1) "Son arayan: $caller" else caller)
+            .setContentIntent(openRecents(context, MISSED_NOTIFICATION_ID))
+            .setDeleteIntent(missedSeenIntent(context))
             .setAutoCancel(true)
+            .setNumber(count)
             .setCategory(NotificationCompat.CATEGORY_MISSED_CALL)
-            .setPriority(if (quiet) NotificationCompat.PRIORITY_LOW else NotificationCompat.PRIORITY_HIGH)
-            .setSilent(quiet)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        if (callBack != null) builder.addAction(android.R.drawable.sym_action_call, "Geri ara", callBack)
+        runCatching { manager.notify(MISSED_NOTIFICATION_ID, builder.build()) }
+            .onFailure { CallManager.log("Cevapsız arama bildirimi gösterilemedi: ${it.message}") }
+    }
 
-        if (!number.isNullOrBlank()) {
-            val dialIntent = PendingIntent.getActivity(
-                context,
-                notifId + 1,
-                Intent(Intent.ACTION_DIAL, Uri.parse("tel:${Uri.encode(number)}")),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            builder.addAction(
-                android.R.drawable.sym_action_call,
-                "Geri Ara",
-                dialIntent
-            )
+    /**
+     * Removes the missed-call row, and the per-call rows earlier versions posted (4400 + a hash,
+     * never cancelled; quiet-5). Those are found by channel, because their ids cannot be listed.
+     */
+    fun cancelMissedCalls(context: Context) {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: run {
+            Log.w(TAG, "No NotificationManager; missed-call rows not removed")
+            return
         }
-
+        ensureChannels(context)
+        manager.cancel(MISSED_NOTIFICATION_ID)
         runCatching {
-            manager.notify(notifId, builder.build())
-            CallManager.log("Cevapsız arama bildirimi gösterildi: $caller ($number)")
-        }.onFailure {
-            CallManager.log("Cevapsız arama bildirimi gösterilemedi: ${it.message}")
+            manager.activeNotifications
+                .filter { it.notification.channelId == MISSED_CHANNEL && it.id != VOICEMAIL_NOTIFICATION_ID }
+                .forEach { manager.cancel(it.tag, it.id) }
+        }.onFailure { Log.w(TAG, "Could not list the old missed-call rows: ${it.javaClass.simpleName}") }
+    }
+
+    /**
+     * A carrier voicemail indicator on the Redmi itself, only without a paired iPhone.
+     *
+     * @param count waiting messages, or -1 when the carrier only says "waiting"
+     * @param call the phone app's intent that dials the voicemail box, if it sent one
+     * @param alert false for a refresh (after a reboot or SIM change), which must not sound
+     */
+    fun showVoicemail(context: Context, count: Int, call: PendingIntent?, alert: Boolean) {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: run {
+            Log.w(TAG, "No NotificationManager; voicemail not shown")
+            return
         }
+        ensureChannels(context)
+        val builder = NotificationCompat.Builder(context, MISSED_CHANNEL)
+            .setSmallIcon(android.R.drawable.stat_notify_voicemail)
+            .setContentTitle("Sesli mesaj")
+            .setContentText(if (count > 1) "$count yeni sesli mesaj" else "Yeni sesli mesaj")
+            .setContentIntent(call ?: openRecents(context, VOICEMAIL_NOTIFICATION_ID))
+            .setOnlyAlertOnce(true)
+            .setSilent(!alert)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        runCatching { manager.notify(VOICEMAIL_NOTIFICATION_ID, builder.build()) }
+            .onFailure { CallManager.log("Sesli mesaj bildirimi gösterilemedi: ${it.message}") }
+    }
+
+    fun cancelVoicemail(context: Context) {
+        val manager = context.getSystemService(NotificationManager::class.java) ?: run {
+            Log.w(TAG, "No NotificationManager; voicemail row not removed")
+            return
+        }
+        manager.cancel(VOICEMAIL_NOTIFICATION_ID)
+    }
+
+    private fun openRecents(context: Context, requestCode: Int): PendingIntent = PendingIntent.getActivity(
+        context,
+        requestCode,
+        Intent(context, PhoneActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        },
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    /** Swiping the row away is "seen", as in any dialer: the calls stop counting and are marked read. */
+    private fun missedSeenIntent(context: Context): PendingIntent = PendingIntent.getBroadcast(
+        context,
+        MISSED_NOTIFICATION_ID,
+        Intent(context, CallActionReceiver::class.java).setAction(ACTION_MISSED_SEEN),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    private fun ensureChannels(context: Context) {
+        if (channelsReady) return
+        createChannel(context)
     }
 
     private fun createChannel(context: Context) {
@@ -272,7 +310,7 @@ object CallUiNotifier : CallManager.CallListener {
         ).apply {
             description = "Redmi'ye gelen ve Redmi'den yapılan aramalar"
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
-            // Android Telecom rings the handset. A second notification tone would duplicate it.
+            // RedmiRinger plays the ringtone itself. A second notification tone would duplicate it.
             setSound(null, null)
         }
         // A call the iPhone carries, and any call in progress: shown in the shade and on the lock
@@ -290,26 +328,28 @@ object CallUiNotifier : CallManager.CallListener {
         val missedChannel = NotificationChannel(
             MISSED_CHANNEL, "Cevapsız aramalar", NotificationManager.IMPORTANCE_DEFAULT
         ).apply {
-            description = "Redmi'deki cevapsız arama bildirimleri"
+            description = "iPhone eşli değilken Redmi'deki cevapsız arama ve sesli mesaj bildirimleri"
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
-        }
-        val missedQuietChannel = NotificationChannel(
-            MISSED_QUIET_CHANNEL, "Cevapsız aramalar (iPhone'da da)", NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = "iPhone eşliyken Redmi'deki cevapsız aramalar; ekranı yakmaz"
-            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
-            setSound(null, null)
-            enableVibration(false)
         }
         manager.createNotificationChannel(callChannel)
         manager.createNotificationChannel(missedChannel)
-        manager.createNotificationChannel(missedQuietChannel)
+        // Nothing is posted on the quiet missed-call channel any more; deleting it also removes
+        // every per-call row it still holds from earlier versions.
+        manager.deleteNotificationChannel(MISSED_QUIET_CHANNEL)
+        channelsReady = true
     }
 }
 
 class CallActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val callId = intent.getStringExtra("callId") ?: return
+        if (intent.action == CallUiNotifier.ACTION_MISSED_SEEN) {
+            MissedCalls.runAsync(this, context) { MissedCalls.markSeen(it, "row dismissed on the Redmi") }
+            return
+        }
+        val callId = intent.getStringExtra("callId") ?: run {
+            Log.w("CallActionReceiver", "Ignored ${intent.action}: no call id")
+            return
+        }
         when (intent.action) {
             "com.ilkay.redmigateway.call.answer" -> CallManager.answer(callId)
             "com.ilkay.redmigateway.call.reject" -> CallManager.reject(callId)
@@ -318,28 +358,6 @@ class CallActionReceiver : BroadcastReceiver() {
     }
 }
 
-/**
- * The key a call is tracked under while it rings and then ends.
- *
- * Telecom sometimes reports a call id of "none" or an empty string, and the missed call decision
- * needs something to look the number up by, so the last id that rang is used instead. When there
- * is neither, the answer is null and no notification is posted, which is the right outcome: there
- * is no call to report.
- *
- * @param callId the id from the call state callback
- * @param lastRingingId the id of the call that last rang, or null
- */
-internal fun callUiKey(callId: String, lastRingingId: String?): String? =
-    if (callId.isNotBlank() && callId != "none") callId else lastRingingId
-
-/**
- * Whether a call that has just ended was missed.
- *
- * A call is missed when it rang, so a number was recorded, and it never became active. A call the
- * person answered and then hung up is not missed, and neither is one that never rang.
- *
- * @param missedNumber the number the ringing call came from, or null if none was recorded
- * @param becameActive whether the call was ever answered
- */
-internal fun wasMissed(missedNumber: String?, becameActive: Boolean): Boolean =
-    missedNumber != null && !becameActive
+/** The title of the Redmi's missed-call row: Telecom's count, as a person would say it. */
+internal fun missedCallsTitle(count: Int): String =
+    if (count > 1) "$count cevapsız arama" else "Cevapsız arama"
