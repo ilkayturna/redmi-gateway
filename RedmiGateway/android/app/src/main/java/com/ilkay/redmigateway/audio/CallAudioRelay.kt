@@ -55,7 +55,8 @@ import kotlin.math.cos
  * UDP packets on port 8791 carry 20 ms of 16 kHz mono PCM16 (640 bytes) in both directions.
  * Protocol 2 sessions (sealed):
  *   [0..3] session id  [4..7] packet counter (uint32 BE, per direction and session)  [8] type
- *   [9] flags: iPhone -> Redmi bit 0 = the iPhone is receiving downlink frames; otherwise 0
+ *   [9] flags: iPhone -> Redmi bit 0 = the iPhone is receiving downlink frames, bit 1 = its
+ *       microphone is muted and its frames are zeroed on purpose; Redmi -> iPhone 0
  *   [10..] AES-256-GCM(payload) || tag, nonce = "UPLK"|"DNLK" + counter + session, AAD = header
  * With sealed sessions the iPhone owns the call only while audio is confirmed in both
  * directions: the Redmi sees iPhone frames, and the iPhone's flag says it hears the Redmi.

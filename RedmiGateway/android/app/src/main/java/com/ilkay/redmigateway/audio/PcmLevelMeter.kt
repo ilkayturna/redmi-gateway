@@ -4,8 +4,9 @@ import kotlin.math.log10
 import kotlin.math.sqrt
 
 /**
- * Loudness of the PCM16 frames sent to the iPhone, so "the other side sounds quiet" can be told
- * apart from a quiet line: before this nothing in the relay measured level at all.
+ * Loudness of a PCM16 stream: the frames sent to the iPhone (downlink) and the iPhone's frames
+ * written into the call (uplink), so "the other side sounds quiet" or "they cannot hear me" can be
+ * told apart from a quiet line: before this nothing in the relay measured level at all.
  *
  * Pauses would drag a plain average down to silence, so the speech level only averages frames
  * whose own RMS is above [SPEECH_GATE_DBFS]. A telephone speech level around -26 to -18 dBFS is
