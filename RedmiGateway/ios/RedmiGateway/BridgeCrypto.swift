@@ -121,9 +121,12 @@ final class SecureChannel {
 
 /// UDP media framing for protocol 2 sessions (see CallAudioRelay on the Redmi):
 /// [0..3] session  [4..7] counter  [8] type  [9] flags  [10..] ciphertext || tag, header as AAD.
+/// Flags, iPhone to Redmi: bit 0 = receiving downlink, bit 1 = microphone muted (frames zeroed).
 struct MediaSealer {
     static let headerBytes = 10
     static let flagHearing: UInt8 = 0x01
+    /// The iPhone's microphone is muted; its frames are zeroed on purpose.
+    static let flagMuted: UInt8 = 0x02
     private static let uplinkTag = Data("UPLK".utf8)
     private static let downlinkTag = Data("DNLK".utf8)
 
