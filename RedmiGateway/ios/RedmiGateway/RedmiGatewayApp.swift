@@ -5,6 +5,8 @@ import UIKit
 final class AppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // First, before anything below logs: this run's own lines go to the same backlog file.
+        let unsentTelemetry = TelemetryBacklog.takePrevious()
         // iOS may relaunch the app in the background for a Bluetooth event (state restoration).
         // The Bluetooth manager, the Redmi link and CallKit must exist before that event is
         // delivered, whether or not a window is ever shown.
@@ -15,11 +17,21 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         // this app talks to cannot read iOS logs. Capture the next one into a file that the
         // existing "copy report" path shows, so a crash at hang-up is diagnosable next time.
         CrashTrace.install()
-        CrashTrace.reportPreviousCrash()
+        // Swift traps, watchdog and memory kills never reach the exception handler; iOS reports
+        // them through MetricKit, on this launch for a crash of the last one.
+        MetricKitReporter.shared.start()
+        let crashed = CrashTrace.reportPreviousCrash()
+        // A run that ended while in use without an exception (a kill during a call, for example)
+        // is reported from the marker it left behind; then this run's marker replaces it.
+        ExitMarker.reportPreviousRun(crashRecorded: crashed,
+                                     launchAppState: application.applicationState == .background ? "background" : "foreground")
+        GatewayConnection.shared.recordRunMarker()
+        // Lines the last run wrote but never handed to the socket go to the Redmi first.
+        GatewayConnection.shared.restoreUnsentTelemetry(unsentTelemetry)
         // The memory ring starts empty on every launch, and the call worth explaining usually ran in
         // the previous one: iOS kills a backgrounded app, the person opens it to copy the report, and
-        // the failure is already out of memory. The file keeps it, so its tail is put back into the
-        // ring the copied report shows.
+        // the failure is already out of memory. The file keeps it, so its tail is put back on the
+        // screen the copied report comes from.
         LogFile.replayTail()
         GatewayConnection.shared.start()
         VoipPush.shared.start()
@@ -100,13 +112,14 @@ struct RedmiGatewayApp: App {
 /// Keeps the ending of the previous run on disk.
 ///
 /// The app's log lives in memory only, so a crash at hang-up on 17.10.2026 left no trace at all,
-/// and the phone this app talks to cannot read iOS logs either. Two small pieces make the next one
-/// diagnosable from the report the app already copies: an uncaught exception writes its name,
-/// reason and symbols to a file, and the next launch puts that text into the log ring.
+/// and the phone this app talks to cannot read iOS logs either. An uncaught exception writes its
+/// name, reason and symbols to a file, and the next launch sends that text to the Redmi as an
+/// `nsexception` report (DiagnosticsOutbox) and logs its first lines.
 ///
-/// Only the exception path is covered. A watchdog kill or a hang leaves no exception, which is why
-/// the phone keeps its own diagnostics of the same call: the two sides together say whether this
-/// app died or merely stopped answering.
+/// Only the exception path is covered here. A watchdog kill, a memory kill or a Swift trap leaves
+/// no exception; MetricKitReporter and ExitMarker cover those, and the Redmi keeps its own
+/// diagnostics of the same call: together they say whether this app died or merely stopped
+/// answering.
 enum CrashTrace {
     private static var fileURL: URL {
         let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
@@ -122,14 +135,31 @@ enum CrashTrace {
             \(exception.callStackSymbols.joined(separator: "\n"))
             """
             try? text.write(to: CrashTrace.fileURL, atomically: true, encoding: .utf8)
+            // The lines written just before the exception may still be on their way to the backlog.
+            TelemetryBacklog.drain()
         }
     }
 
+    /// Sends the previous run's exception text to the Redmi and logs its first two lines; returns
+    /// whether there was one.
+    ///
+    /// The whole text used to go into the log as one line with embedded newlines: the Redmi cut it
+    /// at 4,000 chars, and the batch around it could pass the Redmi's frame gate and vanish. The
+    /// outbox sends it in parts that are confirmed one by one.
     @MainActor
-    static func reportPreviousCrash() {
+    @discardableResult
+    static func reportPreviousCrash() -> Bool {
         let url = fileURL
-        guard let text = try? String(contentsOf: url, encoding: .utf8), !text.isEmpty else { return }
-        GatewayConnection.shared.log("Previous run crashed: " + text)
+        // No file: the previous run raised no exception.
+        guard let text = try? String(contentsOf: url, encoding: .utf8), !text.isEmpty else { return false }
+        let head = text.split(separator: "\n", maxSplits: 2).prefix(2).joined(separator: " | ")
+        if DiagnosticsOutbox.shared.enqueue(kind: "nsexception", data: Data(text.utf8)) {
+            GatewayConnection.shared.log("Previous run crashed: \(head) (\(text.utf8.count) bytes queued for the Redmi)")
+        } else {
+            // The outbox could not keep it; the log still carries it, split into pieces.
+            GatewayConnection.shared.log("Previous run crashed: " + text)
+        }
         try? FileManager.default.removeItem(at: url)
+        return true
     }
 }
