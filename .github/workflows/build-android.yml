@@ -1,10 +1,18 @@
 name: Build Android Telefon Gecidi
 
 on:
+  # Documentation-only commits have nothing to build; skipping them saves Actions minutes, whose
+  # exhaustion stopped every workflow on 16.10.2026.
   push:
-    branches: [main, codex/audio-jitter-fix]
+    branches: [main]
+    paths-ignore:
+      - '**/docs/**'
+      - '**/*.md'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**/docs/**'
+      - '**/*.md'
   workflow_dispatch:
 
 jobs:
