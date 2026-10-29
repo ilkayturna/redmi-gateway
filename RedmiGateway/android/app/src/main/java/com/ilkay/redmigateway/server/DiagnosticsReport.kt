@@ -8,6 +8,7 @@ import android.telecom.TelecomManager
 import com.ilkay.redmigateway.BuildConfig
 import com.ilkay.redmigateway.audio.CallAudioRelay
 import com.ilkay.redmigateway.ble.BleServerManager
+import com.ilkay.redmigateway.journal.IphoneDiagnostics
 import com.ilkay.redmigateway.security.PairingStore
 import com.ilkay.redmigateway.service.GatewayService
 import com.ilkay.redmigateway.service.HealthReporter
@@ -105,8 +106,30 @@ object DiagnosticsReport {
             .put("permissions", JSONObject().apply {
                 for (k in permissionKeys()) put(k, context.checkSelfPermission(permissionFor(k)) == PackageManager.PERMISSION_GRANTED)
             })
+            // What the iPhone last said about itself, from memory: build() runs on the main thread
+            // every two seconds and must not read files. The age tells a fresh report from a stale one.
+            .put("iphone", iphoneStatusSection(IphoneDiagnostics.latestStatus(), System.currentTimeMillis()))
+            // The same snapshot the iPhone receives as `health`, so both screens show one truth.
+            .put("health", HealthBus.latest() ?: JSONObject.NULL)
     }
 }
+
+/**
+ * The report's `iphone` section: the latest `client_status` with its receive time and age, or
+ * `{"status": null}` before the first one. A copy, so the report cannot change the stored snapshot.
+ *
+ * @param status the snapshot IphoneDiagnostics keeps, or null
+ * @param now the current wall time in ms
+ */
+internal fun iphoneStatusSection(status: IphoneDiagnostics.Status?, now: Long): JSONObject =
+    if (status == null) {
+        JSONObject().put("status", JSONObject.NULL)
+    } else {
+        JSONObject()
+            .put("status", JSONObject(status.values.toString()))
+            .put("receivedAt", status.receivedAt)
+            .put("ageMs", (now - status.receivedAt).coerceAtLeast(0L))
+    }
 
 /**
  * Whether both halves of the vendor audio fix are in the given file contents.
