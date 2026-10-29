@@ -40,6 +40,8 @@ object ApnsSender {
     const val TEAM_ID = "6FR2S79P48"
     const val BUNDLE_ID = "com.ilkay.redmigateway.ios"
     private const val HOST = "https://api.push.apple.com"
+    /** How long Apple keeps an SMS, missed-call or health alert for an offline iPhone. */
+    const val ALERT_LIFETIME_SECONDS = 24L * 3600
 
     private val client by lazy {
         OkHttpClient.Builder()
@@ -94,13 +96,23 @@ object ApnsSender {
     /** VoIP push: iOS launches the app, which must show the call with CallKit. */
     fun sendVoip(payload: JSONObject) = post("voip", "$BUNDLE_ID.voip", KEY_TOKEN, payload, collapseId = null)
 
-    /** Ordinary notification (SMS, missed call). */
-    fun sendAlert(title: String, body: String, threadId: String, collapseId: String) {
-        val payload = JSONObject().put("aps", JSONObject()
-            .put("alert", JSONObject().put("title", title).put("body", body))
-            .put("sound", "default")
-            .put("thread-id", threadId))
-        post("alert", BUNDLE_ID, KEY_ALERT_TOKEN, payload, collapseId, retry = true)
+    /**
+     * Ordinary notification (SMS, missed call, Redmi health; docs/WAVE1-CONTRACT.md section 7).
+     *
+     * Apple keeps it for [ALERT_LIFETIME_SECONDS] while the iPhone is offline: it has no cellular
+     * service, so a moment between networks used to lose the alert for good (CONS-13).
+     *
+     * @param category the iOS notification category that offers the actions (SMS, MISSED, HEALTH)
+     * @param extra keys placed next to "aps": the plaintext "open" route and the sealed "p"
+     * @param done null once Apple accepted the request, otherwise the problem
+     */
+    fun sendAlert(
+        title: String, body: String, threadId: String, collapseId: String,
+        category: String? = null, extra: JSONObject? = null, done: ((String?) -> Unit)? = null
+    ) {
+        val payload = alertPayload(title, body, threadId, category, extra)
+        post("alert", BUNDLE_ID, KEY_ALERT_TOKEN, payload, collapseId, done, retry = true,
+            expiration = apnsExpiration(System.currentTimeMillis(), ALERT_LIFETIME_SECONDS))
     }
 
     /**
@@ -173,21 +185,30 @@ object ApnsSender {
      *   device on 24.10.2026 23:24 and 25.10.2026 10:12: the request hung until the 15 s timeout,
      *   most likely on a pooled HTTP/2 connection the network had silently dropped, and the SMS
      *   alert was simply lost. Only alerts use it; a late VoIP push could ring a call that ended.
+     * @param expiration the apns-expiration header. "0" (the default) means Apple tries once and
+     *   stores nothing: right for VoIP and background pushes, where a call that rings minutes
+     *   later only confuses. Alerts pass a time from [apnsExpiration].
      */
     private fun post(
         type: String, topic: String, tokenKey: String, payload: JSONObject, collapseId: String?,
-        done: ((String?) -> Unit)? = null, priority: String = "10", retry: Boolean = false
+        done: ((String?) -> Unit)? = null, priority: String = "10", retry: Boolean = false,
+        expiration: String = "0"
     ) {
-        val token = prefs.getString(tokenKey, null) ?: return done?.invoke("iPhone bildirim kaydı yok.") ?: Unit
-        val jwt = providerToken() ?: return done?.invoke("Apple anahtarı okunamadı.") ?: Unit
+        val token = prefs.getString(tokenKey, null) ?: run {
+            Log.w(TAG, "APNs $type push skipped: no device token from the iPhone")
+            return done?.invoke("iPhone bildirim kaydı yok.") ?: Unit
+        }
+        val jwt = providerToken() ?: run {
+            Log.w(TAG, "APNs $type push skipped: the APNs key cannot be read")
+            return done?.invoke("Apple anahtarı okunamadı.") ?: Unit
+        }
         val request = Request.Builder()
             .url("$HOST/3/device/$token")
             .header("authorization", "bearer $jwt")
             .header("apns-push-type", type)
             .header("apns-topic", topic)
             .header("apns-priority", priority)
-            // Never deliver late: a call or code that arrives minutes later only confuses.
-            .header("apns-expiration", "0")
+            .header("apns-expiration", expiration)
             .apply { if (collapseId != null) header("apns-collapse-id", collapseId.take(64)) }
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
@@ -196,7 +217,7 @@ object ApnsSender {
                 Log.w(TAG, "APNs $type push failed: ${e.javaClass.simpleName}" + if (retry) "; retrying on a new connection" else "")
                 if (retry) {
                     client.connectionPool.evictAll()
-                    post(type, topic, tokenKey, payload, collapseId, done, priority, retry = false)
+                    post(type, topic, tokenKey, payload, collapseId, done, priority, retry = false, expiration = expiration)
                     return
                 }
                 done?.invoke("Apple'a ulaşılamadı (${e.javaClass.simpleName}).")
@@ -259,4 +280,33 @@ object ApnsSender {
         }
         return readInt() + readInt()
     }
+}
+
+/**
+ * The apns-expiration header value: "0" for a push that must never arrive late, otherwise the
+ * UNIX time in seconds until which Apple stores the push for an offline iPhone.
+ *
+ * Apple reads the header in seconds; a millisecond value would be a date thousands of years away.
+ *
+ * @param nowMillis the current time in milliseconds
+ * @param lifetimeSeconds how long the push may wait; 0 or less means "deliver now or never"
+ */
+internal fun apnsExpiration(nowMillis: Long, lifetimeSeconds: Long): String =
+    if (lifetimeSeconds <= 0L) "0" else (nowMillis / 1000 + lifetimeSeconds).toString()
+
+/**
+ * The body of a visible alert push (docs/WAVE1-CONTRACT.md section 7).
+ *
+ * "aps" carries what iOS shows on its own; [extra] keys sit next to it at the top level, where
+ * the app reads them in its notification delegate. No badge: the iPhone keeps its own.
+ */
+internal fun alertPayload(title: String, body: String, threadId: String, category: String?, extra: JSONObject?): JSONObject {
+    val aps = JSONObject()
+        .put("alert", JSONObject().put("title", title).put("body", body))
+        .put("sound", "default")
+        .put("thread-id", threadId)
+    if (category != null) aps.put("category", category)
+    val payload = JSONObject()
+    extra?.keys()?.forEach { key -> if (key != "aps") payload.put(key, extra.get(key)) }
+    return payload.put("aps", aps)
 }

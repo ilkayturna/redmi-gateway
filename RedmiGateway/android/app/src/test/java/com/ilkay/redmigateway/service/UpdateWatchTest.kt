@@ -1,5 +1,6 @@
 package com.ilkay.redmigateway.service
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -47,5 +48,36 @@ class UpdateWatchTest {
         val second = UpdateWatch.changed(current, current)
         assertTrue(first)
         assertFalse(second)
+    }
+
+    // ---- the record the iPhone reads ("rom" in the health frame) ----
+
+    @Test
+    fun theFirstRecordHasNoPreviousBuild() {
+        assertEquals(UpdateWatch.Rom("build-a", null, null), UpdateWatch.next(null, "build-a", 1_000))
+    }
+
+    @Test
+    fun aChangeKeepsTheOldBuildAndTheTime() {
+        val before = UpdateWatch.Rom("build-a", null, null)
+        assertEquals(UpdateWatch.Rom("build-b", "build-a", 2_000), UpdateWatch.next(before, "build-b", 2_000))
+    }
+
+    @Test
+    fun laterStartsOnTheSameBuildDoNotEraseTheChange() {
+        // The iPhone may connect days after the one service start that noticed the update.
+        val changed = UpdateWatch.Rom("build-b", "build-a", 2_000)
+        assertEquals(changed, UpdateWatch.next(changed, "build-b", 9_000))
+    }
+
+    @Test
+    fun aSecondUpdateReplacesThePreviousBuild() {
+        val changed = UpdateWatch.Rom("build-b", "build-a", 2_000)
+        assertEquals(UpdateWatch.Rom("build-c", "build-b", 5_000), UpdateWatch.next(changed, "build-c", 5_000))
+    }
+
+    @Test
+    fun aBlankStoredBuildIsNotRecordedAsAChange() {
+        assertEquals(UpdateWatch.Rom("build-a", null, null), UpdateWatch.next(UpdateWatch.Rom("", null, null), "build-a", 1_000))
     }
 }
