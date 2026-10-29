@@ -132,6 +132,10 @@ public final class GatewayConnection: ObservableObject {
     private var smsTimeouts: [String: Task<Void, Never>] = [:]
     /// Retried sends waiting for the next journal sync before they may go out again; see retrySms.
     private var smsRetriesAfterSync = Set<String>()
+    /// New sends made while the link was down (a notification reply); see sendSms(waitForLink:).
+    private var smsAwaitingLink: [(requestId: String, recipient: String, message: String)] = []
+    /// A background catch-up holds the link until its SMS results are in; see finishCatchUp.
+    private var closeAfterSmsResults = false
     /// A decline or hang-up that reached neither link; see keepCallCommand.
     private var pendingCallCommand: (action: String, callId: String, at: Date)?
     /// When this iPhone last ran a "carry the call audio" request.
@@ -632,23 +636,38 @@ public final class GatewayConnection: ObservableObject {
             if let audio = decode(AudioStateMessage.self, data) { handleAudioState(audio) }
         case "sync_calls":
             if let sync = decode(SyncCallsMessage.self, data) {
-                Notifier.shared.post(missed: history.applyCallSync(sync.items, lastSeq: sync.lastSeq))
+                // Entries the Redmi already announced through Apple are not announced twice.
+                let pushed = decode(JournalPushMarks.self, data)?.ids ?? []
+                Notifier.shared.post(missed: history.applyCallSync(sync.items, lastSeq: sync.lastSeq, pushed: pushed),
+                                     pushed: pushed)
                 syncCallsHasMore = sync.hasMore
             }
         case "sync_sms":
             if let sync = decode(SyncSmsMessage.self, data) {
-                Notifier.shared.post(sms: history.applySmsSync(sync.items, lastSeq: sync.lastSeq))
+                let pushed = decode(JournalPushMarks.self, data)?.ids ?? []
+                Notifier.shared.post(sms: history.applySmsSync(sync.items, lastSeq: sync.lastSeq, pushed: pushed),
+                                     pushed: pushed)
                 if sync.hasMore || syncCallsHasMore {
                     requestSync()
                 } else {
                     resendRetriedSms()
+                    transmitSmsAwaitingLink()
                     finishCatchUp()
                 }
             }
         case "call_log":
-            if let push = decode(CallLogPush.self, data) { Notifier.shared.post(missed: history.applyCallPush(push.item)) }
+            if let push = decode(CallLogPush.self, data) {
+                let pushed = decode(JournalPushMarks.self, data)?.ids ?? []
+                Notifier.shared.post(missed: history.applyCallPush(push.item, pushed: pushed), pushed: pushed)
+                // The icon follows live entries too, not only the end of a sync.
+                Notifier.shared.updateBadge()
+            }
         case "sms":
-            if let push = decode(SmsPush.self, data) { Notifier.shared.post(sms: history.applySmsPush(push.item)) }
+            if let push = decode(SmsPush.self, data) {
+                let pushed = decode(JournalPushMarks.self, data)?.ids ?? []
+                Notifier.shared.post(sms: history.applySmsPush(push.item, pushed: pushed), pushed: pushed)
+                Notifier.shared.updateBadge()
+            }
         case "call_waiting":
             if let waiting = decode(CallWaitingMessage.self, data) { handleWaiting(waiting) }
         case "sms_send_result":
@@ -664,6 +683,7 @@ public final class GatewayConnection: ObservableObject {
                     smsRetriesAfterSync.remove(requestId)
                     history.completePending(requestId: requestId, success: result.success)
                     if !result.success { log("SMS send failed: \(result.error ?? "unknown")") }
+                    closeLinkIfSmsSettled()
                 }
             }
         case "diagnostics_result":
@@ -673,8 +693,11 @@ public final class GatewayConnection: ObservableObject {
             }
         case "resolve_contact":
             if let request = decode(ResolveContactMessage.self, data) {
-                PhoneContactDirectory.shared.ensureLoaded()
-                let name = PhoneContactDirectory.shared.name(for: request.number)
+                // This can arrive in the background, where a permission prompt would wait unseen and
+                // the full contact read is costly, so it never asks: before the list is loaded (on
+                // screen, PhoneContactDirectory) the one number is looked up directly.
+                let directory = PhoneContactDirectory.shared
+                let name = directory.name(for: request.number) ?? directory.lookUpName(request.number)
                 var reply: [String: Any] = [
                     "type": "contact_info",
                     "number": request.number
@@ -1314,20 +1337,47 @@ public final class GatewayConnection: ObservableObject {
     /// resendRetriedSms.
     private static let smsRetryGrace: TimeInterval = 3
 
-    /// Queues an SMS; its status in HistoryStore follows the Redmi's real send result.
-    func sendSms(recipient: String, message: String) {
+    /// Queues an SMS; its status in HistoryStore follows the Redmi's real send result. Returns the
+    /// request id of its pending copy.
+    ///
+    /// With `waitForLink` a send made while the link is down keeps its pending copy on
+    /// "Gönderiliyor…", the link is woken, and it goes out after the next sync (see
+    /// transmitSmsAwaitingLink), within the usual result timeout; otherwise it fails at once.
+    @discardableResult
+    func sendSms(recipient: String, message: String, waitForLink: Bool = false) -> String {
         let requestId = UUID().uuidString
         history.addPending(requestId: requestId, address: recipient, body: message)
         guard state == .authenticated else {
-            history.completePending(requestId: requestId, success: false)
-            return
+            if waitForLink {
+                smsAwaitingLink.append((requestId: requestId, recipient: recipient, message: message))
+                startSmsTimeout(requestId: requestId, after: Self.smsResultTimeout)
+                log("SMS waits for the link to the Redmi")
+                reconnectNow(reason: "SMS waiting")
+            } else {
+                log("SMS not sent: no link to the Redmi")
+                history.completePending(requestId: requestId, success: false)
+            }
+            return requestId
         }
         transmitSms(requestId: requestId, recipient: recipient, message: message)
+        return requestId
     }
 
     private func transmitSms(requestId: String, recipient: String, message: String) {
         send(["type": "send_sms", "recipient": recipient, "message": message, "requestId": requestId])
         startSmsTimeout(requestId: requestId, after: Self.smsResultTimeout)
+    }
+
+    /// Sends what waited for the link, once the sync after authentication is done: a new message
+    /// needs no journal check, and the catch-up then holds the link for its result.
+    private func transmitSmsAwaitingLink() {
+        guard !smsAwaitingLink.isEmpty, state == .authenticated else { return }
+        let waiting = smsAwaitingLink
+        smsAwaitingLink.removeAll()
+        log("Sending \(waiting.count) SMS that waited for the link")
+        for entry in waiting {
+            transmitSms(requestId: entry.requestId, recipient: entry.recipient, message: entry.message)
+        }
     }
 
     /// Marks the send failed when no result came in time. A late result for the same requestId
@@ -1340,7 +1390,14 @@ public final class GatewayConnection: ObservableObject {
             guard let self, !Task.isCancelled else { return }
             self.smsTimeouts.removeValue(forKey: requestId)
             self.smsRetriesAfterSync.remove(requestId)
+            if self.smsAwaitingLink.contains(where: { $0.requestId == requestId }) {
+                // Never sent: a link that comes up later must not send a message already shown
+                // as failed.
+                self.smsAwaitingLink.removeAll { $0.requestId == requestId }
+                self.log("SMS that waited for the link dropped: no link in time")
+            }
             self.history.completePending(requestId: requestId, success: false)
+            self.closeLinkIfSmsSettled()
         }
     }
 
@@ -1494,6 +1551,8 @@ public final class GatewayConnection: ObservableObject {
     /// Closes the idle link once the grace is over, or the moment the app is back on screen.
     private func endIdleLink(reason: String) {
         if idleLinkTask != .invalid {
+            // The grace may be the app's last background time; what changed must be on disk.
+            history.flush()
             UIApplication.shared.endBackgroundTask(idleLinkTask)
             idleLinkTask = .invalid
         }
@@ -1531,7 +1590,7 @@ public final class GatewayConnection: ObservableObject {
         guard pairing != nil else { return }
         if catchUpTask == .invalid {
             catchUpTask = UIApplication.shared.beginBackgroundTask(withName: "catch-up") {
-                Task { @MainActor in GatewayConnection.shared.endCatchUpTask() }
+                Task { @MainActor in GatewayConnection.shared.catchUpExpired() }
             }
         }
         closeAfterCatchUp = UIApplication.shared.applicationState == .background && currentCall == nil
@@ -1548,16 +1607,49 @@ public final class GatewayConnection: ObservableObject {
 
     private func finishCatchUp() {
         Notifier.shared.updateBadge()
+        // Ending the background time lets iOS suspend and later end the app: what the catch-up
+        // fetched must be on disk first, or the next sync announces it all again. On screen the
+        // usual delayed save is enough, and leaving the screen saves as well.
+        if UIApplication.shared.applicationState != .active { history.flush() }
         guard catchUpTask != .invalid else { return }
         if closeAfterCatchUp, UIApplication.shared.applicationState == .background, currentCall == nil {
+            if !smsTimeouts.isEmpty {
+                // An SMS sent in this wake (a reply from a notification) waits for its result.
+                // Closing now would leave it on "Gönderiliyor…" until the next link, and its
+                // timeout could then report a message that went out as failed.
+                if !closeAfterSmsResults { log("Background link held for \(smsTimeouts.count) SMS result(s)") }
+                closeAfterSmsResults = true
+                return
+            }
             closeSocket()
             if pairing != nil { link = .searching }
         }
         closeAfterCatchUp = false
+        closeAfterSmsResults = false
+        endCatchUpTask()
+    }
+
+    /// Finishes a background catch-up that held the link for SMS results once the last is in.
+    private func closeLinkIfSmsSettled() {
+        guard closeAfterSmsResults, smsTimeouts.isEmpty else { return }
+        closeAfterSmsResults = false
+        finishCatchUp()
+    }
+
+    /// iOS ends the catch-up's background time. A link still held for SMS results closes now: a
+    /// suspended app must not sit on a socket the Redmi takes as connected, or the Redmi would not
+    /// fall back to an Apple push for the next message. The Redmi keeps the result for the next link.
+    private func catchUpExpired() {
+        if closeAfterSmsResults, UIApplication.shared.applicationState == .background, currentCall == nil {
+            log("Background time ended before the SMS result(s); link closed, the next link brings them")
+            closeSocket()
+            if pairing != nil { link = .searching }
+        }
         endCatchUpTask()
     }
 
     private func endCatchUpTask() {
+        closeAfterSmsResults = false
         guard catchUpTask != .invalid else { return }
         UIApplication.shared.endBackgroundTask(catchUpTask)
         catchUpTask = .invalid
