@@ -1623,7 +1623,10 @@ public final class GatewayConnection: ObservableObject {
         guard currentCall == nil, !CallKitManager.shared.hasCalls else { return }
         if webSocketTask != nil {
             closeSocket()
-            log("Network link closed after the grace (\(reason)); Bluetooth stays connected")
+            // Said as it is: the fixed "Bluetooth stays connected" ran for days while no Bluetooth
+            // link existed (25-30.10.2026).
+            let bluetooth = BLECentralManager.shared.isConnected ? "Bluetooth stays connected" : "no Bluetooth link"
+            log("Network link closed after the grace (\(reason)); \(bluetooth)")
         }
         if pairing != nil { link = .searching }
     }

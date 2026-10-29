@@ -51,6 +51,9 @@ final class BLECentralManager: NSObject, ObservableObject {
     private var lastStateTime: Int64 = 0
     private var lastStateSeq: Int64 = -1
     private var lastStateReadAt: Date?
+    /// The last failed-connect error logged and when; the system retries far more often than the
+    /// log can take, so one line per error code every ten minutes.
+    private var lastConnectFailure: (code: Int, at: Date)?
     /// Rebuilds a state frame the Redmi had to split into notification sized chunks.
     private var stateFrames = BLEFrameAssembler()
 
@@ -312,8 +315,20 @@ extension BLECentralManager: CBCentralManagerDelegate {
 
     nonisolated func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral,
                                     error: Error?) {
+        let code = (error as NSError?)?.code ?? 0
         Task { @MainActor in
             guard self.peripheral === peripheral else { return }
+            // This branch logged nothing: from 25.10.2026 every link died at once because this iPhone
+            // kept a pairing the Redmi no longer had, and four days passed without a trace here.
+            let now = Date()
+            let repeated = self.lastConnectFailure.map { $0.code == code && now.timeIntervalSince($0.at) < 600 } ?? false
+            if !repeated {
+                self.lastConnectFailure = (code: code, at: now)
+                let hint = code == CBError.Code.peerRemovedPairingInformation.rawValue
+                    ? "; the Redmi no longer has this iPhone's pairing: forget Redmi Note 8 in iOS Bluetooth settings"
+                    : ""
+                GatewayConnection.shared.log("Bluetooth connect failed: \(code)\(hint)")
+            }
             self.isConnected = false
             self.peripheral = nil
             self.start()
