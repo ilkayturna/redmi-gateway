@@ -250,6 +250,11 @@ object CallAudioRelay : CallManager.CallListener {
     @Volatile private var iphoneMuted = false
     private var loggedIphoneMuted = false
     private const val FLAG_IPHONE_MUTED = 0x02
+    // Ringing tone for outgoing calls on networks that send no early media (OutgoingRingback). The
+    // generator belongs to the downlink sender thread; the worker only logs when it turns on or off.
+    private val ringback = OutgoingRingback()
+    @Volatile private var ringbackPlaying = false
+    private var loggedRingback = false
     private const val IPHONE_DEAF_LIMIT_MS = 2000L
 
     /**
@@ -638,6 +643,17 @@ object CallAudioRelay : CallManager.CallListener {
                 "uplinkActive=${up.activePercent}% iphoneMuted=${if (iphoneMuted) 1 else 0}"
             Log.i(TAG, health)
             com.ilkay.redmigateway.journal.DiagnosticsLog.record("Audio", health)
+        }
+        val tone = ringbackPlaying
+        if (tone != loggedRingback) {
+            loggedRingback = tone
+            val line = if (tone) {
+                "RINGBACK on: the network sends no ringing tone while dialing; playing it to the iPhone"
+            } else {
+                "RINGBACK off (state=${CallManager.currentCallState})"
+            }
+            Log.i(TAG, line)
+            com.ilkay.redmigateway.journal.DiagnosticsLog.record("Audio", line)
         }
         // The receive thread only flips the flag; the file write happens here, once per change.
         val muted = iphoneMuted
@@ -1079,6 +1095,7 @@ object CallAudioRelay : CallManager.CallListener {
         lastIPhoneHearingAt = 0L
         iphoneMuted = false
         loggedIphoneMuted = false
+        ringbackPlaying = false
         plcConsecutiveFrames = 0
         hasValidPcmHistory = false
         uplinkQueue.reset(remoteLink, if (redundancyCapability() == 1) REDUNDANCY_MIN_DEPTH_FRAMES else 0)
@@ -1276,6 +1293,17 @@ object CallAudioRelay : CallManager.CallListener {
                 reportedShortReads = assembler.shortReads
             }
             downlinkReads.incrementAndGet()
+            // While an outgoing call alerts, a silent downlink becomes the ringing tone until the
+            // network sends audio of its own (29.10.2026 21:11: 19 s of silence on the iPhone).
+            val dialingOut = CallManager.currentCallState == "dialing" && CallManager.currentDirection == "outgoing"
+            // A fault in the tone must never stop this thread: that would silence every call.
+            ringbackPlaying = try {
+                ringback.process(assembler.frame, dialingOut)
+                ringback.playing
+            } catch (error: RuntimeException) {
+                Log.w(TAG, "Ringback skipped: ${error.javaClass.simpleName}")
+                false
+            }
             downlinkLevel.add(assembler.frame)
             cutoverReads.incrementAndGet()
             lastCutoverReadAt = SystemClock.elapsedRealtime()
