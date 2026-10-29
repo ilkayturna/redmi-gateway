@@ -82,6 +82,8 @@ final class AudioEngine {
     private var lastProducedFrames = 0
     private var lastSentFrames = 0
     private var lastCaptureHealthAt: Date?
+    /// When start() last left the engine running (main queue); see the route-change observer.
+    private var lastStartCompletedAt = Date.distantPast
     /// Loudness of the sent microphone frames, reported with CAPTURE_HEALTH; network queue only.
     private var micLevel = MicLevel()
     /// Timestamps for the "where did the first second go" diagnostics.
@@ -121,8 +123,16 @@ final class AudioEngine {
                   let value = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
                   let reason = AVAudioSession.RouteChangeReason(rawValue: value) else { return }
             switch reason {
+            case .routeConfigurationChange where self.isRunning
+                && Date().timeIntervalSince(self.lastStartCompletedAt) < 1.5:
+                // Switching voice processing on and starting the engine reconfigure the route
+                // themselves. The rebuild this used to trigger 0.3 s later cut the fresh stream in
+                // every call start on 29.10.2026 (19:20: the Redmi's gate waited 903 ms instead of
+                // ~300). The engine is running on the new route; a dead tap still triggers the
+                // microphone watchdog, and a stopped engine still rebuilds below.
+                self.log("Audio route reconfigured by the engine start; running, no rebuild")
             case .oldDeviceUnavailable, .newDeviceAvailable, .routeConfigurationChange:
-                self.requestRecovery("audio route changed")
+                self.requestRecovery("audio route changed (reason \(value))")
             default:
                 // Speaker toggles and category updates do not need a rebuilt graph.
                 break
@@ -391,6 +401,7 @@ final class AudioEngine {
             try engine.start()
             let startMs = Int(Date().timeIntervalSince(startBegan) * 1000)
             running = true
+            lastStartCompletedAt = Date()
             startPlayerAfterFirstRender(generation: generation, vpMs: vpMs, startMs: startMs)
             if isSpeakerEnabled { try? AVAudioSession.sharedInstance().overrideOutputAudioPort(.speaker) }
         } catch {

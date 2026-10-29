@@ -490,10 +490,34 @@ public final class GatewayConnection: ObservableObject {
 
     /// After a network change an authenticated socket may be dead without knowing it yet.
     private func validateLink() {
+        probeLink(deadline: isRemoteLink ? 5 : 3, reason: "link check")
+    }
+
+    private var probeCounter = 0
+    private var lastAnsweredProbe = 0
+
+    /// Pings the Redmi and drops the socket when no pong arrives within `deadline` seconds.
+    ///
+    /// A plain ping only fails when TCP gives up. On 29.10.2026 21:34 the Redmi's Wi-Fi stalled
+    /// and reconnected within 5 s, but this side noticed the dead socket 7 s after the last frame,
+    /// so the call audio stayed on the Redmi for 9 s. A missing pong is the earliest sign.
+    private func probeLink(deadline: Double, reason: String) {
         guard let task = webSocketTask, state == .authenticated else { return }
+        probeCounter += 1
+        let probe = probeCounter
         task.sendPing { error in
-            guard error != nil else { return }
-            Task { @MainActor in GatewayConnection.shared.handleDrop(task) }
+            Task { @MainActor in
+                let connection = GatewayConnection.shared
+                if probe > connection.lastAnsweredProbe { connection.lastAnsweredProbe = probe }
+                if error != nil { connection.handleDrop(task) }
+            }
+        }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(deadline * 1_000_000_000))
+            guard let self, self.lastAnsweredProbe < probe, self.webSocketTask === task,
+                  self.state == .authenticated else { return }
+            self.log("Link probe (\(reason)): no answer in \(Int(deadline * 1000)) ms; reconnecting")
+            self.handleDrop(task)
         }
     }
 
@@ -546,7 +570,12 @@ public final class GatewayConnection: ObservableObject {
             return
         }
         cancelReconnect()
-        let delay = custom ?? min(Double(1 << min(reconnectAttempt + 1, 5)), 30)
+        // During a call every second without the link is a second of the conversation on the
+        // Redmi in the pocket: retry within half a second, never more than 2 s apart. Otherwise
+        // back off as before so an absent Redmi costs no battery.
+        let delay = custom ?? (callInProgress
+            ? min(0.5 * Double(reconnectAttempt + 1), 2)
+            : min(Double(1 << min(reconnectAttempt + 1, 5)), 30))
         reconnectTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard let self, !Task.isCancelled, self.state != .authenticated else { return }
@@ -566,9 +595,21 @@ public final class GatewayConnection: ObservableObject {
     private func startPing() {
         pingTask?.cancel()
         pingTask = Task { @MainActor [weak self] in
+            var idleSeconds = 0
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard let self, let task = self.webSocketTask, self.state == .authenticated else { return }
+                if self.currentCall != nil || CallKitManager.shared.hasCalls {
+                    // In a call a dead socket costs the conversation; find it within seconds. The
+                    // deadline is generous for a local link (pongs take tens of ms) so a slow
+                    // moment never cuts working audio.
+                    idleSeconds = 0
+                    self.probeLink(deadline: self.isRemoteLink ? 5 : 3, reason: "call")
+                    continue
+                }
+                idleSeconds += 2
+                guard idleSeconds >= 15 else { continue }
+                idleSeconds = 0
                 task.sendPing { error in
                     guard error != nil else { return }
                     Task { @MainActor in GatewayConnection.shared.handleDrop(task) }
