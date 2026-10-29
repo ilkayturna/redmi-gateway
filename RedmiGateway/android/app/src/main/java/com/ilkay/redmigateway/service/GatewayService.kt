@@ -5,8 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
@@ -49,6 +51,8 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
         private const val SERVER_RESTART_FIRST_MS = 2_000L
         private const val SERVER_RESTART_MAX_MS = 60_000L
         private const val SERVER_HEALTHY_MS = 5 * 60_000L
+        /** Health is re-evaluated this often while the service runs (docs/WAVE1-CONTRACT.md section 4). */
+        private const val HEALTH_INTERVAL_MS = 15 * 60_000L
 
         const val ACTION_START = "com.ilkay.redmigateway.ACTION_START"
         const val ACTION_STOP = "com.ilkay.redmigateway.ACTION_STOP"
@@ -105,6 +109,31 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
         postNotificationNow(text)
     }
 
+    // Health re-evaluation (main thread only). The timer counts uptime, so in deep sleep it waits
+    // for the next wake; the battery broadcast below covers the change that matters most.
+    private val healthTick = Runnable {
+        if (!isRunning) return@Runnable
+        evaluateHealth("periodic")
+        scheduleHealthTick()
+    }
+    private var batteryReceiverRegistered = false
+    private var lastBatteryBand: String? = null
+
+    /**
+     * ACTION_BATTERY_CHANGED arrives for every percent and every temperature step; only a change of
+     * band (ok, low, critical, charging) re-evaluates health, and nothing is logged per broadcast.
+     */
+    private val batteryReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val band = HealthReporter.batteryFrom(intent)?.band ?: "unknown"
+            if (band == lastBatteryBand) return
+            val first = lastBatteryBand == null
+            lastBatteryBand = band
+            // Registering delivers the sticky state at once; the start-up evaluation covers that one.
+            if (!first) evaluateHealth("battery $band")
+        }
+    }
+
     inner class LocalBinder : Binder() {
         fun getService(): GatewayService = this@GatewayService
     }
@@ -131,6 +160,8 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
                     handler.removeCallbacks(restoreHotspot)
                     handler.postDelayed(restoreHotspot, 10_000L)
                 }
+                // Telecom's own missed-call row goes, and this app owns the notification from now on.
+                com.ilkay.redmigateway.telecom.MissedCalls.takeOver(this)
                 reportHealth()
             }
             ACTION_STOP -> stopGateway()
@@ -172,6 +203,7 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
             SmartHotspot.start(this)
             CallAudioRelay.clearStaleIsolation(this)
             IPhoneReachability.addListener(reachabilityListener)
+            registerBatteryReceiver()
             isRunning = true
             CallManager.log("Gateway Foreground Service started on port 8787")
         } catch (e: Exception) {
@@ -223,6 +255,8 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
         Log.i(TAG, "Stopping Gateway Service...")
         handler.removeCallbacks(restoreHotspot)
         handler.removeCallbacks(restartServer)
+        handler.removeCallbacks(healthTick)
+        unregisterBatteryReceiver()
         peripheralsStarted = false
         serverRestarts = 0
         SmartHotspot.stop(this)
@@ -276,7 +310,8 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
     }
 
     /**
-     * Once per service start: did the ROM change, and can the phone still carry call audio?
+     * At every service start: did the ROM change, and can the phone still carry call audio? Then
+     * the same evaluation every 15 minutes (and on battery band changes) while the service runs.
      *
      * This is the only place the loss of a precondition is announced without the user opening a
      * screen. A failure here must not take the service down with it — the gateway still carries
@@ -284,11 +319,45 @@ class GatewayService : Service(), GatewayWebSocketServer.ServerListener {
      */
     private fun reportHealth() {
         runCatching {
-            val build = "${Build.VERSION.INCREMENTAL}|${Build.DISPLAY}"
+            val build = UpdateWatch.currentBuild()
             val romChanged = UpdateWatch.check(this, build)
             if (romChanged) CallManager.log("ROM build changed: $build")
-            HealthReporter.publish(this, romChanged)
-        }.onFailure { Log.w(TAG, "Health check failed", it) }
+        }.onFailure { Log.w(TAG, "ROM build check failed", it) }
+        evaluateHealth("service start")
+        if (isRunning) scheduleHealthTick()
+    }
+
+    private fun evaluateHealth(reason: String) {
+        runCatching { HealthReporter.evaluate(this, reason) }
+            .onFailure { Log.w(TAG, "Health check failed ($reason)", it) }
+    }
+
+    private fun scheduleHealthTick() {
+        handler.removeCallbacks(healthTick)
+        handler.postDelayed(healthTick, HEALTH_INTERVAL_MS)
+    }
+
+    private fun registerBatteryReceiver() {
+        if (batteryReceiverRegistered) return
+        runCatching {
+            // Not exported: the system still delivers its own protected broadcast.
+            androidx.core.content.ContextCompat.registerReceiver(
+                this, batteryReceiver, IntentFilter(Intent.ACTION_BATTERY_CHANGED),
+                androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            batteryReceiverRegistered = true
+        }.onFailure {
+            Log.w(TAG, "Battery receiver not registered", it)
+            CallManager.log("Battery receiver not registered: ${it.javaClass.simpleName}; health follows the 15 min timer only")
+        }
+    }
+
+    private fun unregisterBatteryReceiver() {
+        if (!batteryReceiverRegistered) return
+        runCatching { unregisterReceiver(batteryReceiver) }
+            .onFailure { Log.w(TAG, "Battery receiver not unregistered", it) }
+        batteryReceiverRegistered = false
+        lastBatteryBand = null
     }
 
     private fun buildNotification(text: String): Notification {
