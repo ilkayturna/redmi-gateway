@@ -54,22 +54,6 @@ enum PhoneLink {
         return dialable(raw.removingPercentEncoding ?? raw)
     }
 
-    /// The route for a data-detector item whose link is not tel: (iOS may describe a detected
-    /// number with its own x-apple-data-detectors: link). nil when the item's text is not a phone
-    /// number and nothing else, so addresses, dates and flight numbers keep the system's action.
-    static func route(forDetectedText text: String) -> Route? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.phoneNumber.rawValue)
-        else { return nil }
-        let whole = NSRange(trimmed.startIndex..., in: trimmed)
-        guard let match = detector.firstMatch(in: trimmed, options: [], range: whole),
-              match.range.location == whole.location, match.range.length == whole.length,
-              let phone = match.phoneNumber
-        else { return nil }
-        return dialable(phone).map { Route.call($0) } ?? .unusable
-    }
-
     /// What CallKitManager.startOutgoingCall accepts: 0-9, * and #, a + only in front, 2-20 long.
     ///
     /// A number written with letters (a vanity number, or a pause written as p/w) is refused as a

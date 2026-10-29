@@ -16,7 +16,6 @@ struct PhoneLinkTests {
         phoneLinksStayOnTheRedmi()
         otherLinksKeepTheSystemAction()
         unusableNumbersNeverReachIOS()
-        detectedTextFallbackIgnoresNonNumbers()
         replyNeedsADialableAddress()
         oneTimeCodesAreFound()
         numbersThatAreNotCodesAreIgnored()
@@ -71,12 +70,6 @@ struct PhoneLinkTests {
         expect(PhoneLink.number(fromLink: "no scheme") == nil, "text without a scheme")
         expect(PhoneLink.dialable("+90 (532) 123-45-67") == "+905321234567", "separators are dropped")
         expect(PhoneLink.dialable("0532+123") == "0532123", "a plus inside the number is dropped")
-    }
-
-    static func detectedTextFallbackIgnoresNonNumbers() {
-        expect(PhoneLink.route(forDetectedText: "") == nil, "empty detected text")
-        expect(PhoneLink.route(forDetectedText: "Atatürk Caddesi No 5 Kadıköy") == nil, "an address is not a number")
-        expect(PhoneLink.route(forDetectedText: "yarın 14:30") == nil, "a date is not a number")
     }
 
     // Break caught: offering the call button and the composer to "TURKCELL" or "BANK123", which
