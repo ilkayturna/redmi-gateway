@@ -148,8 +148,9 @@ def decide(build: dict | None, certificate: dict | None, now: dt.datetime) -> De
                 f"{math.floor(cert_left)} days left."
             )
             if cert_left <= REFRESH_WITHIN_DAYS:
+                verb = "expired" if cert_left <= 0 else "expires"
                 decision.warnings.append(
-                    f"The distribution certificate expires on {cert_expiry:%Y-%m-%d}; renew it "
+                    f"The distribution certificate {verb} on {cert_expiry:%Y-%m-%d}; renew it "
                     "and update IOS_DIST_P12_B64, or no new TestFlight build can be signed."
                 )
             # A build uploaded before the certificate expires keeps working for its own 90 days.
@@ -197,6 +198,8 @@ def main() -> None:
     )
     decision = decide(build, certificate, now)
     verdict = "refresh due" if decision.needed else "no refresh needed"
+    if decision.error:
+        verdict = "refresh blocked"
     for line in decision.report:
         print(line, flush=True)
     for warning in decision.warnings:
