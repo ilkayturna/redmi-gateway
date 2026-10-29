@@ -474,6 +474,8 @@ public final class GatewayConnection: ObservableObject {
     }
 
     private func closeSocket() {
+        authenticatedAt = nil
+        lastFrameAt = nil
         stopTelemetry()
         for attempt in attempts { attempt.task.cancel(with: .goingAway, reason: nil) }
         attempts.removeAll()
@@ -639,6 +641,7 @@ public final class GatewayConnection: ObservableObject {
     // MARK: - Frames
 
     private func handleFrame(_ text: String) {
+        lastFrameAt = Date()
         guard let object = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] else { return }
         if let channel {
             guard object["t"] as? String == "s",
@@ -973,6 +976,7 @@ public final class GatewayConnection: ObservableObject {
         channel = SecureChannel(key: BridgeCrypto.derive(sessionKey, "ws"))
         mediaKey = BridgeCrypto.derive(sessionKey, "media")
         state = .authenticated
+        authenticatedAt = Date()
         link = .ready
         reconnectAttempt = 0
         let defaults = UserDefaults.standard
@@ -1654,7 +1658,7 @@ public final class GatewayConnection: ObservableObject {
         }
         closeAfterCatchUp = UIApplication.shared.applicationState == .background && currentCall == nil
         if state == .authenticated {
-            if UIApplication.shared.applicationState == .active {
+            if UIApplication.shared.applicationState == .active || linkIsFresh {
                 requestSync()
                 return
             }
@@ -1662,6 +1666,21 @@ public final class GatewayConnection: ObservableObject {
             closeSocket()
         }
         reconnectNow(reason: reason)
+    }
+
+    /// When the current socket authenticated, and when it last delivered a frame.
+    private var authenticatedAt: Date?
+    private var lastFrameAt: Date?
+
+    /// A socket this wake itself just opened, or one that is visibly alive, is not one "kept from
+    /// before suspension". An incoming call wakes the app three ways within a second (beacon,
+    /// silent push, VoIP push): on 29.10.2026 18:26 each wake closed the socket the previous one
+    /// had authenticated 0.1-0.9 s earlier, three sessions in one second while the call rang.
+    private var linkIsFresh: Bool {
+        let now = Date()
+        if let at = authenticatedAt, now.timeIntervalSince(at) < 10 { return true }
+        if let at = lastFrameAt, now.timeIntervalSince(at) < 5 { return true }
+        return false
     }
 
     private func finishCatchUp() {
