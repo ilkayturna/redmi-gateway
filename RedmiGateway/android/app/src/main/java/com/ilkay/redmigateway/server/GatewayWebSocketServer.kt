@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import com.ilkay.redmigateway.service.HealthReporter
 import com.ilkay.redmigateway.BuildConfig
 import com.ilkay.redmigateway.RedmiGatewayApp
 import com.ilkay.redmigateway.audio.CallAudioLab
@@ -397,6 +398,13 @@ class GatewayWebSocketServer(
         // battery the moment it is back. Old iPhone builds ignore the type.
         if (wantsHealth(peer.authenticated, peer.protocol) && !sendLatestHealth(peer)) {
             Log.i(TAG, "Health not sent after authentication: no snapshot yet, or the change listener already sent it")
+        }
+        // The 15-minute re-check counts uptime and so sleeps with the Redmi in the pocket (none ran
+        // between 13:01 and 13:48 on 29.10.2026, and the iPhone kept seeing a disabled updater as
+        // enabled). A link-up is when the iPhone needs current health, so it is evaluated again
+        // here; a change reaches this iPhone through the listener, deduplicated per connection.
+        if (wantsHealth(peer.authenticated, peer.protocol)) {
+            handler.post { runCatching { HealthReporter.evaluate(context, "iPhone linked") } }
         }
     }
 
