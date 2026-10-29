@@ -21,10 +21,20 @@ import java.util.concurrent.CopyOnWriteArrayList
  * while the gateway process was dead). This journal mirrors it with a monotonic sequence number,
  * so a reconnecting iPhone asks for "everything after seq N" and never misses or duplicates a
  * call. The gateway adds which device answered, which CallLog does not know.
+ *
+ * Rows are imported by _ID alone; the NEW and IS_READ flags are never read. That is what lets
+ * MissedCalls mark missed rows read the moment Telecom reports them (so they are not posted
+ * again after a reboot) without changing what the iPhone receives.
  */
 class CallJournal private constructor(context: Context) :
     SQLiteOpenHelper(context.applicationContext, "gateway_calls.db", null, 1) {
 
+    /**
+     * One call as the iPhone receives it.
+     *
+     * @param pushed the Redmi already announced this missed call through Apple, so the iPhone
+     *   stores it without a second sound (docs/WAVE1-CONTRACT.md section 7)
+     */
     data class Entry(
         val seq: Long,
         val logId: Long,
@@ -32,7 +42,8 @@ class CallJournal private constructor(context: Context) :
         val type: String,
         val date: Long,
         val durationSeconds: Long,
-        val answeredOn: String?
+        val answeredOn: String?,
+        val pushed: Boolean = false
     ) {
         fun toJson(): JSONObject = JSONObject()
             .put("seq", seq)
@@ -42,6 +53,7 @@ class CallJournal private constructor(context: Context) :
             .put("date", date)
             .put("duration", durationSeconds)
             .put("answeredOn", answeredOn ?: JSONObject.NULL)
+            .apply { if (pushed) put("pushed", true) }
     }
 
     interface Listener {
@@ -85,6 +97,15 @@ class CallJournal private constructor(context: Context) :
     override fun onOpen(db: SQLiteDatabase) {
         super.onOpen(db)
         db.execSQL("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL)")
+        // A side table rather than a new column: the database is at version 1 with a no-op upgrade.
+        db.execSQL("CREATE TABLE IF NOT EXISTS pushed (log_id INTEGER PRIMARY KEY)")
+    }
+
+    /** Apple accepted the missed-call alert for CallLog row [logId]. */
+    @Synchronized
+    fun markPushed(logId: Long) {
+        runCatching { writableDatabase.execSQL("INSERT OR IGNORE INTO pushed (log_id) VALUES (?)", arrayOf<Any>(logId)) }
+            .onFailure { Log.w(TAG, "Could not mark call $logId pushed: ${it.javaClass.simpleName}") }
     }
 
     private fun meta(db: SQLiteDatabase, key: String): Long? =
@@ -234,12 +255,13 @@ class CallJournal private constructor(context: Context) :
         val safeLimit = limit.coerceIn(1, 500)
         val rows = ArrayList<Entry>()
         readableDatabase.rawQuery(
-            "SELECT seq, log_id, number, type, date, duration, answered_on FROM calls WHERE seq > ? ORDER BY seq ASC LIMIT ?",
+            "SELECT c.seq, c.log_id, c.number, c.type, c.date, c.duration, c.answered_on, p.log_id IS NOT NULL " +
+                "FROM calls c LEFT JOIN pushed p ON p.log_id = c.log_id WHERE c.seq > ? ORDER BY c.seq ASC LIMIT ?",
             arrayOf(afterSeq.coerceAtLeast(0).toString(), (safeLimit + 1).toString())
         ).use { c ->
             while (c.moveToNext()) {
                 rows.add(Entry(c.getLong(0), c.getLong(1), c.getString(2), c.getString(3), c.getLong(4), c.getLong(5),
-                    if (c.isNull(6)) null else c.getString(6)))
+                    if (c.isNull(6)) null else c.getString(6), c.getInt(7) != 0))
             }
         }
         val hasMore = rows.size > safeLimit

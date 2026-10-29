@@ -87,9 +87,11 @@ class SmsPushContentTest {
     }
 
     @Test
-    fun aSenderWithNoDigitsStillGetsAKey() {
-        // Alphanumeric senders like bank short codes must not produce a bare "sms-".
-        assertEquals("sms-", smsPushThreadId("BANK"))
+    fun aSenderWithNoDigitsKeepsItsName() {
+        // Alphanumeric senders like bank short codes must not produce a bare "sms-": that put every
+        // bank and operator message into one stack on the iPhone (N10).
+        assertEquals("sms-BANK", smsPushThreadId("BANK"))
         assertEquals("sms-1234", smsPushThreadId("BANK1234"))
+        assertFalse(smsPushThreadId("AKBANK") == smsPushThreadId("TURKCELL"))
     }
 }
