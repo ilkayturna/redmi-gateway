@@ -7,10 +7,23 @@ struct PhoneContact: Identifiable, Equatable {
     let name: String
     let numbers: [String]
     let thumbnail: Data?
+    /// Contacts' label for each number ("cep", "ev", "iş"…), in the order of `numbers`.
+    var labels: [String] = []
+
+    /// The number's label as Contacts shows it, or "Telefon" when it has none.
+    func label(for number: String) -> String {
+        guard let index = numbers.firstIndex(of: number), index < labels.count, !labels[index].isEmpty else {
+            return "Telefon"
+        }
+        return labels[index]
+    }
 }
 
 enum PhoneIdentity {
     /// Comparable key for Turkish and international numbers: +90 532..., 0532... and 532... match.
+    ///
+    /// The Redmi mirrors this rule exactly for its notification threads (wave 1 contract, section 7),
+    /// so it changes only together with the Redmi's copy.
     static func key(_ number: String) -> String {
         let digits = number.filter { $0.isNumber }
         if digits.isEmpty { return number.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
@@ -19,12 +32,99 @@ enum PhoneIdentity {
         return digits
     }
 
-    /// 0532 123 45 67 style for Turkish mobile numbers; anything else as received.
+    /// key(), plus the key of the same number written with "00" in place of "+": a contact saved
+    /// as 0090 532... is the caller +90 532.... Only contact matching uses it; key() stays as the
+    /// Redmi knows it.
+    static func matchKeys(_ number: String) -> [String] {
+        let primary = key(number)
+        let digits = number.filter { $0.isNumber }
+        guard digits.hasPrefix("00"), digits.count > 4 else { return [primary] }
+        let plusForm = key("+" + String(digits.dropFirst(2)))
+        return plusForm == primary ? [primary] : [primary, plusForm]
+    }
+
+    /// How a number is shown: Turkish numbers as 0532 123 45 67, 0212 345 67 89, 0850 222 00 00
+    /// and 444 1 444; an international number written as one run of digits as +44 207 946 0958.
+    /// Anything else (short codes, sender names, numbers already spaced) stays as received.
     static func formatted(_ number: String) -> String {
         let key = self.key(number)
-        guard key.count == 10, key.allSatisfy({ $0.isNumber }), key.hasPrefix("5") else { return number }
-        let chars = Array(key)
-        return "0\(String(chars[0..<3])) \(String(chars[3..<6])) \(String(chars[6..<8])) \(String(chars[8..<10]))"
+        guard !key.isEmpty, key.allSatisfy({ $0.isASCII && $0.isNumber }) else { return number }
+        if key.count == 10, let first = key.first, "23458".contains(first) {
+            return grouped("0" + key, sizes: [4, 3, 2, 2])
+        }
+        if key.count == 7, key.hasPrefix("444") {
+            return grouped(key, sizes: [3, 1, 3])
+        }
+        return international(number) ?? number
+    }
+
+    /// The keypad's number while it is typed, grouped the way formatted() shows the whole number.
+    /// Codes with * or # and foreign numbers stay as typed.
+    static func typing(_ raw: String) -> String {
+        let allDigits = !raw.isEmpty && raw.allSatisfy { $0.isASCII && $0.isNumber }
+        if allDigits, raw.hasPrefix("0"), !raw.hasPrefix("00"), raw.count <= 11 {
+            return grouped(raw, sizes: [4, 3, 2, 2])
+        }
+        if allDigits, raw.hasPrefix("5"), raw.count <= 10 {
+            return grouped(raw, sizes: [3, 3, 2, 2])
+        }
+        if raw.hasPrefix("+90") {
+            let rest = String(raw.dropFirst(3))
+            if !rest.isEmpty, rest.count <= 10, rest.allSatisfy({ $0.isASCII && $0.isNumber }) {
+                return "+90 " + grouped(rest, sizes: [3, 3, 2, 2])
+            }
+        }
+        return raw
+    }
+
+    private static func grouped(_ digits: String, sizes: [Int]) -> String {
+        var parts: [String] = []
+        var rest = Substring(digits)
+        for size in sizes where !rest.isEmpty {
+            parts.append(String(rest.prefix(size)))
+            rest = rest.dropFirst(size)
+        }
+        if !rest.isEmpty { parts.append(String(rest)) }
+        return parts.joined(separator: " ")
+    }
+
+    /// +CC followed by groups of three, for a number written as +4420... or 004420....
+    private static func international(_ number: String) -> String? {
+        let trimmed = number.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.allSatisfy({ $0 == "+" || ($0.isASCII && $0.isNumber) }) else { return nil }
+        let digits = trimmed.filter { $0.isNumber }
+        let national: String
+        if trimmed.hasPrefix("+") {
+            national = digits
+        } else if digits.hasPrefix("00") {
+            national = String(digits.dropFirst(2))
+        } else {
+            return nil
+        }
+        guard (8...15).contains(national.count) else { return nil }
+        let codeLength = countryCodeLength(national)
+        let code = String(national.prefix(codeLength))
+        var parts: [String] = []
+        var rest = national.dropFirst(codeLength)
+        while rest.count > 4 {
+            parts.append(String(rest.prefix(3)))
+            rest = rest.dropFirst(3)
+        }
+        if !rest.isEmpty { parts.append(String(rest)) }
+        return "+\(code) " + parts.joined(separator: " ")
+    }
+
+    /// The ITU country codes of two digits; 1 and 7 have one, every other code has three.
+    private static let twoDigitCountryCodes: Set<String> = [
+        "20", "27", "30", "31", "32", "33", "34", "36", "39", "40", "41", "43", "44", "45", "46", "47", "48", "49",
+        "51", "52", "53", "54", "55", "56", "57", "58", "60", "61", "62", "63", "64", "65", "66",
+        "81", "82", "84", "86", "90", "91", "92", "93", "94", "95", "98"
+    ]
+
+    private static func countryCodeLength(_ digits: String) -> Int {
+        guard let first = digits.first else { return 0 }
+        if first == "1" || first == "7" { return 1 }
+        return twoDigitCountryCodes.contains(String(digits.prefix(2))) ? 2 : 3
     }
 }
 
@@ -128,7 +228,12 @@ final class PhoneContactDirectory: ObservableObject {
         authorization != .denied && authorization != .restricted && authorization != .notDetermined
     }
 
-    func contact(for number: String) -> PhoneContact? { byKey[PhoneIdentity.key(number)] }
+    func contact(for number: String) -> PhoneContact? {
+        for key in PhoneIdentity.matchKeys(number) {
+            if let contact = byKey[key] { return contact }
+        }
+        return nil
+    }
 
     /// Contacts whose name contains the query, or one of whose numbers contains its digits.
     func matching(_ query: String) -> [PhoneContact] {
@@ -178,6 +283,23 @@ final class PhoneContactDirectory: ObservableObject {
         return Self.lookUpNames(pending)[number]
     }
 
+    /// The first contact whose number starts with what the keypad shows. Typed as 0532..., 532...
+    /// or +90532..., it matches a number saved in any of those forms.
+    func suggestion(forTyped typed: String) -> (name: String, number: String)? {
+        let digits = typed.filter { $0.isASCII && $0.isNumber }
+        guard digits.count >= 3 else { return nil }
+        for contact in contacts {
+            for number in contact.numbers {
+                let key = PhoneIdentity.key(number)
+                let all = number.filter { $0.isASCII && $0.isNumber }
+                if all.hasPrefix(digits) || key.hasPrefix(digits) || ("0" + key).hasPrefix(digits) {
+                    return (contact.name, number)
+                }
+            }
+        }
+        return nil
+    }
+
     private func fetch() {
         hasLoaded = true
         let store = self.store
@@ -192,12 +314,19 @@ final class PhoneContactDirectory: ObservableObject {
             var entries: [PhoneContact] = []
             try? store.enumerateContacts(with: request) { contact, _ in
                 var seen = Set<String>()
-                let numbers = contact.phoneNumbers.map { $0.value.stringValue }
-                    .filter { !PhoneIdentity.key($0).isEmpty && seen.insert(PhoneIdentity.key($0)).inserted }
+                var numbers: [String] = []
+                var labels: [String] = []
+                for labeled in contact.phoneNumbers {
+                    let number = labeled.value.stringValue
+                    let key = PhoneIdentity.key(number)
+                    guard !key.isEmpty, seen.insert(key).inserted else { continue }
+                    numbers.append(number)
+                    labels.append(labeled.label.map { CNLabeledValue<CNPhoneNumber>.localizedString(forLabel: $0) } ?? "")
+                }
                 guard !numbers.isEmpty else { return }
                 let name = CNContactFormatter.string(from: contact, style: .fullName) ?? numbers[0]
                 entries.append(PhoneContact(id: contact.identifier, name: name, numbers: numbers,
-                                            thumbnail: contact.thumbnailImageData))
+                                            thumbnail: contact.thumbnailImageData, labels: labels))
             }
             entries.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             DispatchQueue.main.async {
@@ -205,8 +334,10 @@ final class PhoneContactDirectory: ObservableObject {
                 directory.contacts = entries
                 var index: [String: PhoneContact] = [:]
                 for entry in entries {
-                    for number in entry.numbers where index[PhoneIdentity.key(number)] == nil {
-                        index[PhoneIdentity.key(number)] = entry
+                    for number in entry.numbers {
+                        for key in PhoneIdentity.matchKeys(number) where index[key] == nil {
+                            index[key] = entry
+                        }
                     }
                 }
                 directory.byKey = index
@@ -329,6 +460,38 @@ struct PhoneContactPicker: UIViewControllerRepresentable {
 
         func contactPicker(_ picker: CNContactPickerViewController, didSelect contactProperty: CNContactProperty) {
             if let number = contactProperty.value as? CNPhoneNumber { onSelect(number.stringValue) }
+        }
+    }
+}
+
+/// Apple's new-contact card with the number filled in, for a number from Recents that is not a
+/// contact yet. Saving changes the contact store, and the directory reads it again by itself.
+struct NewContactView: UIViewControllerRepresentable {
+    let number: String
+    let onDone: () -> Void
+
+    func makeUIViewController(context: Context) -> UINavigationController {
+        let contact = CNMutableContact()
+        contact.phoneNumbers = [CNLabeledValue(label: CNLabelPhoneNumberMobile, value: CNPhoneNumber(stringValue: number))]
+        let controller = CNContactViewController(forNewContact: contact)
+        controller.contactStore = CNContactStore()
+        controller.delegate = context.coordinator
+        return UINavigationController(rootViewController: controller)
+    }
+
+    func updateUIViewController(_ uiViewController: UINavigationController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(onDone: onDone) }
+
+    final class Coordinator: NSObject, CNContactViewControllerDelegate {
+        let onDone: () -> Void
+
+        init(onDone: @escaping () -> Void) {
+            self.onDone = onDone
+        }
+
+        func contactViewController(_ viewController: CNContactViewController, didCompleteWith contact: CNContact?) {
+            onDone()
         }
     }
 }

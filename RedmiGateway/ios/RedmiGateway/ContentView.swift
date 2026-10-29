@@ -1,3 +1,4 @@
+import AudioToolbox
 import Intents
 import SwiftUI
 
@@ -41,15 +42,16 @@ struct ContentView: View {
         .onChange(of: router.pending) { route in
             if let route { follow(route) }
         }
-        // A call chosen in iOS Recents or Contacts for this app.
+        // A call chosen in iOS Recents or Contacts for this app. It waits for the link the way a
+        // tap inside the app does, with the same "Arama bekliyor" bar and the same failure note.
         .onContinueUserActivity("INStartCallIntent") { activity in
             if let number = (activity.interaction?.intent as? INStartCallIntent)?.contacts?.first?.personHandle?.value {
-                CallKitManager.shared.dialFromSystem(number)
+                InAppDial.start(number)
             }
         }
         .onContinueUserActivity("INStartAudioCallIntent") { activity in
             if let number = (activity.interaction?.intent as? INStartAudioCallIntent)?.contacts?.first?.personHandle?.value {
-                CallKitManager.shared.dialFromSystem(number)
+                InAppDial.start(number)
             }
         }
         .alert("Uygulama kapalıyken de aramalar", isPresented: $showingWakePrompt) {
@@ -92,6 +94,7 @@ struct ContentView: View {
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             VStack(spacing: 0) {
+                PendingDialBar()
                 if connection.currentCall != nil && callMinimized {
                     ReturnToCallBar { callMinimized = false }
                 }
@@ -271,28 +274,152 @@ struct SettingsToolbarButton: ToolbarContent {
 
 // MARK: - Calls started inside the app
 
-/// A call tapped in Favorites, Recents, a contact or a conversation.
+/// A call tapped in Favorites, Recents, Contacts, the keypad, a conversation, a missed-call
+/// notification or iOS Recents.
 ///
 /// The network link is closed on purpose 25 s after the app leaves the screen, so almost every
-/// time the app is opened a tap lands before the link is back. startOutgoingCall then refused the
-/// call with an error that only the keypad and the call screen show, and the tap looked dead. The
-/// call now waits for the link the way a call from iOS Recents does (dialFromSystem), and the
-/// banner at the top shows the link coming up meanwhile.
+/// time the app is opened a tap lands before the link is back. The call waits for the link, with
+/// "Arama bekliyor: <ad> · Vazgeç" at the top of the screen. It used to wait invisibly and was
+/// dropped without a word after 20 s; when the link does not come up in time the bar now says
+/// the call was not made. Emergency numbers never wait: they go to the iPhone's own phone service.
 @MainActor
-enum InAppDial {
+final class InAppDial: ObservableObject {
+    static let shared = InAppDial()
+
+    /// The number waiting for the link.
+    @Published private(set) var waitingNumber: String?
+    /// Why the last tapped call did not start; shown for a few seconds.
+    @Published private(set) var failure: String?
+
     /// Must stay in step with CallKitManager.emergencyNumbers: these go to the iPhone's own phone
     /// service at once and must never wait for the Redmi.
     private static let emergencyNumbers: Set<String> = ["112", "911", "999", "110", "155", "156", "158", "177"]
 
-    static func start(_ number: String) {
+    private var waitTask: Task<Void, Never>?
+    private var failureTask: Task<Void, Never>?
+
+    /// `showsErrorItself`: the caller (the keypad) shows lastCallError under the number already.
+    static func start(_ number: String, showsErrorItself: Bool = false) {
+        shared.dial(number, showsErrorItself: showsErrorItself)
+    }
+
+    private func dial(_ number: String, showsErrorItself: Bool) {
         let connection = GatewayConnection.shared
         let clean = number.replacingOccurrences(of: "[\\s().-]", with: "", options: .regularExpression)
-        guard !connection.isAuthenticated, !emergencyNumbers.contains(clean) else {
-            CallKitManager.shared.startOutgoingCall(phoneNumber: number)
+        dismissFailure()
+        if connection.isAuthenticated || Self.emergencyNumbers.contains(clean) {
+            if waitingNumber != nil { cancel(reason: "another call was tapped") }
+            startCall(number, showsErrorItself: showsErrorItself)
             return
         }
-        connection.log("Call tapped before the link was up; dialling once it is")
-        CallKitManager.shared.dialFromSystem(number)
+        waitTask?.cancel()
+        waitingNumber = number
+        // Away from home the link runs through the VPN and takes longer to come up.
+        let window: TimeInterval = connection.isRemoteLink ? 45 : 25
+        connection.log("Call tapped before the link was up; dialling once it is (up to \(Int(window)) s)")
+        connection.reloadPairingIfLocked(reason: "call tapped")
+        connection.reconnectNow(reason: "call tapped")
+        waitTask = Task { @MainActor [weak self] in
+            let deadline = Date().addingTimeInterval(window)
+            while !Task.isCancelled, !GatewayConnection.shared.isAuthenticated, Date() < deadline {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            self?.waitEnded(number, window: window, showsErrorItself: showsErrorItself)
+        }
+    }
+
+    private func waitEnded(_ number: String, window: TimeInterval, showsErrorItself: Bool) {
+        let connection = GatewayConnection.shared
+        waitTask = nil
+        waitingNumber = nil
+        guard connection.isAuthenticated else {
+            connection.log("Waiting call dropped: no link to the Redmi within \(Int(window)) s")
+            let message = "Redmi'ye ulaşılamadı; arama yapılmadı."
+            connection.lastCallError = message
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            if !showsErrorItself { showFailure(message) }
+            return
+        }
+        connection.log("Link up; dialling the call that waited for it")
+        startCall(number, showsErrorItself: showsErrorItself)
+    }
+
+    private func startCall(_ number: String, showsErrorItself: Bool) {
+        let connection = GatewayConnection.shared
+        CallKitManager.shared.startOutgoingCall(phoneNumber: number)
+        // A refusal (another call being set up, an invalid number) is otherwise shown only on the
+        // keypad and the call screen, and a tap elsewhere looked dead.
+        if !showsErrorItself, let error = connection.lastCallError { showFailure(error) }
+    }
+
+    /// "Vazgeç" on the waiting bar.
+    func cancel() {
+        cancel(reason: "cancelled by the person")
+    }
+
+    private func cancel(reason: String) {
+        guard waitingNumber != nil else { return }
+        waitTask?.cancel()
+        waitTask = nil
+        waitingNumber = nil
+        GatewayConnection.shared.log("Waiting call cancelled: \(reason)")
+    }
+
+    private func showFailure(_ message: String) {
+        failure = message
+        failureTask?.cancel()
+        failureTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.failure = nil
+        }
+    }
+
+    func dismissFailure() {
+        failureTask?.cancel()
+        failureTask = nil
+        failure = nil
+    }
+}
+
+/// The call waiting for the link, or why a tapped call did not start, above every tab.
+struct PendingDialBar: View {
+    @ObservedObject private var dial = InAppDial.shared
+    @ObservedObject private var directory = PhoneContactDirectory.shared
+
+    var body: some View {
+        if let number = dial.waitingNumber {
+            HStack(spacing: 8) {
+                ProgressView().scaleEffect(0.8)
+                Text("Arama bekliyor: \(directory.displayName(for: number))")
+                    .font(.footnote.weight(.medium))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Button("Vazgeç") { InAppDial.shared.cancel() }
+                    .font(.footnote.weight(.semibold))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(Color.green.opacity(0.15))
+            .accessibilityElement(children: .contain)
+        } else if let failure = dial.failure {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                Text(failure).font(.footnote.weight(.medium)).lineLimit(2)
+                Spacer(minLength: 0)
+                Button { InAppDial.shared.dismissFailure() } label: {
+                    Image(systemName: "xmark").font(.caption.weight(.semibold))
+                }
+                .accessibilityLabel("Kapat")
+            }
+            .foregroundColor(.red)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(Color.red.opacity(0.12))
+        }
     }
 }
 
@@ -376,6 +503,10 @@ struct RecentsView: View {
     let openSettings: () -> Void
     let openMessages: (String) -> Void
     @State private var missedOnly = false
+    @State private var detailNumber = ""
+    @State private var showingDetail = false
+    @State private var newContactNumber = ""
+    @State private var showingNewContact = false
 
     private var items: [CallRecord] {
         missedOnly ? history.calls.filter { $0.isMissed } : history.calls
@@ -391,7 +522,7 @@ struct RecentsView: View {
                 )
             } else {
                 List(items) { call in
-                    RecentRow(call: call)
+                    RecentRow(call: call, showDetails: { showDetails(call.number) })
                         .contentShape(Rectangle())
                         .onTapGesture {
                             guard !call.number.isEmpty else { return }
@@ -403,11 +534,17 @@ struct RecentsView: View {
                                     .tint(.blue)
                             }
                         }
+                        .contextMenu { actions(for: call) }
                 }
                 .listStyle(.plain)
                 .refreshable { GatewayConnection.shared.requestSync() }
             }
         }
+        .background(
+            NavigationLink(destination: CallDetailView(number: detailNumber, openMessages: openMessages),
+                           isActive: $showingDetail) { EmptyView() }
+                .hidden()
+        )
         .navigationTitle("Son Aramalar")
         .toolbar {
             ToolbarItem(placement: .principal) {
@@ -419,6 +556,9 @@ struct RecentsView: View {
                 .frame(width: 200)
             }
             SettingsToolbarButton(action: openSettings)
+        }
+        .sheet(isPresented: $showingNewContact) {
+            NewContactView(number: newContactNumber) { showingNewContact = false }
         }
         .onAppear {
             directory.ensureLoaded()
@@ -435,55 +575,40 @@ struct RecentsView: View {
             if count > 0, history.recentsVisible, scenePhase == .active { history.markMissedSeen() }
         }
     }
+
+    /// Long press on a row, as in Apple's Recents.
+    @ViewBuilder
+    private func actions(for call: CallRecord) -> some View {
+        if !call.number.isEmpty {
+            Button { InAppDial.start(call.number) } label: { Label("Ara", systemImage: "phone") }
+            Button { openMessages(call.number) } label: { Label("Mesaj gönder", systemImage: "message") }
+            Button { UIPasteboard.general.string = call.number } label: {
+                Label("Numarayı kopyala", systemImage: "doc.on.doc")
+            }
+            if directory.contact(for: call.number) == nil {
+                Button {
+                    newContactNumber = call.number
+                    showingNewContact = true
+                } label: {
+                    Label("Kişilere ekle", systemImage: "person.badge.plus")
+                }
+            }
+        }
+        Button { showDetails(call.number) } label: { Label("Ayrıntılar", systemImage: "info.circle") }
+    }
+
+    private func showDetails(_ number: String) {
+        detailNumber = number
+        showingDetail = true
+    }
 }
 
-struct RecentRow: View {
-    @ObservedObject private var directory = PhoneContactDirectory.shared
-    let call: CallRecord
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: symbol)
-                .font(.footnote)
-                .foregroundColor(.secondary)
-                .frame(width: 18)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(directory.displayName(for: call.number))
-                    .font(.body)
-                    .foregroundColor(call.isMissed ? .red : .primary)
-                    .lineLimit(1)
-                HStack(spacing: 4) {
-                    Text(kindText)
-                    if let carrier = carrierText {
-                        Text("·")
-                        Text(carrier)
-                    }
-                }
-                .font(.footnote)
-                .foregroundColor(.secondary)
-            }
-            Spacer()
-            Text(RelativeDay.text(for: call.date))
-                .font(.footnote)
-                .foregroundColor(.secondary)
-        }
-        .padding(.vertical, 2)
-        .accessibilityElement(children: .combine)
-    }
-
-    private var symbol: String {
-        switch call.type {
-        case "outgoing": return "phone.arrow.up.right"
-        case "missed", "declined", "blocked": return "phone.arrow.down.left"
-        default: return "phone.arrow.down.left"
-        }
-    }
-
-    private var kindText: String {
-        switch call.type {
-        case "outgoing": return "Giden"
-        case "incoming": return call.duration > 0 ? "Gelen · \(CallTimerText.format(TimeInterval(call.duration)))" : "Gelen"
+extension CallRecord {
+    /// "Giden", "Gelen · 02:14", "Cevapsız"…
+    var kindText: String {
+        switch type {
+        case "outgoing": return duration > 0 ? "Giden · \(CallTimerText.format(TimeInterval(duration)))" : "Giden"
+        case "incoming": return duration > 0 ? "Gelen · \(CallTimerText.format(TimeInterval(duration)))" : "Gelen"
         case "missed": return "Cevapsız"
         case "declined": return "Reddedildi"
         case "blocked": return "Engellendi"
@@ -492,11 +617,146 @@ struct RecentRow: View {
         }
     }
 
-    private var carrierText: String? {
-        switch call.answeredOn {
+    /// Which phone carried the conversation.
+    var carrierText: String? {
+        switch answeredOn {
         case "iphone": return "iPhone'da"
         case "redmi": return "Redmi'de"
         default: return nil
+        }
+    }
+
+    var symbol: String {
+        type == "outgoing" ? "phone.arrow.up.right" : "phone.arrow.down.left"
+    }
+}
+
+struct RecentRow: View {
+    @ObservedObject private var directory = PhoneContactDirectory.shared
+    let call: CallRecord
+    /// The (i) button; Recents shows it, a contact's own call list does not.
+    var showDetails: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: call.symbol)
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                    .frame(width: 18)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(directory.displayName(for: call.number))
+                        .font(.body)
+                        .foregroundColor(call.isMissed ? .red : .primary)
+                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Text(call.kindText)
+                        if let carrier = call.carrierText {
+                            Text("·")
+                            Text(carrier)
+                        }
+                    }
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                }
+                Spacer()
+                Text(RelativeDay.text(for: call.date))
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            if let showDetails {
+                Button(action: showDetails) {
+                    Image(systemName: "info.circle").font(.title3)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Ayrıntılar")
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
+/// One number from Recents: every call with it, and what can be done with the number.
+struct CallDetailView: View {
+    @ObservedObject private var history = HistoryStore.shared
+    @ObservedObject private var directory = PhoneContactDirectory.shared
+    let number: String
+    let openMessages: (String) -> Void
+    @State private var showingNewContact = false
+
+    private var contact: PhoneContact? { directory.contact(for: number) }
+
+    private var calls: [CallRecord] {
+        let key = PhoneIdentity.key(number)
+        return history.calls.filter { PhoneIdentity.key($0.number) == key }
+    }
+
+    var body: some View {
+        List {
+            Section {
+                VStack(spacing: 10) {
+                    ContactAvatar(name: contact?.name ?? "", thumbnail: contact?.thumbnail, size: 96)
+                    Text(directory.displayName(for: number))
+                        .font(.title2.weight(.semibold))
+                        .multilineTextAlignment(.center)
+                    if contact != nil {
+                        Text(PhoneIdentity.formatted(number))
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .listRowBackground(Color.clear)
+            }
+            if !number.isEmpty {
+                Section {
+                    Button { InAppDial.start(number) } label: { Label("Ara", systemImage: "phone.fill") }
+                    Button { openMessages(number) } label: { Label("Mesaj gönder", systemImage: "message.fill") }
+                    Button { UIPasteboard.general.string = number } label: {
+                        Label("Numarayı kopyala", systemImage: "doc.on.doc")
+                    }
+                    if contact == nil {
+                        Button { showingNewContact = true } label: {
+                            Label("Yeni kişi oluştur", systemImage: "person.badge.plus")
+                        }
+                    }
+                }
+            }
+            if !calls.isEmpty {
+                Section(header: Text("Aramalar")) {
+                    ForEach(calls) { call in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(call.date.formatted(date: .abbreviated, time: .shortened))
+                                    .font(.body.monospacedDigit())
+                                HStack(spacing: 4) {
+                                    Text(call.kindText)
+                                    if let carrier = call.carrierText {
+                                        Text("·")
+                                        Text(carrier)
+                                    }
+                                }
+                                .font(.footnote)
+                                .foregroundColor(call.isMissed ? .red : .secondary)
+                            }
+                            Spacer()
+                            Image(systemName: call.symbol)
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                                .accessibilityHidden(true)
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showingNewContact) {
+            NewContactView(number: number) { showingNewContact = false }
         }
     }
 }
@@ -611,7 +871,7 @@ struct ContactDetailView: View {
                 ForEach(contact.numbers, id: \.self) { number in
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Telefon").font(.footnote).foregroundColor(.secondary)
+                            Text(contact.label(for: number)).font(.footnote).foregroundColor(.secondary)
                             Text(PhoneIdentity.formatted(number)).font(.body.monospacedDigit())
                         }
                         Spacer()
@@ -665,8 +925,11 @@ struct ContactDetailView: View {
 struct KeypadView: View {
     @ObservedObject private var connection = GatewayConnection.shared
     @ObservedObject private var directory = PhoneContactDirectory.shared
+    @ObservedObject private var history = HistoryStore.shared
     let openSettings: () -> Void
     @State private var number = ""
+    /// When holding 0 typed "+"; the release of that same touch must not add a 0 as well.
+    @State private var plusTypedAt: Date?
 
     private struct Key: Hashable {
         let digit: String
@@ -684,7 +947,7 @@ struct KeypadView: View {
         VStack(spacing: 0) {
             Spacer(minLength: 8)
             VStack(spacing: 6) {
-                Text(number.isEmpty ? " " : number)
+                Text(number.isEmpty ? " " : PhoneIdentity.typing(number))
                     .font(.system(size: 34, weight: .regular, design: .default).monospacedDigit())
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
@@ -699,10 +962,25 @@ struct KeypadView: View {
                             Button { UIPasteboard.general.string = number } label: { Label("Kopyala", systemImage: "doc.on.doc") }
                         }
                     }
-                Text(matchName ?? " ")
-                    .font(.subheadline)
-                    .foregroundColor(.accentColor)
-                    .lineLimit(1)
+                if let name = matchName {
+                    Text(name)
+                        .font(.subheadline)
+                        .foregroundColor(.accentColor)
+                        .lineLimit(1)
+                } else if let match = suggestion {
+                    // A contact whose number starts with the digits so far; a tap fills it in.
+                    Button {
+                        number = match.number.filter { "0123456789*#+".contains($0) }
+                    } label: {
+                        Text("\(match.name) · \(PhoneIdentity.formatted(match.number))")
+                            .font(.subheadline)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 24)
+                    .accessibilityHint("Numarayı doldurur")
+                } else {
+                    Text(" ").font(.subheadline)
+                }
                 if let error = connection.lastCallError {
                     Text(error)
                         .font(.footnote)
@@ -716,9 +994,12 @@ struct KeypadView: View {
             LazyVGrid(columns: Array(repeating: GridItem(.fixed(84), spacing: 24), count: 3), spacing: 16) {
                 ForEach(keys, id: \.self) { key in
                     KeypadButton(digit: key.digit, letters: key.letters) {
-                        number.append(key.digit)
+                        typed(key.digit)
                     } onLongPress: {
-                        if key.digit == "0" { number.append("+") }
+                        if key.digit == "0" {
+                            number.append("+")
+                            plusTypedAt = Date()
+                        }
                     }
                 }
             }
@@ -761,12 +1042,52 @@ struct KeypadView: View {
         number.count >= 3 ? directory.name(for: number) : nil
     }
 
+    private var suggestion: (name: String, number: String)? {
+        directory.suggestion(forTyped: number)
+    }
+
+    /// Never tied to the link (CALL-04): a call typed while the link wakes up waits for it, and
+    /// an emergency number needs no Redmi at all. An empty field offers the last dialled number.
     private var canCall: Bool {
-        connection.isAuthenticated && number.filter { $0.isNumber }.count >= 2
+        if number.isEmpty { return history.lastDialledNumber != nil }
+        return number.filter { $0.isNumber }.count >= 2
     }
 
     private func call() {
-        CallKitManager.shared.startOutgoingCall(phoneNumber: number)
+        if number.isEmpty {
+            // As on Apple's keypad: the first tap brings back the last number, the second calls it.
+            if let last = history.lastDialledNumber {
+                number = last.filter { "0123456789*#+".contains($0) }
+            }
+            return
+        }
+        InAppDial.start(number, showsErrorItself: true)
+    }
+
+    private func typed(_ digit: String) {
+        if digit == "0", let at = plusTypedAt, Date().timeIntervalSince(at) < 1.5 {
+            // The release after holding 0 for "+"; a 0 never follows a + in a phone number.
+            plusTypedAt = nil
+            return
+        }
+        plusTypedAt = nil
+        number.append(digit)
+        playKeyTone(digit)
+    }
+
+    /// Apple's keypad tones, which follow the ring/silent switch. Never during a call: the call's
+    /// audio session owns the output then.
+    private func playKeyTone(_ digit: String) {
+        guard connection.currentCall == nil, !CallKitManager.shared.hasCalls else { return }
+        let sound: SystemSoundID
+        switch digit {
+        case "*": sound = 1210
+        case "#": sound = 1211
+        default:
+            guard let value = UInt32(digit) else { return }
+            sound = 1200 + value
+        }
+        AudioServicesPlaySystemSound(sound)
     }
 }
 
