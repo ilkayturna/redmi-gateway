@@ -146,16 +146,47 @@ UDP header byte 9 bit 1 (`0x02`) = iPhone microphone muted. Android logs transit
 `ApnsSender.post` gets an expiration parameter. VoIP / call-wake pushes keep `0`. SMS, missed-call
 and health alerts use 24 hours, so a briefly offline iPhone still gets them.
 
+### 7. APNs alert payload (Redmi -> iPhone, SMS / missed call / health)
+
+```json
+{"aps":{"alert":{"title":"...","body":"..."},"sound":"default","thread-id":"sms-5321234567",
+        "category":"SMS"},
+ "open":"sms",
+ "p":"<base64 BridgeCrypto.seal(derive(key,\"push\"), {\"address\":\"...\",\"gid\":\"<journal id>\"}, PUSH_AAD)>"}
+```
+
+- `open` (plaintext): `sms`, `recents` or `health`. `p` (sealed exactly like the VoIP payload in
+  `PushNotifier.maybePushCall`, same key derivation and AAD; iOS opens it like `VoipPush.swift`):
+  `{"address","gid"}` for SMS, `{"number","logId"}` for a missed call, absent for health. The phone
+  number never travels in plaintext inside Apple's payload.
+- `aps.category`: `SMS` (actions: reply with text input, mark read), `MISSED` (call back, send
+  message), `HEALTH` (none). iOS registers these categories at launch.
+- `aps.thread-id`: `sms-<key>` where `<key>` is `PhoneIdentity.key(address)` ported exactly to Kotlin
+  (no digits -> trimmed uppercase; 12 digits starting `90` or 11 digits starting `0` -> last 10;
+  otherwise all digits); `missed`; `health`. Shared test vectors on both sides:
+  `+90 532 123 45 67`->`5321234567`, `05321234567`->`5321234567`, `5321234567`->`5321234567`,
+  `TURKCELL`->`TURKCELL`, ` Garanti BBVA `->`GARANTI BBVA`, `+44 20 7946 0958`->`442079460958`.
+- `aps.badge` is not set by the Redmi; iOS keeps its own badge.
+- Sync items: `SmsJournal.Entry.toJson` and `CallJournal.Entry.toJson` carry `"pushed":true` when the
+  Redmi sent an APNs alert for that entry. iOS stores such an entry without a second sound/banner
+  (at most a quiet replacement while the pushed one is still delivered).
+
 ## Work packages and file ownership
 
 | Package | Owns |
 |---|---|
 | A-quiet-health (Android) | `AndroidManifest.xml`, `telecom/MissedCallsReceiver.kt` (new), `telecom/CallUiNotifier.kt`, `telecom/CallManager.kt` (only if needed), `service/HealthReporter.kt`, `service/HealthCheck.kt`, `service/UpdateWatch.kt`, `service/GatewayService.kt`, `service/BootReceiver.kt`, `push/ApnsSender.kt`, `push/PushNotifier.kt`, `sms/SmsJournal.kt`, `sms/SmsReceiver.kt`, `journal/CallJournal.kt` and their tests |
 | A-diag-protocol (Android) | `server/GatewayWebSocketServer.kt`, `server/DiagnosticsReport.kt`, `journal/IphoneDiagnostics.kt`, `journal/IosDiagStore.kt` (new), `docs/PROTOCOL.md` and their tests |
-| I-ui (iOS) | `MessagesView.swift`, `MessageText.swift` (new), `ContentView.swift`, `PhoneContactPicker.swift`, `HistoryStore.swift`, `Notifier.swift`; `GatewayConnection.swift` only in SMS/history/call functions, never in the telemetry section |
+| I-messages (iOS) | `MessagesView.swift`, `MessageText.swift` (new), `PhoneLink.swift` (new, Foundation-only), `ios/Tests/PhoneLinkTests.swift` (new) |
+| I-notify-history (iOS) | `Notifier.swift`, `HistoryStore.swift`, `ContentView.swift`, `PhoneContactPicker.swift`; `GatewayConnection.swift` only in SMS/history/call/journal functions, never in the telemetry section |
 | I-telemetry (iOS) | `GatewayConnection.swift` telemetry section (`log`, `appendTelemetryLine`, `flushTelemetry`, `sendClientStatus`, `startTelemetry`, `stopTelemetry`, `LogFile`) plus `health` decoding, `GatewayMessage.swift`, `RedmiGatewayApp.swift`, `SettingsView.swift`, new `MetricKitReporter.swift`, `DiagnosticsFormat.swift`, `DiagnosticsOutbox.swift`, `RedmiHealthBanner.swift`, `ios/Tests/DiagnosticsFormatTests.swift` |
 | C-ci-pc | `.github/workflows/*.yml`, `scripts/*.py`, `RedmiGateway/scripts/quality/*.ps1` (new `redmi-tanilama-cek.ps1`), `RedmiGateway/scripts/device/*` (read-only helpers only) |
 | Coordinator | `HealthBus.kt`, audio files, `project.pbxproj`, version bumps, merging, the one-line banner hook in `ContentView.swift` |
+
+CI test steps (owned by C-ci-pc): `swiftc RedmiGateway/ios/RedmiGateway/DiagnosticsFormat.swift
+RedmiGateway/ios/Tests/DiagnosticsFormatTests.swift` and `swiftc RedmiGateway/ios/RedmiGateway/PhoneLink.swift
+RedmiGateway/ios/Tests/PhoneLinkTests.swift`, each built and run like the existing two. Those
+production files must therefore import Foundation only.
 
 Two packages must not edit the same file. If your fix needs a file you do not own, describe the
 change in your report instead of making it.
