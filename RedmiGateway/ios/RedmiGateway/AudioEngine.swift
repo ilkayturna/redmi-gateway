@@ -417,11 +417,9 @@ final class AudioEngine {
                 self.lastRecoveredFrames = 0
                 self.lastMissingPackets = 0
             }
-            // stop() zeroed the pacer's counters; without this the first CAPTURE_HEALTH after a
-            // rebuild reported a negative produced/s.
-            self.lastProducedFrames = 0
+            // The first health tick of this start takes a fresh baseline (captureHealthTick);
+            // stop() zeroed the pacer, so the old one gave a negative produced/s after a rebuild.
             self.lastCaptureHealthAt = nil
-            self.micLevel = MicLevel()
             self.lastSession = session
             self.lastKey = key
             self.sealer = MediaSealer(key: key, session: session)
@@ -544,13 +542,17 @@ final class AudioEngine {
         }
         playerStartWait = nil
         player.play()
-        log("Audio engine: vp=\(vpMs) ms start=\(startMs) ms render wait=\(attempt * 10) ms")
+        let vpOn = engine.inputNode.isVoiceProcessingEnabled ? 1 : 0
+        log("Audio engine: vp=\(vpMs) ms vpOn=\(vpOn) start=\(startMs) ms render wait=\(attempt * 10) ms")
     }
 
     /// One deliberate reset of the input unit while it reports no format: a clean voice-processing
     /// unit instead of the state that repeated on/off switching left behind. Done twice per wait.
     private func resetInputUnit(attempt: Int) {
         log("Audio input still has no format at attempt \(attempt); resetting the input unit")
+        // reset() alone keeps what warmUp()'s prepare() allocated, and voice processing cannot be
+        // switched on an initialized unit (-10849); stop() releases it first.
+        engine.stop()
         engine.reset()
         try? engine.inputNode.setVoiceProcessingEnabled(false)
         try? engine.inputNode.setVoiceProcessingEnabled(true)
@@ -666,6 +668,7 @@ final class AudioEngine {
             if magnitude > framePeak { framePeak = magnitude }
             frameSquares += Double(value) * Double(value)
         }
+        // Frames handed to the socket, muted ones as zeros, like the Redmi's uplink meter sees them.
         micLevel.add(squares: frameSquares, samples: samples.count, peak: framePeak)
         // Type 2 carries the frame before this one as well, so the Redmi can rebuild a frame that
         // was lost on the way. Type 1 stays the plain frame: an older Redmi never asks for the
@@ -674,14 +677,14 @@ final class AudioEngine {
             var both = Data(capacity: previous.count + pcm.count)
             both.append(previous)
             both.append(pcm)
-            if sendPacket(type: 2, pcm: both) {
+            if sendPacket(type: 2, pcm: both, muted: muted) {
                 sentFrames += 1
                 lastSentPcm = pcm
                 lastPcmSentAt = Date()
             }
             return
         }
-        if sendPacket(type: 1, pcm: pcm) {
+        if sendPacket(type: 1, pcm: pcm, muted: muted) {
             sentFrames += 1
             lastSentPcm = uplinkRedundancy ? pcm : nil
             lastPcmSentAt = Date()
@@ -695,7 +698,16 @@ final class AudioEngine {
     private func captureHealthTick() {
         let now = Date()
         guard let last = lastCaptureHealthAt else {
+            // A new start: every rate is measured from here, not from the previous run's counters.
             lastCaptureHealthAt = now
+            captureLock.lock()
+            lastProducedFrames = capturePacer.acceptedFrames
+            captureLock.unlock()
+            lastSentFrames = sentFrames
+            lastReceivedFrames = receivedFrames
+            lastRecoveredFrames = recoveredFrames
+            lastMissingPackets = missingPackets
+            micLevel = MicLevel()
             return
         }
         let elapsed = now.timeIntervalSince(last)
@@ -718,9 +730,10 @@ final class AudioEngine {
         lastReceivedFrames = receivedFrames
         lastRecoveredFrames = recoveredFrames
         lastMissingPackets = missingPackets
+        let mic = micLevel.take()
+        let mutedFlag = mutedNow ? 1 : 0
         log("CAPTURE_HEALTH produced=\(producedPerSecond)/s sent=\(sentPerSecond)/s " +
-            "expired=\(expired) overflow=\(overflow) pending=\(pendingSends) " +
-            "\(micLevel.take()) muted=\(mutedNow ? 1 : 0)")
+            "expired=\(expired) overflow=\(overflow) pending=\(pendingSends) \(mic) muted=\(mutedFlag)")
         log("DOWNLINK_HEALTH maxGap=\(playbackBuffer.maxArrivalGapMs)ms " +
             "underruns=\(playbackBuffer.underruns) dropped=\(playbackBuffer.droppedFrames) " +
             "scheduled=\(playbackBuffer.scheduledFrames) rx=\(receivedPerSecond)/s " +
@@ -729,13 +742,14 @@ final class AudioEngine {
     }
 
     @discardableResult
-    private func sendPacket(type: UInt8, pcm: Data) -> Bool {
+    private func sendPacket(type: UInt8, pcm: Data, muted: Bool? = nil) -> Bool {
         guard pendingSends < maximumPendingSends, let sealer, let socket = connection else { return false }
         txCounter &+= 1
         let hearing = lastDownlink.map { Date().timeIntervalSince($0) < 0.5 } ?? false
         var flags: UInt8 = hearing ? MediaSealer.flagHearing : 0
-        // Tells the Redmi that a silent uplink is a mute, not a dead microphone.
-        if isMuted { flags |= MediaSealer.flagMuted }
+        // Tells the Redmi that a silent uplink is a mute, not a dead microphone. PCM frames pass the
+        // state they were zeroed with, so a toggle cannot flag a frame the other way.
+        if muted ?? isMuted { flags |= MediaSealer.flagMuted }
         guard let packet = sealer.seal(type: type, flags: flags,
                                        counter: txCounter, payload: pcm) else { return false }
         pendingSends += 1
@@ -884,6 +898,7 @@ struct MicLevel {
     }
 
     private static func rounded(_ value: Double) -> Int {
-        value.isInfinite || value < -99 ? -99 : Int(value.rounded())
+        // Half up like Kotlin's Math.round, so both phones print the same number for the same level.
+        value.isInfinite || value < -99 ? -99 : Int((value + 0.5).rounded(.down))
     }
 }
