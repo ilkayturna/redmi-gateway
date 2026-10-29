@@ -13,7 +13,7 @@ import java.nio.file.StandardOpenOption
  *
  * Such a report is 20-60 KB, and one sealed frame above 16,384 chars is dropped before it is even
  * opened (frames above 64 KB close the socket with 1009). The iPhone therefore sends `client_diag`
- * parts of at most 6000 raw bytes and waits for each ack; this class stores the parts and joins
+ * parts of at most 4200 raw bytes and waits for each ack; this class stores the parts and joins
  * them into `ios-diag/<id>.<kind>.json` once the set is complete (docs/PROTOCOL.md "client_diag").
  *
  * Plain JVM on purpose (no Android types), so the validation, the joining and the folder cap can be
@@ -49,7 +49,7 @@ class IosDiagStore(
 
     companion object {
         const val MAX_PARTS = 64
-        /** The iPhone sends at most 6000 raw bytes; the margin keeps a near miss from failing for ever. */
+        /** The iPhone sends at most 4200 raw bytes (6000 in the first draft); the margin keeps a near miss from failing for ever. */
         const val MAX_PART_BYTES = 8 * 1024
         const val MAX_DIR_BYTES = 2L * 1024L * 1024L
         const val MAX_FILES = 50
@@ -92,7 +92,7 @@ class IosDiagStore(
                 return Parsed.Invalid("bad_data")
             }
             if (data.size > MAX_PART_BYTES) return Parsed.Invalid("too_large")
-            // A part always carries bytes: the iPhone cuts a report into ceil(size / 6000) parts and
+            // A part always carries bytes: the iPhone cuts a report into ceil(size / 4200) parts and
             // does not send an empty report. An empty part therefore means the sender lost its data
             // (a failed encode, a missing field), and acking it would let the iPhone delete a report
             // that never reached the Redmi.

@@ -81,12 +81,13 @@ the receive time and writes it atomically to `diagnostics/iphone-status.json`.
 
 ```json
 {"type":"client_diag","id":"<uuid>","kind":"metrickit-crash","createdAt":"2026-10-29T08:00:00Z",
- "part":0,"parts":3,"enc":"base64","data":"<base64 of at most 6000 raw bytes>"}
+ "part":0,"parts":3,"enc":"base64","data":"<base64 of at most 4200 raw bytes>"}
 ```
 
 - `kind`: `metrickit-crash`, `metrickit-hang`, `metrickit-cpu`, `metrickit-disk`,
   `metrickit-metric`, `nsexception`, `exit-unclean`, `log-tail`.
-- Size: 6000 raw bytes -> 8000 base64 chars -> about 8.3 KB inner JSON -> about 11.1 K sealed chars,
+- Size: 4200 raw bytes -> 5600 base64 chars; JSONSerialization escapes each "/" as "\/", so the worst
+  case is 11,200 chars of data -> about 15.3 K sealed chars (6000 bytes sealed to 21.6 K in CI),
   safely under the Redmi's 16,384-char frame gate.
 - Redmi validates `id` (`^[A-Za-z0-9-]{8,64}$`), `1 <= parts <= 64`, `0 <= part < parts`, stores
   each part, joins them when complete into `diagnostics/ios-diag/<id>.<kind>.json`, keeps the folder

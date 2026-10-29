@@ -11,9 +11,11 @@ enum DiagnosticsFormat {
 
     // MARK: - client_diag parts
 
-    /// Raw bytes per `client_diag` part: 8,000 base64 chars, about 8.3 KB of inner JSON and about
-    /// 11.1 K sealed chars, well under the 16,384-char gate.
-    static let partBytes = 6000
+    /// Raw bytes per `client_diag` part: 5,600 base64 chars. JSONSerialization writes every "/" of
+    /// the base64 as "\/", so the worst case doubles to 11,200 chars of data and about 15.3 K sealed
+    /// chars, still under the 16,384-char gate (CI caught 6,000 bytes sealing to 21.6 K, 29.10.2026).
+    /// A typical report has few slashes and seals to about 7.9 K.
+    static let partBytes = 4200
     /// The Redmi accepts at most this many parts for one payload.
     static let maxParts = 64
     /// The largest payload that fits in `maxParts` parts.

@@ -53,27 +53,27 @@ struct DiagnosticsFormatTests {
     static func partsCoverThePayloadExactly() {
         let data = Data((0..<14_500).map { UInt8($0 % 251) })
         let count = DiagnosticsFormat.partCount(byteCount: data.count)
-        expect(count == 3, "14,500 bytes travel as 3 parts of at most 6,000")
+        expect(count == 4, "14,500 bytes travel as 4 parts of at most 4,200")
         var joined = Data()
         for index in 0..<count {
             guard let part = DiagnosticsFormat.part(index, of: data), let raw = Data(base64Encoded: part) else {
                 expect(false, "part \(index) decodes")
                 continue
             }
-            expect(raw.count <= DiagnosticsFormat.partBytes, "part \(index) holds at most 6,000 bytes")
+            expect(raw.count <= DiagnosticsFormat.partBytes, "part \(index) holds at most 4,200 bytes")
             joined.append(raw)
         }
         expect(joined == data, "the parts join back byte for byte")
-        expect(DiagnosticsFormat.part(3, of: data) == nil, "there is no part past the last")
+        expect(DiagnosticsFormat.part(4, of: data) == nil, "there is no part past the last")
         expect(DiagnosticsFormat.part(-1, of: data) == nil, "there is no negative part")
         expect(DiagnosticsFormat.partCount(byteCount: 0) == 1, "an empty payload is one part")
         expect(DiagnosticsFormat.part(0, of: Data()) == "", "the empty part is empty")
-        expect(DiagnosticsFormat.partCount(byteCount: 6000) == 1, "exactly 6,000 bytes is one part")
-        expect(DiagnosticsFormat.partCount(byteCount: 6001) == 2, "one byte more is two parts")
-        expect(DiagnosticsFormat.maxPayloadBytes == 384_000, "64 parts carry 384,000 bytes")
+        expect(DiagnosticsFormat.partCount(byteCount: 4200) == 1, "exactly 4,200 bytes is one part")
+        expect(DiagnosticsFormat.partCount(byteCount: 4201) == 2, "one byte more is two parts")
+        expect(DiagnosticsFormat.maxPayloadBytes == 268_800, "64 parts carry 268,800 bytes")
         // A slice of a larger Data must use its own indices.
         let slice = data[100..<6200]
-        expect(Data(base64Encoded: DiagnosticsFormat.part(1, of: slice) ?? "") == Data(data[6100..<6200]),
+        expect(Data(base64Encoded: DiagnosticsFormat.part(1, of: slice) ?? "") == Data(data[4300..<6200]),
                "a Data slice is cut at its own offsets")
     }
 
@@ -81,14 +81,21 @@ struct DiagnosticsFormatTests {
     static func aFullPartFitsTheFrameGate() {
         let data = Data(repeating: 0xFF, count: 12_000)
         let part = DiagnosticsFormat.part(0, of: data) ?? ""
-        expect(part.count == 8000, "a full part is 8,000 base64 chars")
+        expect(part.count == 5600, "a full part is 5,600 base64 chars")
         let frame = json([
             "type": "client_diag", "id": UUID().uuidString, "kind": "metrickit-crash",
             "createdAt": DiagnosticsFormat.isoTimestamp(Date()), "part": 63, "parts": 64,
             "enc": "base64", "data": part
         ])
-        expect(sealedChars(frame) < 12_000, "a full part seals to about 11.1 K chars (\(sealedChars(frame)))")
-        expect(sealedChars(frame) < frameGate, "a full part stays under the frame gate")
+        // 0xFF bytes are all "/" in base64, which JSONSerialization escapes: the worst case.
+        expect(sealedChars(frame) < frameGate, "a full part of slashes stays under the frame gate (\(sealedChars(frame)))")
+        let typical = Data(Array("{\"crashDiagnostics\":[{\"callStackTree\":{\"frames\":[]}}]}".utf8) + Array(repeating: UInt8(0x41), count: 12_000))
+        let typicalFrame = json([
+            "type": "client_diag", "id": UUID().uuidString, "kind": "metrickit-crash",
+            "createdAt": DiagnosticsFormat.isoTimestamp(Date()), "part": 0, "parts": 3,
+            "enc": "base64", "data": DiagnosticsFormat.part(0, of: typical) ?? ""
+        ])
+        expect(sealedChars(typicalFrame) < 9_000, "a typical part seals to about 7.9 K chars (\(sealedChars(typicalFrame)))")
     }
 
     static func idsFollowTheRedmisRule() {

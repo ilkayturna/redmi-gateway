@@ -113,7 +113,8 @@ so they cannot be relaxed per message type.
   A dropped frame does not advance the receive counter. With the sealed envelope
   (`21 + digits(c) + 4·ceil((P + 16) / 3)` chars) the inner JSON P can be about 12,250 UTF-8
   bytes. Senders stay well below that: a `client_log` batch keeps its escaped lines under 9000
-  chars, and a `client_diag` part carries at most 6000 raw bytes (about 11.1 K sealed chars).
+  chars, and a `client_diag` part carries at most 4200 raw bytes (at most about 15.3 K sealed chars, because
+  JSONSerialization escapes every `/` of the base64 as `\/`).
 - **64 KB: the WebSocket frame limit.** Java-WebSocket refuses a frame above 64 KB (also one built
   from continuation fragments) and closes the connection with code **1009**. A control socket
   closed while the Redmi prepares the iPhone's audio returns the call audio to the Redmi, so an
@@ -310,7 +311,7 @@ cannot exceed the 16,384-char gate:
 
 ```json
 {"type":"client_diag","id":"<uuid>","kind":"metrickit-crash","createdAt":"2026-10-29T08:00:00Z",
- "part":0,"parts":3,"enc":"base64","data":"<base64 of at most 6000 raw bytes>"}
+ "part":0,"parts":3,"enc":"base64","data":"<base64 of at most 4200 raw bytes>"}
 ```
 
 - `kind`: `metrickit-crash`, `metrickit-hang`, `metrickit-cpu`, `metrickit-disk`,
@@ -318,7 +319,7 @@ cannot exceed the 16,384-char gate:
   that matches `^[a-z][a-z0-9-]{0,31}$`.
 - The Redmi checks `id` against `^[A-Za-z0-9-]{8,64}$`, `1 ≤ parts ≤ 64`, `0 ≤ part < parts`,
   `enc` = `base64` (the default) and 1 to 8192 decoded bytes per part: a report is cut into
-  `ceil(size / 6000)` parts, so a part with no data (empty or missing `data`) is refused as
+  `ceil(size / 4200)` parts, so a part with no data (empty or missing `data`) is refused as
   `bad_data` rather than acked, and an empty report is not sent at all. It writes each part to
   disk (flushed to the storage device), then replies
   `{"type":"ack","action":"client_diag","id","part","success":true}`. A repeated
