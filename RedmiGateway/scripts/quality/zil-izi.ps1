@@ -16,6 +16,9 @@ param(
     [int]$Dakika = 360,
     [switch]$Tumu,
     [string]$Adb = 'C:\Users\ilkay.turna\platform-tools\adb.exe',
+    # USB seri no; adb Wi-Fi uzerindeyse ip:port ya da 'adb devices'teki mDNS adi (evde TV de
+    # adb'de gorunur, bu yuzden cekme her zaman -s ile yapilir).
+    [string]$Seri = '17df6357',
     [string]$Cikti = ''
 )
 
@@ -27,8 +30,8 @@ if (-not (Test-Path $Adb)) {
 }
 
 $cihazlar = (& $Adb devices 2>$null) | Out-String
-if (-not ($cihazlar -match '17df6357\s+device')) {
-    Write-Host 'Redmi bagli degil (17df6357)' -ForegroundColor Red
+if (-not ($cihazlar -match ('(?m)^' + [regex]::Escape($Seri) + '\s+device\b'))) {
+    Write-Host ('Redmi bagli degil (' + $Seri + ')') -ForegroundColor Red
     exit 1
 }
 
@@ -36,8 +39,8 @@ $kok = 'C:\Users\ilkay.turna\Documents\deepseek-harness\default-workspace'
 $aDosya = Join-Path $kok '_zil-redmi.log'
 $iDosya = Join-Path $kok '_zil-iphone.log'
 
-& $Adb pull '/sdcard/Android/data/com.ilkay.redmigateway/files/diagnostics/call-diagnostics.log' $aDosya 2>$null | Out-Null
-& $Adb pull '/sdcard/Android/data/com.ilkay.redmigateway/files/diagnostics/iphone-diagnostics.log' $iDosya 2>$null | Out-Null
+& $Adb -s $Seri pull '/sdcard/Android/data/com.ilkay.redmigateway/files/diagnostics/call-diagnostics.log' $aDosya 2>$null | Out-Null
+& $Adb -s $Seri pull '/sdcard/Android/data/com.ilkay.redmigateway/files/diagnostics/iphone-diagnostics.log' $iDosya 2>$null | Out-Null
 
 # Zil zincirine ait desenler. Redmi tarafi "Call:"/"Audio:"/"Push:" etiketleriyle, iPhone tarafi
 # "iPhone[...]" etiketiyle yazilir; ikisi de ayni zaman damgasi bicimini kullanir.
@@ -58,7 +61,7 @@ foreach ($dosya in @($aDosya, $iDosya)) {
 }
 
 if ($satirlar.Count -eq 0) {
-    Write-Host 'Zincire ait satir bulunamadi (son ' + $Dakika + ' dakika).' -ForegroundColor Yellow
+    Write-Host ('Zincire ait satir bulunamadi (son ' + $Dakika + ' dakika).') -ForegroundColor Yellow
     exit 0
 }
 

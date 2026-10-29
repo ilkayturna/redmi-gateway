@@ -1,10 +1,23 @@
 name: Build iOS Telefon Gecidi
 
 on:
+  # Documentation-only commits do not start a macOS compile: macOS minutes count ten times against
+  # the Actions quota whose exhaustion stopped every workflow on 16.10.2026.
   push:
     branches: [main]
+    paths-ignore:
+      - '**/docs/**'
+      - '**/*.md'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**/docs/**'
+      - '**/*.md'
+  # A TestFlight build stops opening 90 days after upload. Cron cannot say "every 60 days", so a
+  # cheap weekly guard asks App Store Connect how long the installable build has left and only then
+  # starts the macOS release (refresh_guard below).
+  schedule:
+    - cron: '23 5 * * 1'
   workflow_dispatch:
     inputs:
       release:
@@ -18,10 +31,95 @@ on:
         required: false
         default: ''
 
+# One release at a time: a scheduled refresh and a manual release must not upload side by side.
+# Pushes and pull requests queue per ref instead of piling up macOS runs. Nothing is cancelled
+# while it runs: an upload cut off half way leaves App Store Connect in an unknown state.
+concurrency:
+  group: build-ios-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'release' || github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  refresh_guard:
+    name: Check whether TestFlight needs a fresh build
+    # The archive repository receives copies of these workflow files. Without the repository check
+    # its cron would fire there too, fail without the signing secrets and mail the owner each week.
+    if: github.event_name == 'schedule' && github.repository == 'ilkayturna/redmi-gateway'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      needed: ${{ steps.source.outputs.needed }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the guard's date logic
+        run: python3 scripts/test_testflight_refresh_needed.py
+      - name: Install Apple API signing library
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/ascenv"
+          "$RUNNER_TEMP/ascenv/bin/pip" install --disable-pip-version-check --quiet 'PyJWT[crypto]>=2,<3'
+      - name: Read build and certificate expiry
+        id: expiry
+        shell: bash
+        env:
+          ASC_API_KEY_B64: ${{ secrets.ASC_API_KEY_B64 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          IOS_DIST_P12_B64: ${{ secrets.IOS_DIST_P12_B64 }}
+          IOS_DIST_P12_PASSWORD: ${{ secrets.IOS_DIST_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Serial of the certificate the release signs with, read the way the release job reads
+          # it, so the guard watches that certificate and not another one in the account.
+          serial=''
+          if [ -n "${IOS_DIST_P12_B64:-}" ]; then
+            printf '%s' "$IOS_DIST_P12_B64" | base64 -d > "$RUNNER_TEMP/dist.p12"
+            serial="$( (openssl pkcs12 -in "$RUNNER_TEMP/dist.p12" -passin env:IOS_DIST_P12_PASSWORD -nokeys -legacy 2>/dev/null \
+              || openssl pkcs12 -in "$RUNNER_TEMP/dist.p12" -passin env:IOS_DIST_P12_PASSWORD -nokeys 2>/dev/null) \
+              | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2)" || serial=''
+            rm -f "$RUNNER_TEMP/dist.p12"
+          fi
+          if [ -z "$serial" ]; then
+            echo "Signing certificate serial unknown; the guard picks the distribution certificate by itself."
+          fi
+          CERT_SERIAL="$serial" "$RUNNER_TEMP/ascenv/bin/python" scripts/testflight_refresh_needed.py
+      # The scheduled release builds the moving tag testflight/known-good, never main HEAD: an
+      # unattended upload must not ship a change that has not passed a real call test (AGENTS 6.1).
+      # Without the tag the refresh is skipped with a warning rather than failing every week.
+      - name: Find the known-good source
+        id: source
+        shell: bash
+        env:
+          DUE: ${{ steps.expiry.outputs.needed }}
+        run: |
+          if [ "$DUE" != 'true' ]; then
+            echo 'needed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          rc=0
+          git ls-remote --exit-code --tags origin refs/tags/testflight/known-good > /dev/null || rc=$?
+          case "$rc" in
+            0)
+              echo 'needed=true' >> "$GITHUB_OUTPUT"
+              ;;
+            2)
+              message='A refresh is due but the tag testflight/known-good does not exist, so nothing was built. Point the tag at the commit of a build that passed a real call test; the next weekly run uploads it.'
+              echo "::warning title=TestFlight refresh skipped::$message"
+              echo "- **Skipped:** $message" >> "$GITHUB_STEP_SUMMARY"
+              echo 'needed=false' >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error title=TestFlight refresh::Could not read the tags of origin (git exit $rc)."
+              exit 1
+              ;;
+          esac
+
   compile:
     name: Compile iOS app
-    if: github.event_name != 'workflow_dispatch' || inputs.promote_build == ''
+    # Not on the schedule: the scheduled release builds the known-good tag, which may predate the
+    # test files below, and a refresh should not spend macOS minutes testing main.
+    if: github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.promote_build == '')
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +146,26 @@ jobs:
             RedmiGateway/ios/Tests/BLEReassemblyTests.swift \
             -o "$RUNNER_TEMP/ble-reassembly-tests"
           "$RUNNER_TEMP/ble-reassembly-tests"
+      # How the iPhone formats what it reports about itself to the Redmi (log batches and split
+      # lines, client_diag parts, TestFlight days left). The iPhone has no USB debugging, so a
+      # mistake here loses the only evidence; the file is Foundation-only to be testable here.
+      - name: Test diagnostics format
+        shell: bash
+        run: |
+          set -euo pipefail
+          swiftc RedmiGateway/ios/RedmiGateway/DiagnosticsFormat.swift \
+            RedmiGateway/ios/Tests/DiagnosticsFormatTests.swift \
+            -o "$RUNNER_TEMP/diagnostics-format-tests"
+          "$RUNNER_TEMP/diagnostics-format-tests"
+      # Which parts of a message become tappable phone numbers and links, as in Apple's Messages.
+      - name: Test message links
+        shell: bash
+        run: |
+          set -euo pipefail
+          swiftc RedmiGateway/ios/RedmiGateway/PhoneLink.swift \
+            RedmiGateway/ios/Tests/PhoneLinkTests.swift \
+            -o "$RUNNER_TEMP/phone-link-tests"
+          "$RUNNER_TEMP/phone-link-tests"
       # The two steps above compile single files, so they never see AudioEngine, CallKitManager or
       # the rest of the app. Two builds in a row failed in the Xcode step and only there: an
       # optional Error cast to NSError, and a bare return in a function that returns Bool. This
@@ -98,13 +216,22 @@ jobs:
 
   testflight:
     name: Sign and upload TestFlight build
-    if: github.event_name == 'workflow_dispatch' && inputs.release == true
-    needs: compile
+    needs: [compile, refresh_guard]
+    # A manual release needs a green compile of the same commit, as before. The scheduled refresh
+    # needs the guard's go and skips compile (see there). !cancelled() lets the job look past
+    # whichever of the two was skipped instead of being skipped with it.
+    if: >-
+      !cancelled() && (
+      (github.event_name == 'workflow_dispatch' && inputs.release == true && needs.compile.result == 'success') ||
+      (github.event_name == 'schedule' && github.repository == 'ilkayturna/redmi-gateway' && needs.refresh_guard.outputs.needed == 'true'))
     runs-on: macos-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Empty keeps the commit that triggered the run, as before.
+          ref: ${{ github.event_name == 'schedule' && 'refs/tags/testflight/known-good' || '' }}
       - name: Install Apple signing assets
         shell: bash
         env:
@@ -153,9 +280,10 @@ jobs:
       # A build signed without the push entitlement installs and opens normally, but it never rings
       # while the iPhone is away from the Redmi and gets no SMS or missed-call alerts through Apple,
       # and nothing on the phone says why. The step above fails softly so its own log stays
-      # readable; this gate stops such a build before anything is archived or uploaded.
+      # readable; this gate stops such a build before anything is archived or uploaded. It has no
+      # condition of its own: every run of this job is a release, and a scheduled run has no
+      # inputs, so the former `inputs.release == true` would have skipped it there.
       - name: Require push profile for release
-        if: inputs.release == true
         shell: bash
         env:
           PUSH_PROFILE: ${{ steps.push.outputs.push_profile }}
@@ -175,8 +303,16 @@ jobs:
         run: |
           set -euo pipefail
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" RedmiGateway/ios/RedmiGateway/Info.plist
+          # The iPhone tells the Redmi how many of TestFlight's 90 days its build has left
+          # (client_status buildDate/tfDaysLeft); only the build itself can carry when it was made.
+          # Delete first so the Add works whether or not the checked out Info.plist has the key.
+          build_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          /usr/libexec/PlistBuddy -c "Delete :RGBuildDate" RedmiGateway/ios/RedmiGateway/Info.plist 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :RGBuildDate string $build_date" RedmiGateway/ios/RedmiGateway/Info.plist
+          echo "Archiving $(git rev-parse --short HEAD) as build $GITHUB_RUN_NUMBER, RGBuildDate $build_date"
           # With a push profile the app gets the push entitlement. A release never gets here without
-          # one (see the gate above); the plain profile stays for a job that skips that gate.
+          # one (see the gate above); the plain profile is only a fallback that the gate never lets
+          # through to an upload.
           profile='Telefon Gecidi App Store 2026'
           entitlements=()
           if [ -n "${PUSH_PROFILE:-}" ]; then
@@ -235,6 +371,34 @@ jobs:
           ipa="$(find "$RUNNER_TEMP/export" -maxdepth 1 -name '*.ipa' -print -quit)"
           test -n "$ipa"
           xcrun altool --upload-app -f "$ipa" -t ios --apiKey "$ASC_API_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+
+  # The scheduled refresh puts its build in the internal group in the same run, so the iPhone gets
+  # it without anyone dispatching promote_build. A manual release keeps that separate step. Linux,
+  # because waiting for Apple's processing can take half an hour and macOS minutes count ten times.
+  promote_refreshed:
+    name: Add the refreshed build to the internal TestFlight group
+    needs: testflight
+    if: github.event_name == 'schedule' && github.repository == 'ilkayturna/redmi-gateway'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Apple API signing library
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/ascenv"
+          "$RUNNER_TEMP/ascenv/bin/pip" install --disable-pip-version-check --quiet 'PyJWT[crypto]>=2,<3'
+      - name: Wait for processing and add build to group
+        shell: bash
+        env:
+          ASC_API_KEY_B64: ${{ secrets.ASC_API_KEY_B64 }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          # The testflight job set CFBundleVersion to this run's number.
+          ASC_BUILD_NUMBER: ${{ github.run_number }}
+        run: '"$RUNNER_TEMP/ascenv/bin/python" scripts/assign_testflight.py'
 
   promote_existing:
     name: Add build to internal TestFlight group
