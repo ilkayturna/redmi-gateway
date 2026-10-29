@@ -155,7 +155,7 @@ final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelega
             content.sound = index == ordered.count - 1 ? .default : nil
             content.threadIdentifier = "sms-\(PhoneIdentity.key(record.address))"
             var info: [AnyHashable: Any] = ["open": "sms", "address": record.address]
-            if let code = OneTimeCode.find(in: record.body) {
+            if let code = OneTimeCode.detect(in: record.body) {
                 // The code is readable straight from the lock screen, and one tap copies it.
                 content.subtitle = "Kod: \(code)"
                 content.categoryIdentifier = Category.smsCode
@@ -345,7 +345,7 @@ final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelega
             connection.log("Conversation marked read from a notification")
             clearConversation(address) { completion() }
         case Action.copyCode:
-            if let code = tap.code ?? OneTimeCode.find(in: tap.body) {
+            if let code = tap.code ?? OneTimeCode.detect(in: tap.body) {
                 UIPasteboard.general.string = code
                 connection.log("One-time code copied from a notification")
             } else {
@@ -506,30 +506,5 @@ private final class BackgroundWork {
             UIApplication.shared.endBackgroundTask(task)
             task = .invalid
         }
-    }
-}
-
-/// Finds a one-time code in an SMS, for "Kodu Kopyala" on its notification.
-///
-/// iOS fills security codes only from Apple's Messages and Mail, never from another app's
-/// notifications; this is the closest a relayed message can get.
-enum OneTimeCode {
-    private static let keywords = [
-        "kod", "şifre", "sifre", "parola", "doğrulama", "dogrulama", "code", "otp", "password", "passcode"
-    ]
-
-    /// A run of 4-8 digits that is not part of a date, time, amount or longer number, in a message
-    /// that talks about a code. Six digits win (most banks and e-Devlet), then the first run.
-    static func find(in text: String) -> String? {
-        let lower = text.lowercased(with: Locale(identifier: "tr_TR"))
-        guard keywords.contains(where: { lower.contains($0) }) else { return nil }
-        guard let regex = try? NSRegularExpression(pattern: "(?<![0-9][.,:/-])(?<![0-9])[0-9]{4,8}(?![0-9])(?![.,:/-][0-9])") else {
-            return nil
-        }
-        let runs = regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match -> String? in
-            guard let range = Range(match.range, in: text) else { return nil }
-            return String(text[range])
-        }
-        return runs.first { $0.count == 6 } ?? runs.first
     }
 }
