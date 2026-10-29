@@ -119,6 +119,141 @@ class DiagnosticsProtocolTest {
     }
 
     @Test
+    fun dropsStillHeldBackAreHandedOverWhenTheConnectionCloses() {
+        val note = RateLimitedNote(60_000L)
+        note.tryNote(0L)
+        note.tryNote(1_000L)
+        note.tryNote(2_000L)
+
+        assertEquals(2, note.drain())
+        assertEquals("nothing is counted twice", 0, note.drain())
+    }
+
+    @Test
+    fun drainingDoesNotOpenANewInterval() {
+        val note = RateLimitedNote(60_000L)
+        note.tryNote(0L)
+        note.tryNote(1_000L)
+        note.drain()
+
+        assertNull("still inside the minute of the last note", note.tryNote(2_000L))
+        assertEquals("only the drop after the drain is reported", 1, note.tryNote(60_000L))
+    }
+
+    // ---- Health delivery per connection ----
+
+    private fun snapshot(at: Long, level: Int) =
+        JSONObject().put("at", at).put("battery", JSONObject().put("level", level).put("charging", false))
+
+    @Test
+    fun noSnapshotYetMeansNothingToSend() {
+        assertNull(HealthDelivery().next(null))
+    }
+
+    @Test
+    fun theSameSnapshotIsSentOncePerConnection() {
+        val delivery = HealthDelivery()
+
+        val first = delivery.next(snapshot(1L, 45))
+
+        assertEquals("health", first!!.getString("type"))
+        assertNull("authentication and the listener read the same snapshot", delivery.next(snapshot(1L, 45)))
+    }
+
+    @Test
+    fun aNewerSnapshotIsSentAfterAnOlderOne() {
+        val delivery = HealthDelivery()
+        delivery.next(snapshot(1L, 45))
+
+        val second = delivery.next(snapshot(2L, 15))
+
+        assertEquals(2L, second!!.getLong("at"))
+        assertEquals(15, second.getJSONObject("battery").getInt("level"))
+    }
+
+    @Test
+    fun eachConnectionKeepsItsOwnRecord() {
+        val a = HealthDelivery()
+        val b = HealthDelivery()
+        a.next(snapshot(1L, 45))
+
+        assertTrue("a new connection still gets the snapshot", b.next(snapshot(1L, 45)) != null)
+    }
+
+    @Test
+    fun onlyAnAuthenticatedProtocolTwoIphoneGetsHealth() {
+        assertTrue(wantsHealth(authenticated = true, protocol = 2))
+        assertTrue(wantsHealth(authenticated = true, protocol = 3))
+        assertFalse(wantsHealth(authenticated = true, protocol = 1))
+        assertFalse(wantsHealth(authenticated = false, protocol = 2))
+    }
+
+    // ---- client_diag rejections in the file ----
+
+    @Test
+    fun aRejectionIsWrittenOnlyTheFirstTime() {
+        val seen = FirstSightings(32)
+
+        assertTrue(seen.firstSighting("report-1/bad_kind"))
+        assertFalse(seen.firstSighting("report-1/bad_kind"))
+        assertTrue("another error for the same report is news", seen.firstSighting("report-1/io_error"))
+    }
+
+    @Test
+    fun twoReportsFailingInTurnDoNotWriteOnEveryAttempt() {
+        // The case a single remembered pair got wrong: A, B, A, B ... wrote a line every time.
+        val seen = FirstSightings(32)
+        seen.firstSighting("report-a/bad_kind")
+        seen.firstSighting("report-b/bad_kind")
+
+        repeat(10) {
+            assertFalse(seen.firstSighting("report-a/bad_kind"))
+            assertFalse(seen.firstSighting("report-b/bad_kind"))
+        }
+    }
+
+    @Test
+    fun theOldestPairIsForgottenPastTheCapacity() {
+        val seen = FirstSightings(2)
+        seen.firstSighting("a")
+        seen.firstSighting("b")
+        seen.firstSighting("c")
+
+        assertTrue("a was forgotten", seen.firstSighting("a"))
+    }
+
+    @Test
+    fun aPairThatKeepsComingBackStaysRemembered() {
+        val seen = FirstSightings(2)
+        seen.firstSighting("retrying")
+        seen.firstSighting("b")
+        seen.firstSighting("retrying")
+        seen.firstSighting("c")
+
+        assertFalse("seen again recently, so b went first", seen.firstSighting("retrying"))
+    }
+
+    @Test
+    fun aValidIdIsLoggedUnchanged() {
+        assertEquals("3F2504E0-4F89-11D3", diagIdForLog("3F2504E0-4F89-11D3"))
+    }
+
+    @Test
+    fun aRefusedIdCannotBreakTheLogLine() {
+        val shown = diagIdForLog("abc\ndef 12:00:00.000 fake: line")
+
+        assertFalse(shown.contains('\n'))
+        assertFalse(shown.contains(' '))
+        assertEquals("abc?def?12?00?00?000?fake??line", shown)
+    }
+
+    @Test
+    fun aMissingIdIsShownAsAQuestionMark() {
+        assertEquals("?", diagIdForLog(""))
+        assertEquals(64, diagIdForLog("x".repeat(500)).length)
+    }
+
+    @Test
     fun theInboundGateIsTheDocumentedSize() {
         // docs/PROTOCOL.md and the iPhone's batch and part sizes are built around this number.
         assertEquals(16_384, GatewayWebSocketServer.MAX_INBOUND_CHARS)

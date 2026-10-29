@@ -107,7 +107,9 @@ so they cannot be relaxed per message type.
 
 - **16,384 chars: the inbound gate.** The Redmi drops a longer frame without opening it and
   without a reply. It writes `iPhone-link: dropped oversized frame chars=N` to
-  `iphone-diagnostics.log`, at most once a minute; `suppressed=K` counts the drops in between.
+  `iphone-diagnostics.log`, at most once a minute; `suppressed=K` counts the drops in between,
+  and drops still held back when a connection closes are written then as
+  `iPhone-link: dropped oversized frames suppressed=K (not yet noted)`.
   A dropped frame does not advance the receive counter. With the sealed envelope
   (`21 + digits(c) + 4·ceil((P + 16) / 3)` chars) the inner JSON P can be about 12,250 UTF-8
   bytes. Senders stay well below that: a `client_log` batch keeps its escaped lines under 9000
@@ -293,6 +295,10 @@ receives except `type`, so a new key needs no Redmi update:
   then all other keys sorted, as `key=value` separated by spaces. Each value is cut at 200 chars;
   control characters become spaces; null and blank values are left out. A line from build 155
   reads exactly as before.
+- Key names: at most 64 keys per frame (the rest are dropped), each name cut to 40 chars, and every
+  character outside `[A-Za-z0-9_.-]` replaced with `_`. Two keys that become the same name keep
+  only the first. The Redmi says so in logcat (`client_status keys adjusted: ...`), not in the file;
+  keys that already fit these rules are never touched.
 - `iphone-status.json`, replaced atomically on every snapshot:
   `{"receivedAt": <ms>, "receivedAtText": "yyyy-MM-dd HH:mm:ss.SSS +zzzz", "status": {...}}`.
 - the latest snapshot in memory, shown as `iphone {status, receivedAt, ageMs}` in
@@ -311,8 +317,11 @@ cannot exceed the 16,384-char gate:
   `metrickit-metric`, `nsexception`, `exit-unclean`, `log-tail`. The Redmi also stores a newer kind
   that matches `^[a-z][a-z0-9-]{0,31}$`.
 - The Redmi checks `id` against `^[A-Za-z0-9-]{8,64}$`, `1 ≤ parts ≤ 64`, `0 ≤ part < parts`,
-  `enc` = `base64` (the default) and at most 8192 decoded bytes per part. It writes each part to
-  disk, then replies `{"type":"ack","action":"client_diag","id","part","success":true}`. A repeated
+  `enc` = `base64` (the default) and 1 to 8192 decoded bytes per part: a report is cut into
+  `ceil(size / 6000)` parts, so a part with no data (empty or missing `data`) is refused as
+  `bad_data` rather than acked, and an empty report is not sent at all. It writes each part to
+  disk (flushed to the storage device), then replies
+  `{"type":"ack","action":"client_diag","id","part","success":true}`. A repeated
   part overwrites the earlier copy, and a part of a report that is already joined is acked again
   without writing.
 - When every part is present, the Redmi joins the decoded bytes in part order into
@@ -322,8 +331,14 @@ cannot exceed the 16,384-char gate:
   that was never finished count as one entry and are deleted after 7 days.
 - Failures reply `success:false` with `error`: `bad_id`, `bad_kind`, `bad_parts`, `bad_part`,
   `bad_enc`, `bad_data`, `too_large`, `missing_parts` (the last part arrived but earlier ones are
-  not on the Redmi; send the report again from part 0), `io_error`, `no_storage`, `busy`. The first
-  failure of each kind for an id is written to `iphone-diagnostics.log` as `iPhone-diag: rejected ...`.
+  not on the Redmi; send the report again from part 0), `io_error`, `no_storage`, `busy`.
+  `missing_parts`, `io_error`, `no_storage` and `busy` depend on the Redmi's state and can succeed
+  on a later attempt; the others are about the frame itself and fail the same way every time it is
+  sent unchanged.
+- Every failure goes to logcat. The first failure of each error for an id is also written to
+  `iphone-diagnostics.log` as `iPhone-diag: rejected id=... part=... error=...` (characters outside
+  `[A-Za-z0-9-]` in the id shown as `?`); the Redmi remembers the last 32 id/error pairs, so a
+  report the iPhone resends on every connection adds one line, not one per attempt.
 - The iPhone keeps each report in `Documents/diag-outbox/` until the ack of its last part. It
   sends one part at a time and waits up to 10 s for its ack, only while authenticated, on a local
   link and with no CallKit call. The outbox holds at most 20 files and 2 MB, oldest dropped. After
@@ -350,6 +365,8 @@ The Redmi stays in a pocket, so its problems are told to the iPhone:
 - It sends the latest snapshot to every protocol 2 iPhone right after authentication, and each
   change to the iPhones connected at the time. A change is a different set of problem codes, ROM
   build, updater state or battery band; a battery level that moves within its band is not one.
+  The last `health` an iPhone receives on a connection is always the newest snapshot, also when a
+  change arrives during its authentication; the same snapshot is not sent twice on one connection.
 - `diagnostics_result` carries the same snapshot as `health`.
 - When an audio-critical problem appears, the Redmi also sends an APNs alert (`open: "health"`,
   see "Alert payload"), so an iPhone without a socket learns it.

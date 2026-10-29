@@ -117,7 +117,12 @@ object IphoneDiagnostics {
      */
     fun recordStatus(json: JSONObject) {
         val receivedAt = System.currentTimeMillis()
-        val values = sanitizeIphoneStatus(json)
+        val adjusted = ArrayList<String>()
+        val values = sanitizeIphoneStatus(json, adjusted)
+        // Logcat only, once per frame: the same iPhone build sends the same keys every minute, and
+        // the file must not repeat it (AGENTS.md 8.1). It tells an iOS author why a key looks
+        // different here or is missing.
+        if (adjusted.isNotEmpty()) Log.w(TAG, "client_status keys adjusted: ${adjusted.joinToString(", ").take(400)}")
         latestStatus = Status(values, receivedAt)
         record(STATUS_TAG, iphoneStatusLine(values))
         val target = file ?: lateInitFile() ?: run {
@@ -127,10 +132,7 @@ object IphoneDiagnostics {
         runCatching {
             executor.execute {
                 runCatching {
-                    val document = JSONObject()
-                        .put("receivedAt", receivedAt)
-                        .put("receivedAtText", statusStamp.format(Date(receivedAt)))
-                        .put("status", values)
+                    val document = iphoneStatusDocument(values, receivedAt, statusStamp.format(Date(receivedAt)))
                     val dir = target.parentFile ?: throw java.io.IOException("no parent folder")
                     dir.mkdirs()
                     writeAtomically(File(dir, STATUS_FILE_NAME), document.toString(2).toByteArray(Charsets.UTF_8))
@@ -217,16 +219,29 @@ internal fun iphoneStatusOrder(keys: Collection<String>): List<String> {
  * field is kept without a Redmi update. Booleans and numbers stay as they are; anything else becomes
  * a string without control characters, cut to [MAX_STATUS_VALUE_CHARS]. Null and blank values are
  * left out, as they always were.
+ *
+ * Keys are cut to [MAX_STATUS_KEY_CHARS] with every character outside `[A-Za-z0-9_.-]` replaced by
+ * `_`, and at most [MAX_STATUS_KEYS] are kept. Each key renamed or dropped that way is described in
+ * [adjusted], so the caller can say so instead of losing it without a word.
  */
-internal fun sanitizeIphoneStatus(json: JSONObject): JSONObject {
+internal fun sanitizeIphoneStatus(json: JSONObject, adjusted: MutableList<String>? = null): JSONObject {
     val out = JSONObject()
     val keys = ArrayList<String>()
     json.keys().forEach { keys.add(it) }
-    for (key in iphoneStatusOrder(keys)) {
+    val ordered = iphoneStatusOrder(keys)
+    for ((index, key) in ordered.withIndex()) {
         if (key == "type") continue
-        if (out.length() >= MAX_STATUS_KEYS) break
+        if (out.length() >= MAX_STATUS_KEYS) {
+            val over = ordered.subList(index, ordered.size).count { it != "type" }
+            adjusted?.add("dropped $over key(s) over the cap of $MAX_STATUS_KEYS")
+            break
+        }
         val name = key.replace(STATUS_KEY_UNSAFE, "_").take(MAX_STATUS_KEY_CHARS)
-        if (name.isEmpty() || out.has(name)) continue
+        if (name.isEmpty() || out.has(name)) {
+            adjusted?.add("dropped ${printableKey(key)} (empty or same as another key once made safe)")
+            continue
+        }
+        if (name != key) adjusted?.add("renamed ${printableKey(key)} to $name")
         when (val value = json.opt(key)) {
             null, JSONObject.NULL -> Unit
             is Boolean, is Int, is Long -> out.put(name, value)
@@ -241,9 +256,25 @@ internal fun sanitizeIphoneStatus(json: JSONObject): JSONObject {
     return out
 }
 
+/** A key the iPhone sent, as it can be shown on one log line. */
+private fun printableKey(key: String): String {
+    val text = key.replace(CONTROL_CHARS, "?")
+    return "\"" + (if (text.length > MAX_STATUS_KEY_CHARS) text.take(MAX_STATUS_KEY_CHARS) + "..." else text) + "\""
+}
+
 /** The `iPhone-status` log line: `key=value` pairs in [iphoneStatusOrder], space separated. */
 internal fun iphoneStatusLine(values: JSONObject): String {
     val keys = ArrayList<String>()
     values.keys().forEach { keys.add(it) }
     return iphoneStatusOrder(keys).joinToString(" ") { "$it=${values.opt(it)}" }
 }
+
+/**
+ * The content of `iphone-status.json` (docs/PROTOCOL.md "client_status"): the sanitised [values]
+ * with the Redmi wall time they arrived at, as a number and as [receivedAtText] for a person.
+ */
+internal fun iphoneStatusDocument(values: JSONObject, receivedAt: Long, receivedAtText: String): JSONObject =
+    JSONObject()
+        .put("receivedAt", receivedAt)
+        .put("receivedAtText", receivedAtText)
+        .put("status", values)

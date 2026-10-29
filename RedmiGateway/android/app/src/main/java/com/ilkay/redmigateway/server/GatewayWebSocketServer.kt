@@ -71,6 +71,11 @@ class GatewayWebSocketServer(
         internal const val MAX_INBOUND_CHARS = 16_384
         /** A dropped oversized frame is written to the iPhone log at most this often. */
         private const val OVERSIZED_NOTE_INTERVAL_MS = 60_000L
+        /**
+         * How many client_diag id/error pairs are remembered as already written. The iPhone's
+         * outbox holds at most 20 reports, so this covers every report it can be retrying.
+         */
+        private const val DIAG_PROBLEMS_REMEMBERED = 32
 
         @Volatile var current: GatewayWebSocketServer? = null
             private set
@@ -107,6 +112,8 @@ class GatewayWebSocketServer(
         // build, and "the new one is installed" stays a guess made from the TestFlight screen.
         @Volatile var appVersion = ""
         @Volatile var appBuild = ""
+        // Guarded by the peer's monitor, the same lock [send] seals under.
+        val health = HealthDelivery()
     }
 
     private data class Failures(var count: Int, var lockedUntil: Long)
@@ -181,6 +188,7 @@ class GatewayWebSocketServer(
         } else {
             Log.i(TAG, "WebSocket closed code=$code remote=$remote peer=unknown")
         }
+        flushOversizedNote()
         if (audioOwner === conn) {
             audioOwner = null
             // The iPhone's control socket blips constantly while its call audio is fine on its own
@@ -387,10 +395,8 @@ class GatewayWebSocketServer(
         if (peer.protocol >= 2) flushSmsResults(peer)
         // The Redmi's health, so an iPhone that was away learns about a lost vendor fix or a low
         // battery the moment it is back. Old iPhone builds ignore the type.
-        if (peer.protocol >= 2) {
-            val health = HealthBus.latest()
-            if (health != null) send(peer, healthFrame(health))
-            else Log.i(TAG, "No health snapshot yet to send after authentication")
+        if (wantsHealth(peer.authenticated, peer.protocol) && !sendLatestHealth(peer)) {
+            Log.i(TAG, "Health not sent after authentication: no snapshot yet, or the change listener already sent it")
         }
     }
 
@@ -582,6 +588,7 @@ class GatewayWebSocketServer(
      * when the last part is acked, so a success must mean the bytes are on disk.
      */
     private fun handleClientDiag(peer: Peer, json: JSONObject) {
+        // Echoed in the ack as sent (the JSON escapes it); only the log copy is made safe.
         val id = json.optString("id").take(64)
         val part = json.optInt("part", -1)
         when (val parsed = IosDiagStore.parse(json)) {
@@ -599,19 +606,20 @@ class GatewayWebSocketServer(
         }
     }
 
-    @Volatile private var lastDiagProblem: String? = null
+    private val diagProblemsWritten = FirstSightings(DIAG_PROBLEMS_REMEMBERED)
 
     /**
-     * A refused or failed part goes to logcat every time and to the iPhone log once per distinct
-     * problem: an iPhone that resends the same bad payload on every connection must not fill the
-     * file (AGENTS.md 8.1), but the first refusal is the evidence for why a report never arrived.
+     * A refused or failed part goes to logcat every time and to the iPhone log the first time its
+     * id and error are seen. The iPhone keeps a report until its last part is acked, so it resends
+     * a failing report on every connection, many times an hour; one line per report and error is
+     * the evidence for why it never arrived, and more would push the history out of the rotating
+     * file (AGENTS.md 8.1). Several reports failing in turn stay one line each.
      */
     private fun noteDiagProblem(id: String, part: Int, error: String, detail: String?) {
-        val text = "rejected id=${id.ifBlank { "?" }} part=$part error=$error" + (detail?.let { " $it" } ?: "")
+        val shownId = diagIdForLog(id)
+        val text = "rejected id=$shownId part=$part error=$error" + (detail?.let { " $it" } ?: "")
         Log.w(TAG, "client_diag $text")
-        val key = "$id/$error"
-        if (key == lastDiagProblem) return
-        lastDiagProblem = key
+        if (!diagProblemsWritten.firstSighting("$shownId/$error")) return
         IphoneDiagnostics.record("iPhone-diag", text)
     }
 
@@ -632,18 +640,40 @@ class GatewayWebSocketServer(
         IphoneDiagnostics.record("iPhone-link", "dropped oversized frame chars=$chars$extra")
     }
 
-    /** Forwards each health change to the iPhones that are connected now. */
-    private val healthListener = HealthBus.Listener { snapshot ->
-        val frame = healthFrame(snapshot)
+    /**
+     * Writes the drops still held back when a connection closes. Without it the last burst of a
+     * sender that stopped would only ever be counted in logcat; with it the file has the full count
+     * by the time anyone reads it. Nothing is written when nothing was held back.
+     */
+    private fun flushOversizedNote() {
+        val held = oversizedNote.drain()
+        if (held > 0) IphoneDiagnostics.record("iPhone-link", "dropped oversized frames suppressed=$held (not yet noted)")
+    }
+
+    /**
+     * Forwards each health change to the iPhones that are connected now. The snapshot handed in is
+     * not used: [sendLatestHealth] reads the newest one under the connection's lock, so a change
+     * racing an authentication can never leave the older snapshot as the last one the iPhone got.
+     */
+    private val healthListener = HealthBus.Listener { _ ->
         var sent = 0
         for (peer in peers.values) {
-            if (peer.authenticated && peer.protocol >= 2) {
-                send(peer, frame)
-                sent++
-            }
+            if (wantsHealth(peer.authenticated, peer.protocol) && sendLatestHealth(peer)) sent++
         }
         // HealthBus calls this only when the change key moved, so this is one line per change.
         Log.i(TAG, "Health change sent to $sent iPhone connection(s)")
+    }
+
+    /**
+     * Sends [HealthBus.latest] to [peer] unless that connection already got the same snapshot.
+     * Reading and sending happen under the peer's monitor, which [send] also takes, so whichever
+     * of the authentication and the change listener runs last sends the newest snapshot, and the
+     * frames leave in that order. Returns whether a frame was sent.
+     */
+    private fun sendLatestHealth(peer: Peer): Boolean = synchronized(peer) {
+        val frame = peer.health.next(HealthBus.latest()) ?: return@synchronized false
+        send(peer, frame)
+        true
     }
 
     private fun sendSms(peer: Peer, json: JSONObject) {
@@ -998,6 +1028,55 @@ internal fun classifyClose(
  */
 internal fun healthFrame(snapshot: JSONObject): JSONObject = JSONObject(snapshot.toString()).put("type", "health")
 
+/** Only an authenticated protocol 2 iPhone gets `health`; protocol 1 builds predate it. */
+internal fun wantsHealth(authenticated: Boolean, protocol: Int): Boolean = authenticated && protocol >= 2
+
+/**
+ * What one iPhone connection was last sent of the Redmi's health. Not thread-safe: the server calls
+ * it under the connection's send lock, so the read of the newest snapshot, this check and the send
+ * happen as one step.
+ */
+internal class HealthDelivery {
+    private var lastSent: String? = null
+
+    /**
+     * The `health` frame for [latest], or null when there is no snapshot yet or this connection
+     * already got exactly this one (the authentication and the change listener can both try).
+     */
+    fun next(latest: JSONObject?): JSONObject? {
+        if (latest == null) return null
+        val text = latest.toString()
+        if (text == lastSent) return null
+        lastSent = text
+        return healthFrame(latest)
+    }
+}
+
+/**
+ * Remembers the last [capacity] keys it was asked about, most recently seen last, so a note can be
+ * written once per key while the keys that keep coming back are the ones that stay remembered.
+ */
+internal class FirstSightings(private val capacity: Int) {
+    private val seen = LinkedHashSet<String>()
+
+    /** True the first time [key] is seen, false while it is still remembered. */
+    @Synchronized
+    fun firstSighting(key: String): Boolean {
+        val known = seen.remove(key)
+        seen.add(key)
+        if (seen.size > capacity) seen.remove(seen.first())
+        return !known
+    }
+}
+
+private val DIAG_ID_UNSAFE = Regex("[^A-Za-z0-9-]")
+
+/**
+ * A `client_diag` id as it may appear on one log line: a refused id can hold anything, and a
+ * newline in it would start a line without a timestamp. A valid id is shown unchanged.
+ */
+internal fun diagIdForLog(id: String): String = id.take(64).replace(DIAG_ID_UNSAFE, "?").ifEmpty { "?" }
+
 /**
  * The ack for one `client_diag` part: `success:true`, or `success:false` with [error] as a stable
  * code. The id and part are echoed so the iPhone can match the ack to the part it is waiting for.
@@ -1032,6 +1111,17 @@ internal class RateLimitedNote(private val intervalMs: Long) {
         val held = suppressed
         suppressed = 0
         lastAt = now
+        return held
+    }
+
+    /**
+     * Returns the number held back since the last note and forgets it, without starting a new
+     * interval: for a final line once the cause has stopped, so the count is not lost.
+     */
+    @Synchronized
+    fun drain(): Int {
+        val held = suppressed
+        suppressed = 0
         return held
     }
 }

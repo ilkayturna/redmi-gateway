@@ -106,6 +106,13 @@ class IosDiagStoreTest {
     }
 
     @Test
+    fun aPartWithNoDataIsRefusedSoTheIphoneCannotDeleteAReportThatNeverArrived() {
+        assertEquals("bad_data", errorOf(frame(data = ByteArray(0))))
+        assertEquals("bad_data", errorOf(frame().apply { remove("data") }))
+        assertNull(errorOf(frame(data = ByteArray(1))))
+    }
+
+    @Test
     fun aPartOfSixThousandBytesFitsAndAnOversizedOneIsRefused() {
         assertNull(errorOf(frame(data = ByteArray(6000))))
         assertNull(errorOf(frame(data = ByteArray(IosDiagStore.MAX_PART_BYTES))))
@@ -281,5 +288,23 @@ class IosDiagStoreTest {
 
         assertArrayEquals("new".toByteArray(), target.readBytes())
         assertFalse(File(temp.root, "iphone-status.json.tmp").exists())
+    }
+
+    @Test
+    fun aDurableWriteGivesTheSameResult() {
+        // The flush itself cannot be observed here; this pins that it never breaks the write,
+        // including the folder flush that a Windows JVM refuses.
+        val target = File(temp.root, "0.part").apply { writeText("old") }
+
+        writeAtomically(target, "new".toByteArray(), durable = true)
+
+        assertArrayEquals("new".toByteArray(), target.readBytes())
+        assertFalse(File(temp.root, "0.part.tmp").exists())
+    }
+
+    @Test
+    fun flushingAFolderNeverThrows() {
+        syncFolder(temp.root)
+        syncFolder(File(temp.root, "does-not-exist"))
     }
 }

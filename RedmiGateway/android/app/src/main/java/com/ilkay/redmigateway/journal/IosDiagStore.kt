@@ -2,8 +2,11 @@ package com.ilkay.redmigateway.journal
 
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 
 /**
  * Large diagnostics from the iPhone (MetricKit reports, crash text, log tails), received in parts.
@@ -89,6 +92,11 @@ class IosDiagStore(
                 return Parsed.Invalid("bad_data")
             }
             if (data.size > MAX_PART_BYTES) return Parsed.Invalid("too_large")
+            // A part always carries bytes: the iPhone cuts a report into ceil(size / 6000) parts and
+            // does not send an empty report. An empty part therefore means the sender lost its data
+            // (a failed encode, a missing field), and acking it would let the iPhone delete a report
+            // that never reached the Redmi.
+            if (data.isEmpty()) return Parsed.Invalid("bad_data")
             return Parsed.Valid(Part(id, kind, part, parts, data))
         }
     }
@@ -109,7 +117,8 @@ class IosDiagStore(
             val folder = partialDir(part)
             val newFolder = !folder.isDirectory
             if (!folder.isDirectory && !folder.mkdirs()) throw java.io.IOException("cannot create ${folder.name}")
-            writeAtomically(File(folder, "${part.part}.part"), part.data)
+            // Durable, because the ack that follows lets the iPhone delete its copy.
+            writeAtomically(File(folder, "${part.part}.part"), part.data, durable = true)
             if (newFolder) unreportedPrunes += prune(keep = folder)
             val pieces = (0 until part.parts).map { File(folder, "$it.part") }
             when {
@@ -131,8 +140,13 @@ class IosDiagStore(
 
     private fun join(part: Part, pieces: List<File>, folder: File, target: File): Completed {
         val tmp = File(dir, target.name + ".tmp")
-        tmp.outputStream().use { out -> pieces.forEach { piece -> piece.inputStream().use { it.copyTo(out) } } }
+        FileOutputStream(tmp).use { out ->
+            pieces.forEach { piece -> piece.inputStream().use { it.copyTo(out) } }
+            // On disk before the parts are deleted and the last part is acked.
+            out.fd.sync()
+        }
         moveAtomically(tmp, target)
+        syncFolder(dir)
         folder.deleteRecursively()
         unreportedPrunes += prune(keep = target)
         val pruned = unreportedPrunes
@@ -189,11 +203,28 @@ class IosDiagStore(
 /**
  * Writes [bytes] to [target] through a temporary file and a rename, so a reader (adb pull, the PC
  * script) never sees half a file and a crash mid-write leaves the previous version in place.
+ *
+ * [durable] also flushes the bytes and then the folder to the storage device, so a power cut right
+ * after the call cannot leave an empty or missing file. It is for writes that are acked to the
+ * iPhone; a file that is simply replaced again a minute later does not need it.
  */
-internal fun writeAtomically(target: File, bytes: ByteArray) {
+internal fun writeAtomically(target: File, bytes: ByteArray, durable: Boolean = false) {
     val tmp = File(target.parentFile, target.name + ".tmp")
-    tmp.writeBytes(bytes)
+    FileOutputStream(tmp).use { out ->
+        out.write(bytes)
+        if (durable) out.fd.sync()
+    }
     moveAtomically(tmp, target)
+    if (durable) target.parentFile?.let(::syncFolder)
+}
+
+/**
+ * Flushes a folder's entries, so a rename into it survives a power cut. Best effort: Linux allows
+ * it, but not every file system or platform does (the JVM tests on Windows refuse to open a folder),
+ * and the file's own bytes were already synced.
+ */
+internal fun syncFolder(dir: File) {
+    runCatching { FileChannel.open(dir.toPath(), StandardOpenOption.READ).use { it.force(true) } }
 }
 
 internal fun moveAtomically(source: File, target: File) {

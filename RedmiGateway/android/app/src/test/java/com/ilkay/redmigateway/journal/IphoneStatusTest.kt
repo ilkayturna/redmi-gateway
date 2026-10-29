@@ -138,4 +138,69 @@ class IphoneStatusTest {
 
         assertEquals(MAX_STATUS_KEYS, sanitizeIphoneStatus(json).length())
     }
+
+    // ---- Saying what was changed ----
+
+    @Test
+    fun aCleanFrameReportsNoAdjustment() {
+        val adjusted = ArrayList<String>()
+
+        sanitizeIphoneStatus(build155().put("os", "27.0").put("tfDaysLeft", 88), adjusted)
+
+        assertEquals(emptyList<String>(), adjusted)
+    }
+
+    @Test
+    fun aRenamedKeyIsReported() {
+        val adjusted = ArrayList<String>()
+
+        sanitizeIphoneStatus(JSONObject().put("bad key", "1"), adjusted)
+
+        assertEquals(listOf("renamed \"bad key\" to bad_key"), adjusted)
+    }
+
+    @Test
+    fun keysOverTheCapAreCountedNotLostSilently() {
+        val json = JSONObject().put("type", "client_status")
+        for (index in 0 until 100) json.put("k%03d".format(index), "v")
+        val adjusted = ArrayList<String>()
+
+        sanitizeIphoneStatus(json, adjusted)
+
+        assertEquals(listOf("dropped 36 key(s) over the cap of $MAX_STATUS_KEYS"), adjusted)
+    }
+
+    @Test
+    fun twoKeysThatBecomeTheSameNameKeepTheFirstAndSaySo() {
+        val adjusted = ArrayList<String>()
+
+        val values = sanitizeIphoneStatus(JSONObject().put("a b", "1").put("a_b", "2"), adjusted)
+
+        assertEquals(1, values.length())
+        assertTrue(adjusted.any { it.startsWith("dropped \"") })
+    }
+
+    @Test
+    fun aControlCharacterInAReportedKeyIsShownAsAQuestionMark() {
+        val adjusted = ArrayList<String>()
+
+        sanitizeIphoneStatus(JSONObject().put("x\ny", "1"), adjusted)
+
+        assertFalse(adjusted.single().contains('\n'))
+        assertEquals("renamed \"x?y\" to x_y", adjusted.single())
+    }
+
+    // ---- iphone-status.json ----
+
+    @Test
+    fun theStatusFileHoldsTheValuesAndTheirReceiveTime() {
+        val values = sanitizeIphoneStatus(build155())
+
+        val document = iphoneStatusDocument(values, 1_793_104_931_960L, "2026-10-29 08:02:11.960 +0300")
+
+        assertEquals(1_793_104_931_960L, document.getLong("receivedAt"))
+        assertEquals("2026-10-29 08:02:11.960 +0300", document.getString("receivedAtText"))
+        assertEquals("155", document.getJSONObject("status").getString("appBuild"))
+        assertEquals(setOf("receivedAt", "receivedAtText", "status"), document.keys().asSequence().toSet())
+    }
 }
