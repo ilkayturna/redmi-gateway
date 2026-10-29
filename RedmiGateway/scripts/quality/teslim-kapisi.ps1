@@ -12,18 +12,21 @@
 #
 # CIKIS KODU: 0 = hepsi GECTI, 1 = en az bir KALDI (UNVERIFIED teslimi engellemez ama raporda kalir)
 #
-# KURAL: Bu betik cihaza YALNIZCA -Hotspot ile ve geri alinabilir sekilde dokunur (Wi-Fi kapat/aс
+# KURAL: Bu betik cihaza YALNIZCA -Hotspot ile ve geri alinabilir sekilde dokunur (Wi-Fi kapat/ac
 # ayni calisma icinde; finally blogu her durumda Wi-Fi'yi geri acar).
 
 param(
     [switch]$Cihaz,
     [switch]$Hotspot,
     [string]$Adb = 'C:\Users\ilkay.turna\platform-tools\adb.exe',
-    # USB seri no; adb Wi-Fi uzerindeyse ornegin 192.168.1.111:5555 ver (evde TV de adb'de gorunur).
+    # USB seri no; adb Wi-Fi uzerindeyse ip:port (ornegin 192.168.1.111:5555) ya da 'adb devices'teki
+    # mDNS adini (adb-17df6357-xxxxxx._adb-tls-connect._tcp) ver (evde TV de adb'de gorunur).
     [string]$Seri = '17df6357',
     [string]$Repo = 'C:\Users\ilkay.turna\source\repos\redmi-gateway',
-    [string]$BeklenenAndroidSurum = '2.0.13',
-    [int]$BeklenenVersionCode = 213,
+    # Bos/0 birakilirsa build.gradle.kts'teki surum beklenir. Sabit varsayilan (2.0.13/213) her surum
+    # artisinda bayatliyor ve kapiyi sebepsiz kirmizi yapiyordu.
+    [string]$BeklenenAndroidSurum = '',
+    [int]$BeklenenVersionCode = 0,
     [string]$AscKlasor = 'C:\Users\ilkay.turna\Documents\asc-cli',
     [string]$AscAppId = '6816340544',
     [int]$HotspotButcesiSn = 8,
@@ -44,6 +47,12 @@ function Kapi([string]$ad, [string]$durum, [string]$kanit) {
 
 function AdbCalistir([string]$komut) {
     return (& $Adb -s $Seri shell $komut 2>$null) | Out-String
+}
+
+# ip:port (adb connect) and mDNS names (adb-<seri>-<id>._adb-tls-connect._tcp) are both network
+# transports. An mDNS name has no ':', so checking only for ':' let the Wi-Fi test run over Wi-Fi.
+function WifiSeriMi([string]$seri) {
+    return ($seri.Contains(':') -or $seri -match '_adb-tls-connect|\._tcp')
 }
 
 # ---------------------------------------------------------------- repo
@@ -70,13 +79,20 @@ if (-not (Test-Path $Repo)) {
 $gradleYolu = Join-Path $Repo 'RedmiGateway\android\app\build.gradle.kts'
 if (Test-Path $gradleYolu) {
     $gradleMetni = Get-Content -LiteralPath $gradleYolu -Raw
-    $surumVar = ($gradleMetni -match ('versionName = "' + [regex]::Escape($BeklenenAndroidSurum) + '"'))
-    $kodVar = ($gradleMetni -match ('versionCode = ' + $BeklenenVersionCode))
-    if ($surumVar -and $kodVar) {
-        Kapi 'android surum' 'GECTI' ($BeklenenVersionCode.ToString() + ' / ' + $BeklenenAndroidSurum)
+    $gradleSurum = ''
+    $gradleKod = 0
+    if ($gradleMetni -match 'versionName = "([^"]+)"') { $gradleSurum = $matches[1] }
+    if ($gradleMetni -match 'versionCode = (\d+)') { $gradleKod = [int]$matches[1] }
+    $kaynak = 'parametre'
+    if (-not $BeklenenAndroidSurum) { $BeklenenAndroidSurum = $gradleSurum; $kaynak = 'build.gradle.kts' }
+    if ($BeklenenVersionCode -le 0) { $BeklenenVersionCode = $gradleKod; $kaynak = 'build.gradle.kts' }
+    if ($gradleSurum -and $gradleKod -gt 0 -and $gradleSurum -eq $BeklenenAndroidSurum -and $gradleKod -eq $BeklenenVersionCode) {
+        Kapi 'android surum' 'GECTI' ($BeklenenVersionCode.ToString() + ' / ' + $BeklenenAndroidSurum + ' (beklenen: ' + $kaynak + ')')
     } else {
-        Kapi 'android surum' 'KALDI' ('build.gradle.kts beklenen surumle uyusmuyor')
+        Kapi 'android surum' 'KALDI' ('build.gradle.kts ' + $gradleKod + ' / ' + $gradleSurum + ', beklenen ' + $BeklenenVersionCode + ' / ' + $BeklenenAndroidSurum)
     }
+} else {
+    Kapi 'android surum' 'KALDI' ('build.gradle.kts yok, beklenen surum bilinmiyor: ' + $gradleYolu)
 }
 
 # ---------------------------------------------------------------- android testleri
@@ -141,15 +157,19 @@ if ($Cihaz) {
         Kapi 'adb' 'KALDI' ('adb yok: ' + $Adb)
     } else {
         $cihazlar = (& $Adb devices 2>$null) | Out-String
-        $bagli = $cihazlar -match '17df6357\s+device'
+        # -Seri is matched, not the USB serial: over Wi-Fi adb the device is listed as ip:port or by
+        # its mDNS name, and the gate reported "not connected" for a connected Redmi.
+        $bagli = $cihazlar -match ('(?m)^' + [regex]::Escape($Seri) + '\s+device\b')
         if (-not $bagli) {
-            Kapi 'cihaz baglantisi' 'KALDI' 'Redmi (17df6357) bagli degil'
+            Kapi 'cihaz baglantisi' 'KALDI' ('Redmi (' + $Seri + ') bagli degil')
         } else {
-            Kapi 'cihaz baglantisi' 'GECTI' '17df6357 device'
+            Kapi 'cihaz baglantisi' 'GECTI' ($Seri + ' device')
             $paket = (& $Adb -s $Seri shell 'dumpsys package com.ilkay.redmigateway' 2>$null) | Out-String
-            $surumSatiri = ($paket -split "`n" | Where-Object { $_ -match 'versionName=' } | Select-Object -First 1)
-            $kodSatiri = ($paket -split "`n" | Where-Object { $_ -match 'versionCode=' } | Select-Object -First 1)
-            if ($kodSatiri -match ('versionCode=' + $BeklenenVersionCode) -and $surumSatiri -match ('versionName=' + [regex]::Escape($BeklenenAndroidSurum))) {
+            $surumSatiri = [string]($paket -split "`n" | Where-Object { $_ -match 'versionName=' } | Select-Object -First 1)
+            $kodSatiri = [string]($paket -split "`n" | Where-Object { $_ -match 'versionCode=' } | Select-Object -First 1)
+            if (-not $BeklenenAndroidSurum -or $BeklenenVersionCode -le 0) {
+                Kapi 'kurulu surum' 'UNVERIFIED' (('beklenen surum bilinmiyor; kurulu: ' + $kodSatiri.Trim() + ' ' + $surumSatiri.Trim()).Trim())
+            } elseif ($kodSatiri -match ('versionCode=' + $BeklenenVersionCode + '\b') -and $surumSatiri -match ('versionName=' + [regex]::Escape($BeklenenAndroidSurum) + '(\s|$)')) {
                 Kapi 'kurulu surum' 'GECTI' ($BeklenenVersionCode.ToString() + ' / ' + $BeklenenAndroidSurum)
             } else {
                 Kapi 'kurulu surum' 'KALDI' (('kurulu: ' + $kodSatiri.Trim() + ' ' + $surumSatiri.Trim()).Trim())
@@ -228,7 +248,7 @@ if ($Cihaz) {
 # ---------------------------------------------------------------- hotspot kabul testi
 # AGENTS.md 0.5: adb Wi-Fi uzerindeyken Wi-Fi kapatilirsa 'svc wifi enable' cihaza ulasamaz ve
 # Redmi agdan duser (25.10.2026). Bu test yalnizca USB ile calisir.
-if ($Cihaz -and $Hotspot -and $Seri.Contains(':')) {
+if ($Cihaz -and $Hotspot -and (WifiSeriMi $Seri)) {
     Kapi 'hotspot otomatik' 'ATLANDI' ('adb Wi-Fi uzerinden (' + $Seri + '); Wi-Fi testi yalnizca USB ile yapilir')
 } elseif ($Cihaz -and $Hotspot -and (Test-Path $Adb)) {
     Write-Host ''
@@ -344,8 +364,10 @@ if ($tokenSatiri) {
     $token = $tokenSatiri.Split('=', 2)[1].Trim()
     $basliklar = @{ Authorization = ('Bearer ' + $token); Accept = 'application/vnd.github+json' }
     try {
-        $kosumlar = (Invoke-RestMethod -Uri 'https://api.github.com/repos/ilkayturna/redmi-gateway/actions/runs?per_page=5' -Headers $basliklar).workflow_runs
-        $sonKosum = $kosumlar | Where-Object { $_.status -eq 'completed' } | Select-Object -First 1
+        # The iOS workflow's own runs, not the newest run of any workflow (that was often the Android
+        # build). Scheduled runs are left out: they are the TestFlight expiry guard and compile nothing.
+        $kosumlar = (Invoke-RestMethod -Uri 'https://api.github.com/repos/ilkayturna/redmi-gateway/actions/workflows/build-ios.yml/runs?per_page=10' -Headers $basliklar).workflow_runs
+        $sonKosum = $kosumlar | Where-Object { $_.status -eq 'completed' -and $_.event -ne 'schedule' } | Select-Object -First 1
         if ($sonKosum) {
             if ($sonKosum.conclusion -eq 'success') {
                 Kapi 'iOS CI' 'GECTI' ('run ' + $sonKosum.run_number + ' yesil, sha=' + $sonKosum.head_sha.Substring(0, 7))
