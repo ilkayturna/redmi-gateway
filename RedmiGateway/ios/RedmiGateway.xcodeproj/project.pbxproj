@@ -31,6 +31,12 @@
 		1022 /* CallAudioTiming.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2023 /* CallAudioTiming.swift */; };
 		1023 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 2024 /* PrivacyInfo.xcprivacy */; };
 		1024 /* BLEReassembly.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2025 /* BLEReassembly.swift */; };
+		1025 /* DiagnosticsFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2026 /* DiagnosticsFormat.swift */; };
+		1026 /* DiagnosticsOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2027 /* DiagnosticsOutbox.swift */; };
+		1027 /* MessageText.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2028 /* MessageText.swift */; };
+		1028 /* MetricKitReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2029 /* MetricKitReporter.swift */; };
+		1029 /* PhoneLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2030 /* PhoneLink.swift */; };
+		1030 /* RedmiHealthBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2031 /* RedmiHealthBanner.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -60,6 +66,12 @@
 		2023 /* CallAudioTiming.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallAudioTiming.swift; sourceTree = "<group>"; };
 		2024 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		2025 /* BLEReassembly.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEReassembly.swift; sourceTree = "<group>"; };
+		2026 /* DiagnosticsFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsFormat.swift; sourceTree = "<group>"; };
+		2027 /* DiagnosticsOutbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsOutbox.swift; sourceTree = "<group>"; };
+		2028 /* MessageText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageText.swift; sourceTree = "<group>"; };
+		2029 /* MetricKitReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricKitReporter.swift; sourceTree = "<group>"; };
+		2030 /* PhoneLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneLink.swift; sourceTree = "<group>"; };
+		2031 /* RedmiHealthBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RedmiHealthBanner.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -108,6 +120,12 @@
 				2022 /* VoipPush.swift */,
 				2023 /* CallAudioTiming.swift */,
 				2025 /* BLEReassembly.swift */,
+				2026 /* DiagnosticsFormat.swift */,
+				2027 /* DiagnosticsOutbox.swift */,
+				2028 /* MessageText.swift */,
+				2029 /* MetricKitReporter.swift */,
+				2030 /* PhoneLink.swift */,
+				2031 /* RedmiHealthBanner.swift */,
 				2024 /* PrivacyInfo.xcprivacy */,
 				2009 /* Info.plist */,
 			);
@@ -221,6 +239,12 @@
 				1021 /* VoipPush.swift in Sources */,
 				1022 /* CallAudioTiming.swift in Sources */,
 				1024 /* BLEReassembly.swift in Sources */,
+				1025 /* DiagnosticsFormat.swift in Sources */,
+				1026 /* DiagnosticsOutbox.swift in Sources */,
+				1027 /* MessageText.swift in Sources */,
+				1028 /* MetricKitReporter.swift in Sources */,
+				1029 /* PhoneLink.swift in Sources */,
+				1030 /* RedmiHealthBanner.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

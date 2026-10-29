@@ -99,6 +99,7 @@ struct ContentView: View {
                     ReturnToCallBar { callMinimized = false }
                 }
                 ConnectionBanner(openSettings: openSettings)
+                RedmiHealthBanner(openSettings: openSettings)
             }
         }
         .fullScreenCover(isPresented: Binding(

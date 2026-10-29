@@ -238,20 +238,6 @@ final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelega
         center.removeDeliveredNotifications(withIdentifiers: [identifier])
     }
 
-    /// An audio-critical problem on the Redmi, for the health package: one notification per code
-    /// set, replaced rather than stacked when the same set is posted again.
-    func postHealth(codes: [String], title: String, body: String) {
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-        content.threadIdentifier = "health"
-        content.categoryIdentifier = Category.health
-        content.userInfo = ["open": "health"]
-        let identifier = "health-" + codes.sorted().joined(separator: ",")
-        center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil))
-    }
-
     /// Clears delivered notifications of a conversation once it is on screen.
     func clearConversation(_ address: String, then done: (() -> Void)? = nil) {
         let thread = "sms-\(PhoneIdentity.key(address))"
