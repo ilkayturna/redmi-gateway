@@ -299,8 +299,11 @@ final class HistoryStore: ObservableObject {
         calls.filter { isUnseenMissed($0) }.count
     }
 
-    /// Recents is on screen: every missed call listed is seen.
+    /// Recents is on screen: every missed call listed is seen, and its notifications go.
     func markMissedSeen() {
+        // Delivered banners go even when nothing here is unseen: a pushed missed call can sit in
+        // Notification Center before its journal entry has arrived.
+        Notifier.shared.clearMissedCalls()
         loadIfNeeded()
         missedSeenAt = Date()
         scheduleSave()
@@ -375,6 +378,10 @@ final class HistoryStore: ObservableObject {
                 && abs(messages[$0].date.timeIntervalSince(date)) < 600
         }
         guard let oldest = matches.min(by: { messages[$0].date < messages[$1].date }) else { return }
+        if status != .failed, let requestId = messages[oldest].requestId {
+            // It went out after all: a "Gönderilemedi" notification for it is no longer true.
+            Notifier.shared.clearSendFailure(requestId: requestId)
+        }
         messages.remove(at: oldest)
     }
 
@@ -402,8 +409,14 @@ final class HistoryStore: ObservableObject {
         // No copy left: the journal entry of the message already replaced it, which settles it.
         guard let index = messages.firstIndex(where: { $0.requestId == requestId && $0.gatewayId == nil }) else { return }
         if !success, messages[index].status == .sent { return }
+        let wasFailed = messages[index].status == .failed
         messages[index].status = success ? .sent : .failed
         scheduleSave()
+        if success {
+            if wasFailed { Notifier.shared.clearSendFailure(requestId: requestId) }
+        } else if !wasFailed {
+            Notifier.shared.postSendFailed(messages[index])
+        }
     }
 
     /// The pending copy of a send from this iPhone, while no journal entry has replaced it.

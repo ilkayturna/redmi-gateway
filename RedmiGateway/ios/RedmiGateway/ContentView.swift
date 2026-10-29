@@ -33,15 +33,13 @@ struct ContentView: View {
             AudioEngine.shared.requestMicrophonePermission()
             connection.start()
             offerCallWake()
+            // A notification tapped while the app was not running sets its route before this view
+            // exists, and onChange does not fire for a value that was already there.
+            if let route = router.pending { follow(route) }
         }
         .onChange(of: connection.pairing != nil) { _ in offerCallWake() }
         .onChange(of: router.pending) { route in
-            guard let route else { return }
-            router.pending = nil
-            switch route {
-            case .messages(let address): openMessages(address)
-            case .recents: selectedTabRaw = AppTab.recents.rawValue
-            }
+            if let route { follow(route) }
         }
         // A call chosen in iOS Recents or Contacts for this app.
         .onContinueUserActivity("INStartCallIntent") { activity in
@@ -129,6 +127,17 @@ struct ContentView: View {
     private func openMessages(_ number: String) {
         messageTarget = number
         selectedTabRaw = AppTab.messages.rawValue
+    }
+
+    /// Where a tapped notification leads.
+    private func follow(_ route: AppRoute) {
+        router.pending = nil
+        switch route {
+        case .messages(let address): openMessages(address)
+        case .conversations: selectedTabRaw = AppTab.messages.rawValue
+        case .recents: selectedTabRaw = AppTab.recents.rawValue
+        case .settings: openSettings()
+        }
     }
 }
 
@@ -363,6 +372,7 @@ struct FavoritesView: View {
 struct RecentsView: View {
     @ObservedObject private var history = HistoryStore.shared
     @ObservedObject private var directory = PhoneContactDirectory.shared
+    @Environment(\.scenePhase) private var scenePhase
     let openSettings: () -> Void
     let openMessages: (String) -> Void
     @State private var missedOnly = false
@@ -412,7 +422,17 @@ struct RecentsView: View {
         }
         .onAppear {
             directory.ensureLoaded()
+            history.recentsVisible = true
             history.markMissedSeen()
+        }
+        .onDisappear { history.recentsVisible = false }
+        // onAppear does not run again for a tab that is already on screen: coming back to the app
+        // on Recents, or a missed call arriving while it is shown, counts as seen as well.
+        .onChange(of: scenePhase) { phase in
+            if phase == .active, history.recentsVisible { history.markMissedSeen() }
+        }
+        .onChange(of: history.unseenMissedCount) { count in
+            if count > 0, history.recentsVisible, scenePhase == .active { history.markMissedSeen() }
         }
     }
 }

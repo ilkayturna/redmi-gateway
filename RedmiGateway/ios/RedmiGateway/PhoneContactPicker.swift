@@ -46,11 +46,57 @@ final class PhoneContactDirectory: ObservableObject {
     private var byKey: [String: PhoneContact] = [:]
     private let store = CNContactStore()
     private var hasLoaded = false
+    private var refetchScheduled = false
     private let kFavorites = "favorites_v2"
     private let kLegacyFavorites = "favorite_numbers"
 
     private init() {
         loadFavorites()
+        // A contact added or renamed in Apple's Contacts app shows at once in Recents, Messages and
+        // the call screen, as in Phone and Messages; it used to wait for the app to be killed.
+        NotificationCenter.default.addObserver(forName: .CNContactStoreDidChange, object: nil, queue: .main) { _ in
+            Task { @MainActor in PhoneContactDirectory.shared.contactsChanged() }
+        }
+        // A background launch leaves the list unread (no tab has appeared); it is read once the app
+        // is on screen, where the full read costs nothing visible.
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { _ in
+            Task { @MainActor in PhoneContactDirectory.shared.loadIfAuthorized() }
+        }
+    }
+
+    /// Whether contacts can be read without asking: never ask from the background, where the
+    /// prompt would wait unseen.
+    nonisolated static var canReadWithoutPrompt: Bool {
+        let status = CNContactStore.authorizationStatus(for: .contacts)
+        if status == .authorized { return true }
+        if #available(iOS 18.0, *) { return status == .limited }
+        return false
+    }
+
+    /// Loads contacts when access was already granted; never asks.
+    func loadIfAuthorized() {
+        guard !hasLoaded, Self.canReadWithoutPrompt else { return }
+        authorization = CNContactStore.authorizationStatus(for: .contacts)
+        fetch()
+    }
+
+    /// Several changes often come together (an iCloud sync); one read after them is enough.
+    private func contactsChanged() {
+        guard hasLoaded, !refetchScheduled else { return }
+        refetchScheduled = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            let directory = PhoneContactDirectory.shared
+            directory.refetchScheduled = false
+            directory.authorization = CNContactStore.authorizationStatus(for: .contacts)
+            guard directory.canRead else {
+                GatewayConnection.shared.log("Contacts changed, but access is no longer granted; not read again")
+                return
+            }
+            directory.fetch()
+        }
     }
 
     /// Loads contacts, asking for access the first time. Only called from visible UI.
@@ -99,6 +145,37 @@ final class PhoneContactDirectory: ObservableObject {
     func displayName(for number: String) -> String {
         if number.isEmpty { return "Gizli numara" }
         return name(for: number) ?? PhoneIdentity.formatted(number)
+    }
+
+    /// Numbers a notification has to look up itself because the list is not loaded: after a
+    /// background relaunch (Bluetooth, a push) no tab has appeared, and the full read with photos
+    /// is left for the foreground. Empty once the list is loaded, and without granted access.
+    func numbersNeedingLookup(_ numbers: [String]) -> [String] {
+        guard byKey.isEmpty, Self.canReadWithoutPrompt else { return [] }
+        return Array(Set(numbers.filter { !$0.isEmpty }))
+    }
+
+    /// Names for the given numbers straight from the contact store, one query per number. Called
+    /// off the main thread before a notification is posted.
+    nonisolated static func lookUpNames(_ numbers: [String]) -> [String: String] {
+        guard !numbers.isEmpty else { return [:] }
+        let store = CNContactStore()
+        let keys = [CNContactFormatter.descriptorForRequiredKeys(for: .fullName)]
+        var names: [String: String] = [:]
+        for number in numbers {
+            let predicate = CNContact.predicateForContacts(matching: CNPhoneNumber(stringValue: number))
+            guard let match = (try? store.unifiedContacts(matching: predicate, keysToFetch: keys))?.first,
+                  let name = CNContactFormatter.string(from: match, style: .fullName), !name.isEmpty else { continue }
+            names[number] = name
+        }
+        return names
+    }
+
+    /// One number's name while the list is not loaded yet (the Redmi's resolve_contact).
+    func lookUpName(_ number: String) -> String? {
+        let pending = numbersNeedingLookup([number])
+        guard !pending.isEmpty else { return nil }
+        return Self.lookUpNames(pending)[number]
     }
 
     private func fetch() {
