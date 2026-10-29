@@ -58,6 +58,11 @@ final class AudioEngine {
     private var rxLastCounter: UInt32 = 0
     private var playbackBuffer = CallAudioPlaybackBuffer<Data>()
     private var lastDownlink: Date?
+    /// When the last downlink frame arrived, readable from the main queue: the control link asks
+    /// whether call audio still flows before it declares the Redmi gone (lastDownlink belongs to
+    /// the network queue).
+    private let mediaClockLock = NSLock()
+    private var lastDownlinkUptime: TimeInterval = 0
     /// Counter of the last downlink packet that carried PCM, used to decide whether the copy in a
     /// redundant (type 2) packet is a frame that never arrived.
     private var lastPcmRxCounter: UInt32 = 0
@@ -438,6 +443,7 @@ final class AudioEngine {
             self.pendingSends = 0
             self.playbackBuffer.reset()
             self.lastDownlink = nil
+            self.setDownlinkClock(0)
             // A new stream starts with nothing to repeat: the first packet carries one frame.
             self.lastSentPcm = nil
             self.lastPcmSentAt = Date()
@@ -622,6 +628,7 @@ final class AudioEngine {
             self.playbackBuffer.reset()
             self.lastPcmSentAt = nil
             self.lastDownlink = nil
+            self.setDownlinkClock(0)
             self.loggedPlaybackDrops = 0
         }
     }
@@ -827,9 +834,24 @@ final class AudioEngine {
         }
     }
 
+    /// Seconds since the Redmi's last audio frame, or nil when none arrived since the engine started.
+    var secondsSinceDownlink: TimeInterval? {
+        mediaClockLock.lock()
+        defer { mediaClockLock.unlock() }
+        guard lastDownlinkUptime > 0 else { return nil }
+        return Self.monotonicNow() - lastDownlinkUptime
+    }
+
+    private func setDownlinkClock(_ uptime: TimeInterval) {
+        mediaClockLock.lock()
+        lastDownlinkUptime = uptime
+        mediaClockLock.unlock()
+    }
+
     private func enqueuePlayback(_ pcm: Data) {
         let now = Date()
         lastDownlink = now
+        setDownlinkClock(Self.monotonicNow())
         for frame in playbackBuffer.enqueue(pcm, now: Self.monotonicNow()) {
             schedulePlayback(frame)
         }

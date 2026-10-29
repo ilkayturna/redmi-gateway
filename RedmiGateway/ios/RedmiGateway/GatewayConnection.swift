@@ -495,6 +495,8 @@ public final class GatewayConnection: ObservableObject {
 
     private var probeCounter = 0
     private var lastAnsweredProbe = 0
+    /// Missed probes in a row while call audio still arrived; logged on the first and every 15th.
+    private var probeMissesWithAudio = 0
 
     /// Pings the Redmi and drops the socket when no pong arrives within `deadline` seconds.
     ///
@@ -508,7 +510,10 @@ public final class GatewayConnection: ObservableObject {
         task.sendPing { error in
             Task { @MainActor in
                 let connection = GatewayConnection.shared
-                if probe > connection.lastAnsweredProbe { connection.lastAnsweredProbe = probe }
+                if probe > connection.lastAnsweredProbe {
+                    connection.lastAnsweredProbe = probe
+                    connection.probeMissesWithAudio = 0
+                }
                 if error != nil { connection.handleDrop(task) }
             }
         }
@@ -516,6 +521,19 @@ public final class GatewayConnection: ObservableObject {
             try? await Task.sleep(nanoseconds: UInt64(deadline * 1_000_000_000))
             guard let self, self.lastAnsweredProbe < probe, self.webSocketTask === task,
                   self.state == .authenticated else { return }
+            // The control socket is TCP: after a burst of loss it can stall for seconds while the
+            // call audio, on UDP, already flows again. The Redmi keeps the audio here as long as
+            // frames arrive (CallAudioRelay.onControlLinkLost), and dropping the socket stops the
+            // engine, so a slow pong must not cut a working conversation. A link with no audio
+            // either is the dead one.
+            if let age = AudioEngine.shared.secondsSinceDownlink, age < 1.0 {
+                self.probeMissesWithAudio += 1
+                if self.probeMissesWithAudio % 15 == 1 {
+                    self.log("Link probe (\(reason)): no answer in \(Int(deadline * 1000)) ms but call audio " +
+                             "still arrives; keeping the link (\(self.probeMissesWithAudio) in a row)")
+                }
+                return
+            }
             self.log("Link probe (\(reason)): no answer in \(Int(deadline * 1000)) ms; reconnecting")
             self.handleDrop(task)
         }
