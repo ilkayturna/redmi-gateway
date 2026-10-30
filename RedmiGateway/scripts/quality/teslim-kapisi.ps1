@@ -248,8 +248,19 @@ if ($Cihaz) {
 # ---------------------------------------------------------------- hotspot kabul testi
 # AGENTS.md 0.5: adb Wi-Fi uzerindeyken Wi-Fi kapatilirsa 'svc wifi enable' cihaza ulasamaz ve
 # Redmi agdan duser (25.10.2026). Bu test yalnizca USB ile calisir.
+# AGENTS.md 0.6: Wi-Fi'i kapatmak VoWiFi aramayi dusurur. Bos cevap "arama yok" degil "bilinmiyor"dur.
+function AramaVarMi {
+    $telecom = (& $Adb -s $Seri shell 'dumpsys telecom' 2>$null) | Out-String
+    if ($telecom -notmatch 'mCalls:') { return $true }
+    $blok = ($telecom -split 'mCallAudioManager')[0]
+    $blok = ($blok -split 'mCalls:')[-1]
+    return ($blok -match 'state=[A-Z_]+')
+}
+
 if ($Cihaz -and $Hotspot -and (WifiSeriMi $Seri)) {
     Kapi 'hotspot otomatik' 'ATLANDI' ('adb Wi-Fi uzerinden (' + $Seri + '); Wi-Fi testi yalnizca USB ile yapilir')
+} elseif ($Cihaz -and $Hotspot -and (Test-Path $Adb) -and (AramaVarMi)) {
+    Kapi 'hotspot otomatik' 'ATLANDI' 'arama var ya da arama durumu okunamadi; Wi-Fi kapatilmadi'
 } elseif ($Cihaz -and $Hotspot -and (Test-Path $Adb)) {
     Write-Host ''
     Write-Host '=== 5) HOTSPOT KABUL TESTI (Wi-Fi ~20 s kapanir) ===' -ForegroundColor Cyan

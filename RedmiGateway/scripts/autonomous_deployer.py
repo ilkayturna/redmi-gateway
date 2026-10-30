@@ -23,6 +23,10 @@ MAGISK_APK = os.path.join(REPO_ROOT, "root", "Magisk.apk")
 GATEWAY_APK = os.path.join(REPO_ROOT, "android", "app", "build", "outputs", "apk", "debug",
                            "app-debug.apk")
 VERIFY_SCRIPT = os.path.join(SCRIPT_DIR, "verify_root.sh")
+# adb install bu betikte dogrudan calismaz: 29.10.2026'da aktif arama sirasinda yapilan kurulum
+# aramayi ROM'un telefon uygulamasina dusurdu ve ses iPhone'a donmedi. guvenli-kur.ps1 arama varken,
+# durum okunamazken ya da birden fazla cihaz bagliyken kurmaz, kurduktan sonra dogrular.
+GUARDED_INSTALL = os.path.join(SCRIPT_DIR, "device", "guvenli-kur.ps1")
 LOG_FILE = os.path.join(REPO_ROOT, "docs", "autonomous_deployer.log")
 
 
@@ -102,8 +106,12 @@ def deploy():
 
     log("--- Step 3: Installing RedmiGateway APK ---")
     if apk_is_sane(GATEWAY_APK, "Gateway APK"):
-        rc, out, err = run([ADB, "-s", serial, "install", "-r", "-g", GATEWAY_APK])
-        log(f"Gateway APK install: {out} {err}")
+        rc, out, err = run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", GUARDED_INSTALL,
+                            "-Seri", serial, "-Apk", GATEWAY_APK], timeout=240)
+        log(f"Gateway APK install (exit {rc}): {out} {err}")
+        if rc != 0:
+            log("Gateway APK not installed; stopping before anything else touches the phone.")
+            return
     else:
         log("Gateway APK NOT installed: refusing a stale or missing path. "
             "Build it first with .\\gradlew.bat assembleDebug")

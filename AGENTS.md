@@ -166,6 +166,11 @@ Liste **boş** değilse işlem **yapılmaz**. Ek kanıt: tanılama dosyasının 
 Komut **hiç çıktı vermezse** bu "arama yok" değil **"bilinmiyor"**dur: işlem yapılmaz, kontrol tekrarlanır
 (25.10.2026 15:09'da betik boş döndü ve boş "0" sayıldı; o an şans eseri arama yoktu).
 
+**Kurulum yalnızca `RedmiGateway/scripts/device/guvenli-kur.ps1` ile yapılır.** Arama varken, durum
+okunamazken ya da birden fazla cihaz bağlıyken kurmaz, kurduktan sonra sürüm, izin, süreç ve rolü
+doğrular. 29.10.2026 13:51'de kontrol satırı ACTIVE arama gösterdiği halde aynı komut zincirindeki
+`adb install` çalıştı: arama ROM'un telefon uygulamasına düştü, 84 çökme oldu, ses iPhone'a dönmedi.
+
 ## Genel ders
 **Not almak = düzeltmek değildir.** Kural, **kullanılmadıkça** hiçbir şeyi engellemez.
 Bu yüzden bu bölüm dosyanın **en başında**, kural 0'ın içinde duruyor: her oturumda,

@@ -86,7 +86,8 @@ jobs:
           CERT_SERIAL="$serial" "$RUNNER_TEMP/ascenv/bin/python" scripts/testflight_refresh_needed.py
       # The scheduled release builds the moving tag testflight/known-good, never main HEAD: an
       # unattended upload must not ship a change that has not passed a real call test (AGENTS 6.1).
-      # Without the tag the refresh is skipped with a warning rather than failing every week.
+      # Without the tag nothing is built, and a refresh that is due then fails the run on purpose:
+      # a warning reaches nobody, the failure mail does, and the app stops opening when it expires.
       - name: Find the known-good source
         id: source
         shell: bash
@@ -105,9 +106,10 @@ jobs:
               ;;
             2)
               message='A refresh is due but the tag testflight/known-good does not exist, so nothing was built. Point the tag at the commit of a build that passed a real call test; the next weekly run uploads it.'
-              echo "::warning title=TestFlight refresh skipped::$message"
+              echo "::error title=TestFlight refresh skipped::$message"
               echo "- **Skipped:** $message" >> "$GITHUB_STEP_SUMMARY"
               echo 'needed=false' >> "$GITHUB_OUTPUT"
+              exit 1
               ;;
             *)
               echo "::error title=TestFlight refresh::Could not read the tags of origin (git exit $rc)."

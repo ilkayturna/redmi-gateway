@@ -2242,10 +2242,18 @@ public final class NWGatewayDiscovery {
             parameters.includePeerToPeer = true
             let browser = NWBrowser(for: .bonjour(type: "_redmigateway._tcp", domain: "local."), using: parameters)
             self.browser = browser
-            browser.stateUpdateHandler = { [weak self] state in
+            browser.stateUpdateHandler = { [weak self, weak browser] state in
                 switch state {
                 case .failed, .cancelled:
-                    self?.queue.async { self?.isSearching = false }
+                    // Only the current browser ends the search. A network change runs stop() then
+                    // start(), and the old browser's late .cancelled cleared isSearching for the new
+                    // one: the next stop() did nothing and the next start() left another running.
+                    self?.queue.async {
+                        guard let self, self.browser === browser else { return }
+                        self.browser?.cancel()
+                        self.browser = nil
+                        self.isSearching = false
+                    }
                 default:
                     break
                 }

@@ -29,6 +29,10 @@ LOG_FILE = os.path.join(REPO_ROOT, "docs", "watch_and_configure.log")
 REPO_APK = os.path.join(REPO_ROOT, "android", "app", "build", "outputs", "apk", "debug",
                         "app-debug.apk")
 MAGISK_APK = os.path.join(REPO_ROOT, "root", "Magisk.apk")
+# adb install bu betikte dogrudan calismaz: 29.10.2026'da aktif arama sirasinda yapilan kurulum
+# aramayi ROM'un telefon uygulamasina dusurdu ve ses iPhone'a donmedi. guvenli-kur.ps1 arama varken,
+# durum okunamazken ya da birden fazla cihaz bagliyken kurmaz, kurduktan sonra dogrular.
+GUARDED_INSTALL = os.path.join(SCRIPT_DIR, "device", "guvenli-kur.ps1")
 
 PERMISSIONS = [
     "android.permission.READ_PHONE_STATE",
@@ -105,9 +109,15 @@ def install_gateway_apk():
         log("Derleyin: .\\gradlew.bat assembleDebug   (sessizce ESKI bir APK kurulmaz)")
         return False
     log(f"Installing gateway APK from this repo: {REPO_APK}")
-    res = run([ADB, "install", "-r", "-g", REPO_APK])
-    log(f"Gateway install result: {res}")
-    return "Success" in res
+    try:
+        done = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                               GUARDED_INSTALL, "-Apk", REPO_APK],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=240)
+    except Exception as e:
+        log(f"Gateway install could not run: {e}")
+        return False
+    log(f"Gateway install result (exit {done.returncode}): {done.stdout.strip()}")
+    return done.returncode == 0
 
 
 def main():

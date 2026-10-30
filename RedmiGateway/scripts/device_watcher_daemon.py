@@ -36,8 +36,8 @@ while True:
         elif "17df6357" in adb_out and "device" in adb_out and adb_out != last_adb:
             log(f"EVENT: Device 17df6357 detected in ADB mode:\n{adb_out}")
             last_adb = adb_out
-            log("Sending: adb reboot bootloader...")
-            subprocess.run([ADB, "reboot", "bootloader"], timeout=10)
+            # Eskiden burada kendiliginden `adb reboot bootloader` vardi: Redmi kabloya takildigi
+            # anda, arama surerken bile telefonu yeniden baslatirdi. Izleyici yalniz kayit tutar.
 
     except Exception as e:
         log(f"Poll error: {e}")
