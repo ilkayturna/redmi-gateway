@@ -11,8 +11,8 @@ android {
         applicationId = "com.ilkay.redmigateway"
         minSdk = 26
         targetSdk = 34
-        versionCode = 224
-        versionName = "2.0.24"
+        versionCode = 225
+        versionName = "2.0.25"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

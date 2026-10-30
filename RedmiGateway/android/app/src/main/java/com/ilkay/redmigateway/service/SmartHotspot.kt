@@ -243,10 +243,14 @@ object SmartHotspot {
             when {
                 wifi -> {
                     Log.i(TAG, "Joined $ssid; hotspot stays off")
+                    com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Joined $ssid; hotspot stays off")
                     trying = null
                 }
                 now > tryDeadline -> {
                     Log.i(TAG, "Could not join $ssid; hotspot back on")
+                    // HotspotRestarter drops a repeat within two minutes, so on 30.10.2026 07:08 the
+                    // file read as if the hotspot had stayed off for two hours.
+                    com.ilkay.redmigateway.journal.DiagnosticsLog.record(TAG, "Could not join $ssid; hotspot back on")
                     backoff[ssid] = now + BACKOFF_MS
                     trying = null
                     HotspotRestarter.startIfNeeded(context)

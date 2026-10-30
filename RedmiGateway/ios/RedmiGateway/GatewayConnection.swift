@@ -331,8 +331,23 @@ public final class GatewayConnection: ObservableObject {
     private func connectToBestEndpoint() {
         var list: [Endpoint] = []
         if let manual = manualAddress { list.append(Endpoint(host: manual.host, port: manual.port)) }
+        list += networkRouter
         list += candidates
         race(list)
+    }
+
+    /// The router of the network the iPhone is on. On the Redmi's hotspot that router is the Redmi,
+    /// so this finds it with no saved address, no Bonjour and no Bluetooth. On 30.10.2026 08:06 the
+    /// hotspot was up, Bluetooth was broken and the hotspot's address was not among the saved ones:
+    /// the iPhone rang, had no way to the Redmi and the answer was refused. Any other router simply
+    /// does not answer on this port, and only an address that answers is remembered.
+    private var networkRouter: [Endpoint] {
+        pathMonitor.currentPath.gateways.compactMap { gateway in
+            guard case let .hostPort(host, _) = gateway, case let .ipv4(ip) = host else { return nil }
+            var address = "\(ip)"
+            if let percent = address.firstIndex(of: "%") { address = String(address[..<percent]) }
+            return Endpoint(host: address, port: currentPort)
+        }
     }
 
     private func endpointsFound(_ hosts: [String], port: Int, deviceId: String?, source: String) {
@@ -455,6 +470,9 @@ public final class GatewayConnection: ObservableObject {
             webSocketTask = task
             currentHost = endpoint.host
             currentPort = endpoint.port
+            if !candidates.contains(endpoint), networkRouter.contains(endpoint) {
+                log("Redmi address found via the network's router")
+            }
             remember([endpoint])
             switch message {
             case .string(let text): handleFrame(text)
@@ -1543,6 +1561,7 @@ public final class GatewayConnection: ObservableObject {
                 let signature = "\(path.status)|" + path.availableInterfaces.map { $0.name }.joined(separator: ",")
                 guard signature != connection.lastPathSignature else { return }
                 connection.lastPathSignature = signature
+                connection.log("Network router: \(connection.networkRouter.first?.host ?? "none")")
                 if path.status == .satisfied {
                     // New network: find the Redmi's addresses again and check the current link.
                     connection.ignoredHosts.removeAll()

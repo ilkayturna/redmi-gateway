@@ -52,6 +52,8 @@ final class CallKitManager: NSObject, CXProviderDelegate {
     private var holdRequestedAt: [UUID: Date] = [:]
     /// Waiting calls "Beklet ve yanıtla" is answering; the answer keeps the current call on hold.
     private var answerHoldingCurrent: Set<UUID> = []
+    /// Calls whose Yanıtla reached neither link; the end CallKit then asks for is not a decline.
+    private var answerRefused: Set<UUID> = []
     /// Waiting calls answered here with the current call kept on hold, and when; see the "ringing"
     /// case in handleGatewayCallEvent.
     private var holdAnswerAt: [UUID: Date] = [:]
@@ -256,6 +258,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         heldForAddedCall.remove(uuid)
         holdRequestedAt.removeValue(forKey: uuid)
         answerHoldingCurrent.remove(uuid)
+        answerRefused.remove(uuid)
         holdAnswerAt.removeValue(forKey: uuid)
         if pendingOutgoing == uuid {
             pendingOutgoing = nil
@@ -1301,6 +1304,7 @@ final class CallKitManager: NSObject, CXProviderDelegate {
             connection.lastCallError = "Redmi'ye ulaşılamadı; arama Redmi'de çalıyor."
             if !rawId.isEmpty, states[uuid] == "ringing" {
                 // The call still rings on the Redmi: bring the link back so the next tap can reach it.
+                answerRefused.insert(uuid)
                 connection.reconnectNow(reason: "answer without a link")
             }
             action.fail()
@@ -1431,7 +1435,13 @@ final class CallKitManager: NSObject, CXProviderDelegate {
         let connection = GatewayConnection.shared
         // Ends asked by CallKit itself are not told apart from a tap; the line says which call it was.
         connection.log("CallKit end for call \(rawId.prefix(8)) (\(state), \(incoming.union(outgoing).count) call(s) here)")
-        if !rawId.isEmpty, !rawId.hasPrefix("outgoing_") {
+        if answerRefused.contains(uuid) {
+            // action.fail() on the answer made CallKit end the call. On 30.10.2026 08:06 this end
+            // became a kept reject, which would have declined the caller the person had just tried
+            // to answer if the link had come back while it rang. The call rings on at the Redmi, and
+            // kept out of endedCallIds it rings here again when the link returns.
+            connection.log("Answer reached nothing; the call rings on at the Redmi, no reject")
+        } else if !rawId.isEmpty, !rawId.hasPrefix("outgoing_") {
             if state == "ringing" {
                 connection.sendReject(callId: rawId)
             } else {
